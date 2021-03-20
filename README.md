@@ -18,15 +18,16 @@ I'm not responsible for the data stored using chunkdisk!
     512 C:\part2
     ```
 
-5. Right-click the file in File Explorer and choose "Mount".
-6. Run `diskmgmt.msc` to open Disk Management, [initialize the disk](https://docs.microsoft.com/en-us/windows-server/storage/disk-management/initialize-new-disks) and [create a partition](https://support.microsoft.com/en-us/windows/create-and-format-a-hard-disk-partition-bbb8e185-1bda-ecd1-3465-c9728f7d7d2e).
-7. To dismount, right-click the drive in File Explorer and choose "Eject".
+5. Create directories specified in the file, for example: C:\part1, C:\part2.
+6. Right-click the file in File Explorer and choose "Mount".
+7. Run `diskmgmt.msc` to open Disk Management, [initialize the disk](https://docs.microsoft.com/en-us/windows-server/storage/disk-management/initialize-new-disks) and [create a partition](https://support.microsoft.com/en-us/windows/create-and-format-a-hard-disk-partition-bbb8e185-1bda-ecd1-3465-c9728f7d7d2e).
+8. To dismount, right-click the drive in File Explorer and choose "Eject".
 
 ## WARNINGS
 
-* MAKE A BACKUP of `.chunkdisk` file. Chunkdisk reads it only once when it's mounted. It can be read, modified and even deleted while the disk is mounted.
+* MAKE A BACKUP of `.chunkdisk` file. Chunkdisk reads it only once when it's mounted. It can be read, modified and even deleted by others while the disk is mounted.
 * DO NOT add, remove and move around chunk files when the disk is mounted. Doing so confuses chunkdisk and causes I/O errors.
-* Chunks in use (or recently used) are write-protected. You may read chunks anytime, but you SHOULD NOT modify them directly when the disk is mounted.
+* Chunks in use (or recently used) are write-protected. You may read chunks anytime (may not be up to date), but you SHOULD NOT modify them directly when the disk is mounted.
 
 ## `.chunkdisk` File Specs
 
@@ -38,6 +39,7 @@ I'm not responsible for the data stored using chunkdisk!
 ...
 ```
 
+* UTF-8 encoding
 * Disk size and chunk size must be a multiple of 512.
 * The sum of max. number of chunks must be at least (Disk size) / (Chunk size) + surplus (0 ~ 1).
 
