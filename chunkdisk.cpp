@@ -252,9 +252,9 @@ private:
 
 struct SRWLockExclusive
 {
-    SRWLockExclusive(PSRWLOCK lock) : lock_(lock) { AcquireSRWLockExclusive(lock_); }
+    SRWLockExclusive(PSRWLOCK lock) noexcept : lock_(lock) { AcquireSRWLockExclusive(lock_); }
 
-    virtual ~SRWLockExclusive() { ReleaseSRWLockExclusive(lock_); }
+    virtual ~SRWLockExclusive() noexcept { ReleaseSRWLockExclusive(lock_); }
 
 private:
     PSRWLOCK lock_;
@@ -440,10 +440,6 @@ struct ChunkDisk
             mapping = result;
             return ERROR_SUCCESS;
         }
-        catch (const std::system_error& e)
-        {
-            return e.code().value();
-        }
         catch (const std::bad_alloc&)
         {
             return ERROR_NOT_ENOUGH_MEMORY;
@@ -482,10 +478,6 @@ struct ChunkDisk
             if (!SetEndOfFile(h.get())) return GetLastError();
 
             return ERROR_SUCCESS;
-        }
-        catch (const std::system_error& e)
-        {
-            return e.code().value();
         }
         catch (const std::bad_alloc&)
         {
