@@ -288,7 +288,7 @@ struct ChunkDisk
     const u32 chunk_mmax = 1;                                   // max. # of FileMapping's
     unordered_map<u64, shared_ptr<FileMapping>> chunk_maps;     // chunk index -> FileMapping
     // chunk_maps insertion order
-    // NOTE: there may be duplicates due to ChunkUnmap().
+    // NOTE: elements not removed for simplicity (expect not to be reused soon), there may be duplicates!
     deque<u64> chunk_horder;
 
     ChunkDisk(u64 block_count, u32 block_size, u64 chunk_count, u64 chunk_length,
@@ -464,8 +464,6 @@ struct ChunkDisk
                 if (map_it->second.use_count() > 1) return ERROR_SHARING_VIOLATION;
 
                 chunk_maps.erase(map_it);
-                // don't remove it from chunk_horder for simplicity
-                // expect it will not be rewritten soon and be erased from chunk_horder silently
             }
 
             u32 part_idx = part_it->second;
