@@ -210,19 +210,18 @@ struct FileMapping
         // flush dirty pages to disk
         if (!FlushViewOfFile(recast<u8*>(mapping_.get()) + off, len)) return GetLastError();
         // already set_write()
-        if (off != 0 || len != 0)
-        {
-            // updated the last modified time,
-            // let Windows handle other metadata and buffers
-            return TouchFile();
-        }
-        else
+
+        if (off == 0 && len == 0)
         {
             TouchFile();
             // NOTE: all buffers to the file (not written by file_handle_) are flushed
             if (!FlushFileBuffers(file_handle_.get())) return GetLastError();
             return ERROR_SUCCESS;
         }
+
+        // updated the last modified time,
+        // let Windows handle other metadata and buffers
+        return TouchFile();
     }
 
 private:
