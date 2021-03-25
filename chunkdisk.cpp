@@ -177,7 +177,9 @@ struct FileMapping
     {
         mapping_.reset();
         mapping_handle_.reset();
-        FlushFileBuffers(file_handle_.get());
+        // updated the last modified time,
+        // let Windows handle other metadata and buffers
+        if (this->is_write_) TouchFile();
         file_handle_.reset();
     }
 
@@ -200,21 +202,34 @@ struct FileMapping
 
     auto get() const noexcept { return mapping_.get(); }
 
+    void set_write() { this->is_write_ = true; }
+
     DWORD Flush(size_t off, size_t len)
     {
         if (!*this) return ERROR_INVALID_HANDLE;
         // flush dirty pages to disk
         if (!FlushViewOfFile(recast<u8*>(mapping_.get()) + off, len)) return GetLastError();
-        // NOTE: all buffers to the file (not written by file_handle_) are flushed?
-        if (!FlushFileBuffers(file_handle_.get())) return GetLastError();
-        // data are being written by Windows...
-        return ERROR_SUCCESS;
+        // already set_write()
+        if (off != 0 || len != 0)
+        {
+            // updated the last modified time,
+            // let Windows handle other metadata and buffers
+            return TouchFile();
+        }
+        else
+        {
+            TouchFile();
+            // NOTE: all buffers to the file (not written by file_handle_) are flushed
+            if (!FlushFileBuffers(file_handle_.get())) return GetLastError();
+            return ERROR_SUCCESS;
+        }
     }
 
 private:
     FileHandle file_handle_;
     FileHandle mapping_handle_;
     unique_ptr<void, FileMappingDeleter> mapping_;
+    bool is_write_ = false;
 
     friend void swap(FileMapping& a, FileMapping& b) noexcept
     {
@@ -222,6 +237,16 @@ private:
         swap(a.file_handle_, b.file_handle_);
         swap(a.mapping_handle_, b.mapping_handle_);
         swap(a.mapping_, b.mapping_);
+    }
+
+    DWORD TouchFile()
+    {
+        SYSTEMTIME st;
+        FILETIME ft;
+        GetSystemTime(&st);
+        SystemTimeToFileTime(&st, &ft);
+        if (!SetFileTime(file_handle_.get(), nullptr, nullptr, &ft)) return GetLastError();
+        return ERROR_SUCCESS;
     }
 };
 
@@ -273,6 +298,7 @@ struct ChunkDisk
 
     virtual ~ChunkDisk()
     {
+        FlushAll();
         if (storage_unit != nullptr) SpdStorageUnitDelete(storage_unit);
     }
 
@@ -335,6 +361,7 @@ struct ChunkDisk
             auto map_it = chunk_maps.find(chunk_idx);
             if (map_it != chunk_maps.end()) {
                 // cache hit
+                if (is_write) map_it->second->set_write();
                 mapping = map_it->second;
                 return ERROR_SUCCESS;
             }
@@ -398,6 +425,7 @@ struct ChunkDisk
 
             auto result = std::make_shared<FileMapping>(std::move(h));
             if (!*result) return GetLastError();
+            if (is_write) result->set_write();
 
             while (chunk_maps.size() >= chunk_mmax)
             {
@@ -467,11 +495,15 @@ struct ChunkDisk
 
     DWORD FlushAll()
     {
+        auto g = SRWLockExclusive(&mut);
+
         DWORD err = ERROR_SUCCESS;
         for (auto& m : chunk_maps)
         {
             if (m.second->Flush(0, 0) != ERROR_SUCCESS) err = 1;
         }
+        if (err == ERROR_SUCCESS) chunk_maps.clear();
+
         return err;
     }
 };
@@ -589,7 +621,14 @@ static DWORD InternalFlushChunk(ChunkDisk* cdisk, SPD_STORAGE_UNIT_STATUS* statu
         return 1;
     }
 
-    err = mapping->Flush(start_off * cdisk->block_size, (end_off - start_off) * cdisk->block_size);
+    if (start_off == 0 && end_off == cdisk->chunk_length)
+    {
+        err = mapping->Flush(0, 0);
+    }
+    else
+    {
+        err = mapping->Flush(start_off * cdisk->block_size, (end_off - start_off) * cdisk->block_size);
+    }
     if (err != ERROR_SUCCESS)
     {
         SpdStorageUnitStatusSetSense(status, SCSI_SENSE_MEDIUM_ERROR,
@@ -866,7 +905,7 @@ static DWORD ReadChunkDiskFile(PCWSTR cdisk_path, unique_ptr<ChunkDisk>& cdisk)
             chunk_length,
             std::move(part_max),
             std::move(part_dirname),
-            max(1, 0x400000 / chunk_length) /* up to 2 GB */);
+            max(1, 0x200000 / chunk_length) /* up to 1 GB */);
         cdisk = std::move(new_disk);
     }
     catch (const std::bad_alloc&)
