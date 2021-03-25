@@ -214,6 +214,7 @@ struct FileMapping
         if (off == 0 && len == 0)
         {
             TouchFile();
+            // explicit flush, make sure all writes are flushed
             // NOTE: all buffers to the file (not written by file_handle_) are flushed
             if (!FlushFileBuffers(file_handle_.get())) return GetLastError();
             return ERROR_SUCCESS;
@@ -445,6 +446,28 @@ struct ChunkDisk
         }
     }
 
+    // flush and close the chunk
+    DWORD ChunkClose(u64 chunk_idx)
+    {
+        if (chunk_idx >= chunk_count) { return ERROR_INVALID_PARAMETER; }
+
+        auto g = SRWLockExclusive(&mut);
+
+        auto map_it = chunk_maps.find(chunk_idx);
+        if (map_it == chunk_maps.end()) {
+            // nothing to do
+            return ERROR_SUCCESS;
+        }
+
+        auto& mapping = map_it->second;
+        mapping->set_write();   // just in case
+        auto err = mapping->Flush(0, 0);
+        if (err != ERROR_SUCCESS) return err;
+
+        chunk_maps.erase(map_it);
+        return ERROR_SUCCESS;
+    }
+
     // empty chunk
     DWORD ChunkUnmap(u64 chunk_idx)
     {
@@ -482,18 +505,27 @@ struct ChunkDisk
         }
     }
 
-    DWORD FlushAll()
+    // flush (if necessary) and close all chunks >= chunk_idx
+    DWORD FlushAll(u64 chunk_idx = 0)
     {
         auto g = SRWLockExclusive(&mut);
 
-        DWORD err = ERROR_SUCCESS;
-        for (auto& m : chunk_maps)
+        // implicit, don't call FlushFileBuffers()
+        if (chunk_idx == 0)
         {
-            if (m.second->Flush(0, 0) != ERROR_SUCCESS) err = 1;
+            chunk_maps.clear();
+            chunk_horder.clear();
         }
-        if (err == ERROR_SUCCESS) chunk_maps.clear();
+        else
+        {
+            for (auto it = chunk_maps.begin(); it != chunk_maps.end(); ++it)
+            {
+                if (it->first < chunk_idx) continue;
+                chunk_maps.erase(it);
+            }
+        }
 
-        return err;
+        return ERROR_SUCCESS;
     }
 };
 
@@ -601,6 +633,18 @@ static DWORD InternalWriteChunk(ChunkDisk* cdisk, PVOID& buffer, SPD_STORAGE_UNI
 static DWORD InternalFlushChunk(ChunkDisk* cdisk, SPD_STORAGE_UNIT_STATUS* status,
     u64 chunk_idx, u64 start_off, u64 end_off)
 {
+    if (start_off == 0 && end_off == cdisk->chunk_length)
+    {
+        auto err = cdisk->ChunkClose(chunk_idx);
+        if (err != ERROR_SUCCESS)
+        {
+            SpdStorageUnitStatusSetSense(status, SCSI_SENSE_MEDIUM_ERROR,
+                SCSI_ADSENSE_WRITE_ERROR, nullptr);
+            return 1;
+        }
+        return ERROR_SUCCESS;
+    }
+
     shared_ptr<FileMapping> mapping;
     auto err = cdisk->ChunkOpen(chunk_idx, true, mapping);
     if (err != ERROR_SUCCESS)
@@ -610,14 +654,7 @@ static DWORD InternalFlushChunk(ChunkDisk* cdisk, SPD_STORAGE_UNIT_STATUS* statu
         return 1;
     }
 
-    if (start_off == 0 && end_off == cdisk->chunk_length)
-    {
-        err = mapping->Flush(0, 0);
-    }
-    else
-    {
-        err = mapping->Flush(start_off * cdisk->block_size, (end_off - start_off) * cdisk->block_size);
-    }
+    err = mapping->Flush(start_off * cdisk->block_size, (end_off - start_off) * cdisk->block_size);
     if (err != ERROR_SUCCESS)
     {
         SpdStorageUnitStatusSetSense(status, SCSI_SENSE_MEDIUM_ERROR,
@@ -669,8 +706,8 @@ static BOOLEAN InternalFlush(SPD_STORAGE_UNIT* StorageUnit,
 
     if (BlockCount == 0)
     {
-        // TODO: support (BlockAddress != 0) case
-        if (cdisk->FlushAll() != ERROR_SUCCESS)
+        // for simpliciy ignore BlockAddress % cdisk->chunk_length
+        if (cdisk->FlushAll(BlockAddress / cdisk->chunk_length) != ERROR_SUCCESS)
         {
             SpdStorageUnitStatusSetSense(Status, SCSI_SENSE_MEDIUM_ERROR,
                 SCSI_ADSENSE_WRITE_ERROR, nullptr);
