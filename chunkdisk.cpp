@@ -241,10 +241,8 @@ private:
 
     DWORD TouchFile()
     {
-        SYSTEMTIME st;
         FILETIME ft;
-        GetSystemTime(&st);
-        SystemTimeToFileTime(&st, &ft);
+        GetSystemTimeAsFileTime(&ft);
         if (!SetFileTime(file_handle_.get(), nullptr, nullptr, &ft)) return GetLastError();
         return ERROR_SUCCESS;
     }
