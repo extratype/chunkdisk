@@ -58,5 +58,3 @@ I'm not responsible for the data stored using chunkdisk!
 * When a file in the virtual disk gets deleted the corresponding chunk file may become empty if it is larger than the chunk size. This is done via SCSI UNMAP command (a.k.a. TRIM) requested by Windows.
 
 * You can identify the file in disk for specific chunk or identify the chunk used by specific file. Use `fsutil volume querycluster` for the former, `fsutil file queryextents` for the latter. Use `diskpart` to know the partition offset. For NTFS volumes the cluster size is typically 4096 and LCN 0 corresponds to offset from 0 (inclusive) to 4096 (exclusive) of the partition.
-
-* You may expand the disk size by setting larger disk size and max. number of chunks while it is not mounted. It's also possible to shrink the disk although it is very technical. Consolidate the free space and shrink the partition, unmap the unused space, delete empty chunks and reduce the specified disk size.
