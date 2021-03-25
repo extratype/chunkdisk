@@ -161,6 +161,9 @@
   <ItemGroup>
     <ClCompile Include="chunkdisk.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="chunkdisk.rc" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
