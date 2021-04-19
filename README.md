@@ -27,7 +27,7 @@ I'm not responsible for the data stored using chunkdisk!
 
 * MAKE A BACKUP of `.chunkdisk` file. Chunkdisk reads it only once when it's mounted. It can be read, modified and even deleted by others while the disk is mounted.
 * DO NOT add, remove and move around chunk files when the disk is mounted. Doing so confuses chunkdisk and causes I/O errors.
-* Chunks in use (or recently used) are write-protected. You may read chunks anytime (may not be up to date), but you SHOULD NOT modify them directly when the disk is mounted.
+* DO NOT directly modify chunk files. They are NOT write-protected even when being used.
 
 ## `.chunkdisk` File Specs
 
@@ -40,12 +40,12 @@ I'm not responsible for the data stored using chunkdisk!
 ```
 
 * UTF-8 encoding
-* Disk size and chunk size must be a multiple of 512.
+* Disk size and chunk size must be a multiple of 4096.
 * The sum of max. number of chunks must be at least (Disk size) / (Chunk size) + surplus (0 ~ 1).
 
 ## Issues
 
-* I/O is single-threaded due to [the WinSpd issue](https://github.com/billziss-gh/winspd/issues/10). The performance would be fine except for multi-threaded random I/Os with NVMe SSDs.
+* Random I/O performance is not great with SSDs.
 
 ## Notes and Tips
 

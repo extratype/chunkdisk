@@ -16,6 +16,7 @@
  * TRIM (Unmap): make chunk empty if whole, fill zero otherwise
  * TODO: check partition -> TRIM -> shrink -> delete orphan empty chunks
  * TODO: sparse chunk
+ * TODO: asynchronous (overlapped) file operations
  */
 
 #include <type_traits>
@@ -1634,7 +1635,7 @@ static void BufferFree(PVOID Pointer)
 static DWORD CreateChunkDiskStorageUnit(ChunkDisk* cdisk, BOOLEAN write_protected, PWSTR pipe_name)
 {
     const wchar_t ProductId[] = L"ChunkDisk";
-    const wchar_t ProductRevision[] = L"0.1";
+    const wchar_t ProductRevision[] = L"0.4";
     SPD_STORAGE_UNIT_PARAMS unit_params;
 
     memset(&unit_params, 0, sizeof unit_params);
