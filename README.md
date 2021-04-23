@@ -40,7 +40,7 @@ I'm not responsible for the data stored using chunkdisk!
 ```
 
 * UTF-8 encoding
-* Disk size and chunk size must be a multiple of 4096.
+* Disk size and chunk size must be a multiple of 4096. NOTE: for performance choose cluster size not less than 4096 bytes.
 * The sum of max. number of chunks must be at least (Disk size) / (Chunk size) + surplus (0 ~ 1).
 
 ## Issues
