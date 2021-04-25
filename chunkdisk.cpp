@@ -1636,7 +1636,7 @@ static void BufferFree(PVOID Pointer)
 static DWORD CreateChunkDiskStorageUnit(ChunkDisk* cdisk, BOOLEAN write_protected, PWSTR pipe_name)
 {
     const wchar_t ProductId[] = L"ChunkDisk";
-    const wchar_t ProductRevision[] = L"0.4";
+    const wchar_t ProductRevision[] = L"0.5";
     SPD_STORAGE_UNIT_PARAMS unit_params;
 
     memset(&unit_params, 0, sizeof unit_params);
