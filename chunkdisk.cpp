@@ -501,6 +501,34 @@ struct ChunkDisk
         if (storage_unit != nullptr) SpdStorageUnitDelete(storage_unit);
     }
 
+    DWORD LockParts()
+    {
+        auto num_parts = part_dirname.size();
+
+        try
+        {
+            for (size_t i = 0; i < num_parts; ++i)
+            {
+                auto path = part_dirname[i] + L"\\.lock";
+                auto h = FileHandle(CreateFileW(
+                    path.data(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    0, nullptr,
+                    CREATE_NEW,
+                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, nullptr));
+                if (!h) return GetLastError();
+
+                part_lock_.emplace_back(std::move(h));
+            }
+        }
+        catch (const bad_alloc&)
+        {
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+
+        return ERROR_SUCCESS;
+    }
+
     // read parts and chunks, check consistency
     DWORD ReadParts()
     {
@@ -1001,6 +1029,8 @@ struct ChunkDisk
     const u32 max_pages = 1;                 // may exceed if page is being used for I/O
 
 private:
+    vector<FileHandle> part_lock_;              // part index -> .lock
+
     SRWLOCK lock_parts_ = SRWLOCK_INIT;
     vector<u64> part_current_;                  // part index -> # of chunks
     size_t part_current_new_ = 0;               // part index for new chunks
@@ -1790,23 +1820,33 @@ int wmain(int argc, wchar_t** argv)
 
     unique_ptr<ChunkDisk> cdisk;
     err = ReadChunkDiskFile(ChunkDiskFile, NumThreads, cdisk);
-    if (err != ERROR_SUCCESS) {
+    if (err != ERROR_SUCCESS)
+    {
         logerr(L"error: parsing failed with error %lu", err);
         return err;
     }
+    err = cdisk->LockParts();
+    if (err != ERROR_SUCCESS)
+    {
+        logerr(L"error: cannot lock parts: error %lu", err);
+        return err;
+    }
     err = cdisk->ReadParts();
-    if (err != ERROR_SUCCESS) {
+    if (err != ERROR_SUCCESS)
+    {
         logerr(L"error: cannot initialize ChunkDisk: error %lu", err);
         return err;
     }
     err = CreateChunkDiskStorageUnit(cdisk.get(), !WriteAllowed, PipeName);
-    if (err != ERROR_SUCCESS) {
+    if (err != ERROR_SUCCESS)
+    {
         logerr(L"error: cannot create ChunkDisk: error %lu", err);
         return err;
     }
     SpdStorageUnitSetDebugLog(cdisk->storage_unit, DebugFlags);
     err = SpdStorageUnitStartDispatcher(cdisk->storage_unit, NumThreads);
-    if (err != ERROR_SUCCESS) {
+    if (err != ERROR_SUCCESS)
+    {
         logerr(L"error: cannot start ChunkDisk: error %lu", err);
         return err;
     }
