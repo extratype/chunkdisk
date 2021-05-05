@@ -45,7 +45,7 @@ I'm not responsible for the data stored using chunkdisk!
 
 ## Issues
 
-* Random I/O performance is not great with SSDs.
+* I/O performance is not great with SSDs.
 
 ## Notes and Tips
 
