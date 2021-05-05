@@ -1409,7 +1409,6 @@ static BOOLEAN InternalFlush(SPD_STORAGE_UNIT* StorageUnit,
     if (BlockCount == 0)
     {
         // for simpliciy ignore BlockAddress % cdisk->chunk_length
-        // let Windows flush
         if (cdisk->FlushAll(BlockAddress / cdisk->chunk_length) != ERROR_SUCCESS)
         {
             SetMediumError(Status, 2);
@@ -1691,7 +1690,7 @@ static DWORD ReadChunkDiskFile(PCWSTR cdisk_path, DWORD thread_count, unique_ptr
             chunk_length,
             std::move(part_max),
             std::move(part_dirname),
-            max(thread_count * 32, 2048),
+            max(thread_count * 4, 256),
             max(thread_count * 2, 128));
 
         if (disk_size % new_disk->page_size) return ERROR_INVALID_PARAMETER;
