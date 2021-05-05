@@ -1515,6 +1515,7 @@ static BOOLEAN Flush(SPD_STORAGE_UNIT* StorageUnit,
     return InternalFlush(StorageUnit, BlockAddress, BlockCount, Status);
 }
 
+// TODO: merge ranges across (consecutive) calls
 static BOOLEAN Unmap(SPD_STORAGE_UNIT* StorageUnit,
                      SPD_UNMAP_DESCRIPTOR Descriptors[], UINT32 Count,
                      SPD_STORAGE_UNIT_STATUS* Status)
@@ -1524,7 +1525,50 @@ static BOOLEAN Unmap(SPD_STORAGE_UNIT* StorageUnit,
 
     auto* cdisk = StorageUnitChunkDisk(StorageUnit);
 
+    // Descriptors is just Buffer, writable
+    // merge ranges
+    if (Count == 0) return TRUE;
+
+    std::sort(Descriptors, Descriptors + Count,
+              [](const auto& a, const auto& b)
+              {
+                  return (a.BlockAddress < b.BlockAddress) ? (true)
+                             : ((a.BlockAddress == b.BlockAddress) ? (a.BlockCount < b.BlockCount)
+                                 : false);
+              });
+
+    auto new_count = UINT32();
+    auto prev_addr = Descriptors[0].BlockAddress;
+    auto prev_count = Descriptors[0].BlockCount;
+
     for (UINT32 I = 0; I < Count; ++I)
+    {
+        auto addr = Descriptors[I].BlockAddress;
+        auto count = Descriptors[I].BlockCount;
+
+        if (count == 0) continue;
+
+        if (addr <= prev_addr + prev_count)
+        {
+            auto count_ext = max(addr + count, prev_addr + prev_count) - prev_addr;
+            if (count_ext <= UINT32(-1))
+            {
+                // no overflow
+                prev_count = UINT32(count_ext);
+                continue;
+            }
+        }
+
+        Descriptors[new_count] = {prev_addr, prev_count, 0};
+        ++new_count;
+        prev_addr = addr;
+        prev_count = count;
+    }
+
+    Descriptors[new_count] = {prev_addr, prev_count, 0};
+    ++new_count;
+
+    for (UINT32 I = 0; I < new_count; ++I)
     {
         // NOTE: a chunk gets truncated only if single block range covers it
         auto r = cdisk->BlockChunkRange(Descriptors[I].BlockAddress, Descriptors[I].BlockCount);
