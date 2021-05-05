@@ -1382,7 +1382,20 @@ static DWORD InternalFlushChunk(ChunkDisk* cdisk, u64 chunk_idx,
 static DWORD InternalUnmapChunk(ChunkDisk* cdisk, u64 chunk_idx,
                                 u64 start_off, u64 end_off, SPD_STORAGE_UNIT_STATUS* Status)
 {
-    if (start_off == 0 && end_off == cdisk->chunk_length) return cdisk->ChunkUnmap(chunk_idx);
+    if (start_off == 0 && end_off == cdisk->chunk_length)
+    {
+        auto err = cdisk->ChunkUnmap(chunk_idx);
+        if (err == ERROR_FILE_NOT_FOUND) return ERROR_SUCCESS;
+    }
+
+    // done if chunk is empty or does not exist
+    auto h = FileHandle();
+    auto err = cdisk->ChunkOpen(chunk_idx, false, h);
+    if (err != ERROR_SUCCESS) return 1;
+
+    auto done = !h;
+    if (!done) cdisk->ChunkClose(chunk_idx, std::move(h));
+    if (done) return ERROR_SUCCESS;
 
     PVOID buffer = nullptr;
     return InternalWriteChunk(cdisk, buffer, chunk_idx, start_off, end_off, Status);
