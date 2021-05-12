@@ -1730,7 +1730,7 @@ static DWORD CreateChunkDiskStorageUnit(ChunkDisk* cdisk, BOOLEAN write_protecte
     UuidCreate(&unit_params.Guid);
     unit_params.BlockCount = cdisk->block_count;
     unit_params.BlockLength = cdisk->block_size;
-    unit_params.MaxTransferLength = 512 * 1024;
+    unit_params.MaxTransferLength = 64 * 1024;
     if (WideCharToMultiByte(
             CP_UTF8, 0,
             ProductId, lstrlenW(ProductId),
