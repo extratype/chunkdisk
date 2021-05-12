@@ -717,7 +717,7 @@ struct ChunkDisk
             auto hnew = ReOpenFile(h.get(),
                                          desired_access,
                                          FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                         0);
+                                         FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH);
             if (hnew == INVALID_HANDLE_VALUE) return GetLastError();
             handle_out.reset(hnew);
             return ERROR_SUCCESS;
@@ -738,7 +738,7 @@ struct ChunkDisk
                                   desired_access,
                                   FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                                   OPEN_EXISTING,
-                                  FILE_ATTRIBUTE_NORMAL,
+                                  FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH,
                                   nullptr));
             if (part_found != bool(h))
             {
@@ -752,7 +752,7 @@ struct ChunkDisk
                                       desired_access,
                                       FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                                       CREATE_NEW,
-                                      FILE_ATTRIBUTE_NORMAL,
+                                      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH,
                                       nullptr));
                 if (!h) return GetLastError();
 
@@ -854,7 +854,7 @@ struct ChunkDisk
             GENERIC_READ | GENERIC_WRITE,
             0, nullptr,
             OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL, nullptr));
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH, nullptr));
         if (!h) return GetLastError();
         if (!SetEndOfFile(h.get())) return GetLastError();
 
@@ -1375,7 +1375,7 @@ static DWORD InternalFlushChunk(ChunkDisk* cdisk, u64 chunk_idx,
         cdisk->ChunkClose(chunk_idx, std::move(h));
     }
 
-    // let Windows flush
+    // write through, nothing to flush
     return ERROR_SUCCESS;
 }
 
@@ -1730,7 +1730,7 @@ static DWORD CreateChunkDiskStorageUnit(ChunkDisk* cdisk, BOOLEAN write_protecte
     UuidCreate(&unit_params.Guid);
     unit_params.BlockCount = cdisk->block_count;
     unit_params.BlockLength = cdisk->block_size;
-    unit_params.MaxTransferLength = 64 * 1024;
+    unit_params.MaxTransferLength = 512 * 1024;
     if (WideCharToMultiByte(
             CP_UTF8, 0,
             ProductId, lstrlenW(ProductId),
