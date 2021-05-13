@@ -717,7 +717,7 @@ struct ChunkDisk
             auto hnew = ReOpenFile(h.get(),
                                          desired_access,
                                          FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                         FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH);
+                                         FILE_FLAG_NO_BUFFERING);
             if (hnew == INVALID_HANDLE_VALUE) return GetLastError();
             handle_out.reset(hnew);
             return ERROR_SUCCESS;
@@ -738,7 +738,7 @@ struct ChunkDisk
                                   desired_access,
                                   FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                                   OPEN_EXISTING,
-                                  FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH,
+                                  FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING,
                                   nullptr));
             if (part_found != bool(h))
             {
@@ -752,7 +752,7 @@ struct ChunkDisk
                                       desired_access,
                                       FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                                       CREATE_NEW,
-                                      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH,
+                                      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING,
                                       nullptr));
                 if (!h) return GetLastError();
 
@@ -854,7 +854,7 @@ struct ChunkDisk
             GENERIC_READ | GENERIC_WRITE,
             0, nullptr,
             OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH, nullptr));
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING, nullptr));
         if (!h) return GetLastError();
         if (!SetEndOfFile(h.get())) return GetLastError();
 
