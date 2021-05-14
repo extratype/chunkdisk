@@ -1386,6 +1386,7 @@ static DWORD InternalUnmapChunk(ChunkDisk* cdisk, u64 chunk_idx,
     {
         auto err = cdisk->ChunkUnmap(chunk_idx);
         if (err == ERROR_FILE_NOT_FOUND) return ERROR_SUCCESS;
+        return err;
     }
 
     // done if chunk is empty or does not exist
