@@ -17,6 +17,7 @@
  * TODO: check partition -> TRIM -> shrink -> delete orphan empty chunks
  * TODO: sparse chunk
  * TODO: asynchronous (overlapped) file operations
+ * TODO: differential disk (take snapshots and merge later)
  */
 
 #include <type_traits>
@@ -797,6 +798,7 @@ struct ChunkDisk
 
     // return handle to pool
     // old handles in the pool are closed automatically
+    // FIXME: close handles on I/O error
     DWORD ChunkClose(u64 chunk_idx, FileHandle handle)
     {
         if (chunk_idx >= chunk_count) { return ERROR_INVALID_PARAMETER; }
@@ -914,7 +916,7 @@ struct ChunkDisk
         return ERROR_SUCCESS;
     }
 
-    // get or create page for buffering
+    // get or create page for buffering and synchronizing partial data
     // is_write: write or remove access to existing page
     AcquiredPage AcquirePage(u64 page_idx, bool is_write)
     {
@@ -1375,7 +1377,7 @@ static DWORD InternalFlushChunk(ChunkDisk* cdisk, u64 chunk_idx,
         cdisk->ChunkClose(chunk_idx, std::move(h));
     }
 
-    // write through, nothing to flush
+    // no buffering or write through, nothing to flush
     return ERROR_SUCCESS;
 }
 
@@ -1603,8 +1605,8 @@ static SPD_STORAGE_UNIT_INTERFACE CHUNK_DISK_INTERFACE =
 /*
  * read .chunkdisk file
  *
- * disk size in bytes: must be a multiple of 512
- * chunk size in bytes: must be a multiple of 512
+ * disk size in bytes: must be a multiple of 4096
+ * chunk size in bytes: must be a multiple of 4096
  * number path/to/dir...: max. # of chunks in part directory
  */
 static DWORD ReadChunkDiskFile(PCWSTR cdisk_path, DWORD thread_count, unique_ptr<ChunkDisk>& cdisk)
