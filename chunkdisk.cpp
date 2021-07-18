@@ -32,6 +32,7 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <numeric>
+#include <thread>
 #include <filesystem>
 #include <winspd/winspd.h>
 
@@ -346,6 +347,16 @@ void logerr(PCWSTR format, Ts&&... args)
             warn(L"WARNONCE(%S) failed at %S:%d", #expr, __func__, __LINE__);\
     } while (0,0)
 
+struct HandleDeleter
+{
+    void operator()(HANDLE h) noexcept
+    {
+        CloseHandle(h);
+    }
+};
+
+using GenericHandle = unique_ptr<void, HandleDeleter>;
+
 // like unique_ptr<HANDLE>
 // reset to INVALID_HANDLE_VALUE
 // invalid for nullptr OR INVALID_HANDLE_VALUE
@@ -356,7 +367,7 @@ public:
 
     explicit FileHandle(HANDLE h) noexcept : handle_(h) {}
 
-    virtual ~FileHandle() noexcept { if (*this) CloseHandle(handle_); }
+    virtual ~FileHandle() noexcept { if (*this) HandleDeleter()(handle_); }
 
     FileHandle(const FileHandle&) = delete;
 
@@ -662,6 +673,17 @@ static DWORD ReadChunkDiskParam(PCWSTR cdisk_path, ChunkDiskParam& param)
         return ERROR_NOT_ENOUGH_MEMORY;
     }
 }
+
+// FIXME: no flush flag, metadata flushed after idling
+enum struct ChunkOp
+{
+    READ_CHUNK,     // may be synchronous if empty
+    WRITE_CHUNK,
+    READ_PAGE,
+    WRITE_PAGE,
+    WRITE_PAGE_PARTIAL,
+    UNMAP_CHUNK     // synchronous
+};
 
 class ChunkDisk
 {
@@ -1171,6 +1193,311 @@ private:
     // push_back to add, pop_front to evict
     // TODO: reinsert_back() if hit
     Map<u64, PageEntry> cached_pages_;
+};
+
+struct ChunkWork;
+
+typedef std::list<ChunkWork>::iterator ChunkWorkIt;
+
+struct ChunkOpState
+{
+    OVERLAPPED ovl;         // MUST be at offset 0
+    ChunkWorkIt work_it;    // in ChunkDiskWorker::working
+    u32 work_idx;           // in work_it->ops
+    ChunkOp op;
+    u32 step;
+    u64 idx;                // chunk_idx or page_idx
+    u64 start_off;
+    u64 end_off;
+    PVOID buffer;
+
+    ChunkOpState(ChunkOp op, u64 idx, u64 start_off, u64 end_off, LONGLONG file_off, PVOID buffer)
+        : ovl(), work_it(), work_idx(), op(op), step(), idx(idx), start_off(start_off), end_off(end_off), buffer(buffer)
+    {
+        LARGE_INTEGER li{.QuadPart = file_off};
+        ovl.Offset = li.LowPart;
+        ovl.OffsetHigh = li.HighPart;
+    }
+};
+
+struct ChunkWork
+{
+    vector<ChunkOpState> ops;
+    u32 num_completed = 0;
+    u32 num_errors = 0;
+    // FIXME sense
+};
+
+static ChunkOpState* GetOverlappedOp(LPOVERLAPPED ovl)
+{
+    return CONTAINING_RECORD(ovl, ChunkOpState, ovl);
+}
+
+// for SINGLE dispatcher thread
+class ChunkDiskWorker
+{
+public:
+    explicit ChunkDiskWorker(ChunkDisk& owner) : owner_(owner) {}
+
+    bool IsRunning()
+    {
+        return iocp_ != nullptr;
+    }
+
+    // stop and start to restart
+    // CALL Stop() before destructed
+    DWORD Start()
+    {
+        if (IsRunning()) return ERROR_INVALID_STATE;
+
+        iocp_.reset(CreateIoCompletionPort(
+            INVALID_HANDLE_VALUE, nullptr, 0, 1));
+        if (!iocp_) return GetLastError();
+
+        try
+        {
+            thread_ = std::thread(ThreadProc, this);
+        }
+        catch (const std::system_error& e)
+        {
+            iocp_.reset();
+            return e.code().value();
+        }
+
+        return ERROR_SUCCESS;
+    }
+
+    DWORD Stop()
+    {
+        if (!IsRunning()) return ERROR_INVALID_STATE;
+
+        // FIXME: close file handles before closing iocp_
+        iocp_.reset();
+
+        try
+        {
+            thread_.join();
+        }
+        catch (const std::system_error& e)
+        {
+            return e.code().value();
+        }
+
+        auto exit_code = DWORD();
+        GetExitCodeThread(thread_.native_handle(), &exit_code);
+
+        thread_ = std::thread();
+        return exit_code;
+    }
+
+    // op: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK
+    DWORD PostWork(ChunkOp op, u64 block_addr, u32 count, PVOID buffer = nullptr)
+    {
+        if (!IsRunning()) return ERROR_INVALID_STATE;
+
+        auto buffer_size = owner_.param.BlockBytes(count);
+        auto work_buffer = PVOID(nullptr);
+        if (op != ChunkOp::UNMAP_CHUNK)
+        {
+            work_buffer = VirtualAlloc(nullptr, buffer_size, MEM_COMMIT, PAGE_READWRITE);   // FIXME free
+            if (work_buffer == nullptr) return GetLastError();
+        }
+        if (op == ChunkOp::WRITE_CHUNK) memcpy(work_buffer, buffer, buffer_size);
+
+        try
+        {
+            auto g = SRWLockGuard(&lock_working, true);
+
+            auto work_it = working.emplace(working.end(), ChunkWork{WorkOps(
+                op, block_addr, count, work_buffer)});  // FIXME args...
+            auto& ops = work_it->ops;
+            for (u32 i = 0; i < ops.size(); ++i)
+            {
+                ops[i].work_it = work_it;
+                ops[i].work_idx = i;
+            }
+
+            if (!PostQueuedCompletionStatus(iocp_.get(), 0,
+                                            1, recast<LPOVERLAPPED>(&*work_it)))
+            {
+                working.erase(work_it);
+                return GetLastError();
+            }
+        }
+        catch (const bad_alloc&)
+        {
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+        return ERROR_SUCCESS;
+    }
+
+    std::list<ChunkWork> working;
+    SRWLOCK lock_working = SRWLOCK_INIT;
+
+private:
+    static DWORD ThreadProc(LPVOID param)
+    {
+        auto self = recast<ChunkDiskWorker*>(param);
+        return self->Work();
+    }
+
+    // Start() creates a thread starting at Work()
+    DWORD Work()
+    {
+        auto bytes_transmitted = DWORD();
+        auto ckey = u64();
+        auto overlapped = LPOVERLAPPED();
+
+        while (true)
+        {
+            if (!GetQueuedCompletionStatus(iocp_.get(), &bytes_transmitted, &ckey, &overlapped,
+                                           60000))
+            {
+                auto err = GetLastError();
+                if (err == ERROR_ABANDONED_WAIT_0) return 0;
+                if (err == WAIT_TIMEOUT)
+                {
+                    // FIXME free resources IF not working, wait indefinitely
+                    continue;
+                }
+                // retry...
+                continue;
+            }
+
+            // do work...
+            if (ckey == 1)
+            {
+                auto& work = *recast<ChunkWork*>(overlapped);
+                // FIXME zero ops
+
+                PostIO(work);    // FIXME on error
+                // FIXME release work, buffer
+                continue;
+            }
+        }
+    }
+
+    void WorkPageOps(vector<ChunkOpState>& ops, bool is_write, u64 page_idx,
+                     u32 start_off, u32 end_off, LONGLONG& file_off, PVOID& buffer) const
+    {
+        auto& param = owner_.param;
+        auto op = is_write ? ChunkOp::WRITE_PAGE : ChunkOp::READ_PAGE;
+        if (is_write && !param.IsPageAligned(start_off, end_off)) op = ChunkOp::WRITE_PAGE_PARTIAL;
+
+        ops.emplace_back(op, page_idx, start_off, end_off, file_off, buffer);
+        file_off += LONGLONG(param.PageBytes(1));
+        if (!(is_write && buffer == nullptr)) buffer = recast<u8*>(buffer) + param.BlockBytes(end_off - start_off);
+    }
+
+    void WorkChunkOps(vector<ChunkOpState>& ops, ChunkOp op, u64 chunk_idx,
+                      u64 start_off, u64 end_off, PVOID& buffer) const
+    {
+        auto& param = owner_.param;
+        if (op == ChunkOp::UNMAP_CHUNK)
+        {
+            if (start_off == 0 && end_off == param.chunk_length)
+            {
+                ops.emplace_back(ChunkOp::UNMAP_CHUNK, chunk_idx, start_off, end_off, 0, nullptr);
+                return;
+            }
+            else
+            {
+                op = ChunkOp::WRITE_CHUNK;
+                // buffer is nullptr for ChunkOp::UNMAP_CHUNK
+            }
+        }
+
+        auto is_write = (op == ChunkOp::WRITE_CHUNK);
+        if (param.IsPageAligned(start_off, end_off, buffer))
+        {
+            // aligned to page
+            ops.emplace_back(op, chunk_idx, start_off, end_off, LONGLONG(param.BlockBytes(start_off)), buffer);
+            if (!(is_write && buffer == nullptr)) buffer = recast<u8*>(buffer) + param.BlockBytes(end_off - start_off);
+        }
+        else
+        {
+            // not aligned to page
+            const auto r = param.BlockPageRange(chunk_idx, start_off, end_off);
+            auto file_off = LONGLONG(param.PageBytes(r.start_idx));
+
+            WorkPageOps(ops, is_write, r.base_idx + r.start_idx,
+                        r.start_off, r.start_idx == r.end_idx ? r.end_off : param.page_length, file_off, buffer);
+            if (r.start_idx != r.end_idx)
+            {
+                for (auto i = r.start_idx + 1; i < r.end_idx; ++i)
+                {
+                    WorkPageOps(ops, is_write, r.base_idx + i, 0, param.page_length, file_off, buffer);
+                }
+                WorkPageOps(ops, is_write, r.base_idx + r.end_idx, 0, r.end_off, file_off, buffer);
+            }
+        }
+    }
+
+    // op: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK
+    vector<ChunkOpState> WorkOps(ChunkOp op, u64 block_addr, u32 count, PVOID buffer) const
+    {
+        auto ops = vector<ChunkOpState>();
+        const auto r = owner_.param.BlockChunkRange(block_addr, count);
+
+        WorkChunkOps(ops, op, r.start_idx, r.start_off,
+                     r.start_idx == r.end_idx ? r.end_off : owner_.param.chunk_length, buffer);
+        if (r.start_idx != r.end_idx)
+        {
+            for (auto i = r.start_idx + 1; i < r.end_idx; ++i)
+            {
+                WorkChunkOps(ops, op, i, 0, owner_.param.chunk_length, buffer);
+            }
+            WorkChunkOps(ops, op, r.end_idx, 0, r.end_off, buffer);
+        }
+
+        return ops;
+    }
+
+    DWORD PostReadChunk(ChunkOpState& state)
+    {
+        const auto r = owner_.param.BlockPageRange(state.idx, state.start_off, state.end_off);
+
+        // aligned to page
+        owner_.RemovePages(r);
+
+        // FIXME ReadFile
+    }
+
+    DWORD PostIO(ChunkWork& work)
+    {
+        for (auto& state : work.ops)
+        {
+            switch (state.op)
+            {
+                case ChunkOp::READ_CHUNK:
+                    PostReadChunk(state);
+                    break;
+                case ChunkOp::WRITE_CHUNK:
+                    break;
+                case ChunkOp::READ_PAGE:
+                    break;
+                case ChunkOp::WRITE_PAGE:
+                    break;
+                case ChunkOp::WRITE_PAGE_PARTIAL:
+                    break;
+                case ChunkOp::UNMAP_CHUNK:
+                    break;
+            }
+        }
+    }
+
+    DWORD CompleteIO()
+    {
+        // FIXME
+    }
+
+    ChunkDisk& owner_;
+    std::thread thread_;
+    GenericHandle iocp_;
+
+    // file HANDLE may be shared
+    // close ALL if idle
+    unordered_map<u64, FileHandle> chunk_handles_;
 };
 
 static ChunkDisk* StorageUnitChunkDisk(SPD_STORAGE_UNIT* StorageUnit)
