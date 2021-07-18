@@ -353,8 +353,9 @@ void logerr(PCWSTR format, Ts&&... args)
 // like unique_ptr<HANDLE>
 // reset to INVALID_HANDLE_VALUE
 // invalid for nullptr OR INVALID_HANDLE_VALUE
-struct FileHandle
+class FileHandle
 {
+public:
     FileHandle() noexcept : handle_(INVALID_HANDLE_VALUE) {}
 
     explicit FileHandle(HANDLE h) noexcept : handle_(h) {}
@@ -394,8 +395,9 @@ private:
 };
 
 // like lock_guard<SRWLOCK>
-struct SRWLockGuard
+class SRWLockGuard
 {
+public:
     SRWLockGuard() : lock_(nullptr), is_exclusive_(false) {}
 
     explicit SRWLockGuard(PSRWLOCK lock, bool is_exclusive) noexcept
@@ -483,8 +485,9 @@ struct AcquiredPage
     const bool is_hit = false;      // ptr is zero initialized if !is_hit
 };
 
-struct ChunkDisk
+class ChunkDisk
 {
+public:
     // max_handles, max_pages: MUST be positive
     ChunkDisk(u64 block_count, u32 block_size, u64 chunk_count, u64 chunk_length,
               vector<u64> part_max, vector<wstring> part_dirname, u32 max_handles, u32 max_pages)
