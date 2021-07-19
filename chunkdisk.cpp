@@ -485,119 +485,15 @@ struct AcquiredPage
     const bool is_hit = false;      // ptr is zero initialized if !is_hit
 };
 
-class ChunkDisk
+struct ChunkDiskParam
 {
-public:
-    // max_handles, max_pages: MUST be positive
-    ChunkDisk(u64 block_count, u32 block_size, u64 chunk_count, u64 chunk_length,
-              vector<u64> part_max, vector<wstring> part_dirname, u32 max_handles, u32 max_pages)
-            : block_count(block_count), block_size(block_size), chunk_count(chunk_count), chunk_length(chunk_length),
-              part_max(std::move(part_max)), part_dirname(std::move(part_dirname)),
-              max_handles(max_handles), page_length(page_size / block_size), max_pages(max_pages)
-    {
-        chunk_handles_.reserve(max_handles);
-        cached_pages_.reserve(max_pages);
-    }
-
-    virtual ~ChunkDisk()
-    {
-        FlushAll();
-        if (storage_unit != nullptr) SpdStorageUnitDelete(storage_unit);
-    }
-
-    DWORD LockParts()
-    {
-        auto num_parts = part_dirname.size();
-
-        try
-        {
-            for (size_t i = 0; i < num_parts; ++i)
-            {
-                auto path = part_dirname[i] + L"\\.lock";
-                auto h = FileHandle(CreateFileW(
-                    path.data(),
-                    GENERIC_READ | GENERIC_WRITE,
-                    0, nullptr,
-                    CREATE_NEW,
-                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, nullptr));
-                if (!h) return GetLastError();
-
-                part_lock_.emplace_back(std::move(h));
-            }
-        }
-        catch (const bad_alloc&)
-        {
-            return ERROR_NOT_ENOUGH_MEMORY;
-        }
-
-        return ERROR_SUCCESS;
-    }
-
-    // read parts and chunks, check consistency
-    DWORD ReadParts()
-    {
-        // from part_max, part_dirname...
-        auto num_parts = part_dirname.size();
-
-        try
-        {
-            // make sure parts exist, no dups
-            auto part_ids = unordered_set<std::pair<u32, u64>, pair_hash>();
-            for (size_t i = 0; i < num_parts; ++i)
-            {
-                auto h = FileHandle(CreateFileW(
-                    (part_dirname[i] + L'\\').data(),
-                    FILE_READ_ATTRIBUTES, 0, nullptr,
-                    OPEN_EXISTING,
-                    FILE_FLAG_BACKUP_SEMANTICS, nullptr));
-                if (!h) return GetLastError();
-
-                auto file_info = BY_HANDLE_FILE_INFORMATION();
-                if (!GetFileInformationByHandle(h.get(), &file_info)) return GetLastError();
-
-                if (!part_ids.emplace(make_pair(
-                        file_info.dwVolumeSerialNumber,
-                        file_info.nFileIndexLow + (u64(file_info.nFileIndexHigh) << 32))).second)
-                {
-                    return ERROR_INVALID_PARAMETER; // dup found
-                }
-            }
-            part_ids.clear();
-
-            // read parts
-            auto part_current = vector<u64>(num_parts, 0);
-            auto chunk_parts = unordered_map<u64, size_t>();
-            for (size_t i = 0; i < num_parts; ++i)
-            {
-                for (auto& p : fs::directory_iterator(part_dirname[i] + L'\\'))
-                {
-                    auto fname = p.path().filename().wstring();
-                    if (_wcsnicmp(fname.data(), L"chunk", 5) != 0) continue;
-
-                    auto* endp = PWSTR();
-                    auto idx = wcstoull(fname.data() + 5, &endp, 10);
-                    if (fname.data() + 5 == endp || *endp != L'\0' || errno == ERANGE || idx >= chunk_count) continue;
-
-                    if (!chunk_parts.emplace(idx, i).second) return ERROR_FILE_EXISTS;
-                    if (++part_current[i] > part_max[i]) return ERROR_PARAMETER_QUOTA_EXCEEDED;
-                }
-            }
-
-            // done
-            part_current_ = std::move(part_current);
-            chunk_parts_ = std::move(chunk_parts);
-        }
-        catch (const std::system_error& e)
-        {
-            return e.code().value();
-        }
-        catch (const bad_alloc&)
-        {
-            return ERROR_NOT_ENOUGH_MEMORY;
-        }
-
-        return ERROR_SUCCESS;
-    }
+    u32 block_size = 0;             // in bytes
+    u32 page_length = 0;            // in blocks
+    u64 block_count = 0;            // disk size = block_count * block_size
+    u64 chunk_length = 0;           // in blocks
+    u64 chunk_count = 0;            // disk size = chunk_count * chunk_length * block_size
+    vector<u64> part_max;           // part index -> max. # of chunks
+    vector<wstring> part_dirname;   // part index -> chunk directory
 
     ChunkRange BlockChunkRange(u64 block_addr, u32 count) const
     {
@@ -649,15 +545,227 @@ public:
         }
         return PageRange{sidx, soff, eidx, eoff};
     }
+};
+
+/*
+ * read .chunkdisk file
+ *
+ * disk size in bytes: must be a multiple of 4096
+ * chunk size in bytes: must be a multiple of 4096
+ * number path/to/dir...: max. # of chunks in part directory
+ */
+static DWORD ReadChunkDiskParam(PCWSTR cdisk_path, ChunkDiskParam& param)
+{
+    try
+    {
+        // read .chunkdisk and convert to wstr
+        auto h = FileHandle(CreateFileW(
+            cdisk_path, GENERIC_READ, FILE_SHARE_READ, nullptr,
+            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (!h) return GetLastError();
+
+        auto size = LARGE_INTEGER();
+        if (!GetFileSizeEx(h.get(), &size)) return GetLastError();
+        if (size.HighPart != 0) return ERROR_ARITHMETIC_OVERFLOW;
+        if (size.LowPart == 0) return ERROR_INVALID_PARAMETER;
+
+        auto buf = unique_ptr<u8[]>(new u8[size_t(size.LowPart)]);
+        auto bytes_read = DWORD();
+        if (!ReadFile(h.get(), buf.get(), size.LowPart, &bytes_read, nullptr)) return GetLastError();
+
+        auto wbuf = wstring();
+        auto err = ConvertUTF8(buf.get(), bytes_read, wbuf);
+        if (err != ERROR_SUCCESS) return err;
+
+        // parse .chunkdisk
+        buf.reset();
+
+        // disk size
+        auto* state = PWSTR();
+        auto* token = wcstok_s(wbuf.data(), L"\n", &state);
+        auto* endp = PWSTR();
+        if (!token) return ERROR_INVALID_PARAMETER;
+        auto disk_size = wcstoull(token, &endp, 10);
+        if (token == endp || (*endp != L'\r' && *endp != L'\0') || errno == ERANGE) return ERROR_INVALID_PARAMETER;
+
+        // chunk size
+        token = wcstok_s(nullptr, L"\n", &state);
+        if (!token) return ERROR_INVALID_PARAMETER;
+        auto chunk_size = wcstoull(token, &endp, 10);
+        if (token == endp || (*endp != L'\r' && *endp != L'\0') || errno == ERANGE) return ERROR_INVALID_PARAMETER;
+
+        // parts
+        auto part_max = vector<u64>();
+        auto part_dirname = vector<wstring>();
+
+        token = wcstok_s(nullptr, L"\n", &state);
+        for (; token; token = wcstok_s(nullptr, L"\n", &state))
+        {
+            auto pmax = wcstoull(token, &endp, 10);
+            if (token == endp || *endp != L' ' || errno == ERANGE) return ERROR_INVALID_PARAMETER;
+
+            auto dirname = wstring(endp + 1);
+            if (!dirname.empty() && dirname[dirname.size() - 1] == L'\r') dirname.erase(dirname.size() - 1);
+            if (!dirname.empty() && dirname[dirname.size() - 1] == L'\\') dirname.erase(dirname.size() - 1);
+            if (!dirname.empty() && dirname[dirname.size() - 1] == L'/')  dirname.erase(dirname.size() - 1);
+            auto dirpath = fs::path(std::move(dirname));
+            if (!dirpath.is_absolute()) return ERROR_INVALID_PARAMETER;
+
+            part_max.push_back(pmax);
+            part_dirname.emplace_back(dirpath.wstring());
+        }
+
+        // check parameters
+        constexpr auto block_size = u32(512);
+        if (disk_size == 0 || chunk_size == 0) return ERROR_INVALID_PARAMETER;
+        if (disk_size % block_size || chunk_size > disk_size) return ERROR_INVALID_PARAMETER;
+        if (chunk_size % block_size) return ERROR_INVALID_PARAMETER;
+
+        auto chunk_count = (disk_size + (chunk_size - 1)) / chunk_size;
+        if (chunk_count == 0) return ERROR_INVALID_PARAMETER;
+        if (chunk_count > std::accumulate(part_max.begin(), part_max.end(), 0ull)) return ERROR_INVALID_PARAMETER;
+        auto chunk_length = chunk_size / block_size;
+
+        constexpr auto page_size = u32(4096);
+        if (disk_size % page_size) return ERROR_INVALID_PARAMETER;
+        if (chunk_size % page_size) return ERROR_INVALID_PARAMETER;
+        // if (page_size % block_size) return ERROR_INVALID_PARAMETER;
+
+        param.block_size = block_size;
+        param.page_length = page_size / block_size;
+        param.block_count = disk_size / block_size;
+        param.chunk_length = chunk_length;
+        param.chunk_count = chunk_count;
+        param.part_max = std::move(part_max);
+        param.part_dirname = std::move(part_dirname);
+        return ERROR_SUCCESS;
+    }
+    catch (const bad_alloc&)
+    {
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+}
+
+class ChunkDisk
+{
+public:
+    // max_handles, max_pages: MUST be positive
+    ChunkDisk(ChunkDiskParam param, u32 max_handles, u32 max_pages)
+            : param(std::move(param)), max_handles(max_handles), max_pages(max_pages)
+    {
+        chunk_handles_.reserve(max_handles);
+        cached_pages_.reserve(max_pages);
+    }
+
+    virtual ~ChunkDisk()
+    {
+        FlushAll();
+        if (storage_unit != nullptr) SpdStorageUnitDelete(storage_unit);
+    }
+
+    DWORD LockParts()
+    {
+        auto num_parts = param.part_dirname.size();
+
+        try
+        {
+            for (size_t i = 0; i < num_parts; ++i)
+            {
+                auto path = param.part_dirname[i] + L"\\.lock";
+                auto h = FileHandle(CreateFileW(
+                    path.data(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    0, nullptr,
+                    CREATE_NEW,
+                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, nullptr));
+                if (!h) return GetLastError();
+
+                part_lock_.emplace_back(std::move(h));
+            }
+        }
+        catch (const bad_alloc&)
+        {
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+
+        return ERROR_SUCCESS;
+    }
+
+    // read parts and chunks, check consistency
+    DWORD ReadParts()
+    {
+        // from param.part_max, param.part_dirname...
+        auto num_parts = param.part_dirname.size();
+
+        try
+        {
+            // make sure parts exist, no dups
+            auto part_ids = unordered_set<std::pair<u32, u64>, pair_hash>();
+            for (size_t i = 0; i < num_parts; ++i)
+            {
+                auto h = FileHandle(CreateFileW(
+                    (param.part_dirname[i] + L'\\').data(),
+                    FILE_READ_ATTRIBUTES, 0, nullptr,
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+                if (!h) return GetLastError();
+
+                auto file_info = BY_HANDLE_FILE_INFORMATION();
+                if (!GetFileInformationByHandle(h.get(), &file_info)) return GetLastError();
+
+                if (!part_ids.emplace(make_pair(
+                        file_info.dwVolumeSerialNumber,
+                        file_info.nFileIndexLow + (u64(file_info.nFileIndexHigh) << 32))).second)
+                {
+                    return ERROR_INVALID_PARAMETER; // dup found
+                }
+            }
+            part_ids.clear();
+
+            // read parts
+            auto part_current = vector<u64>(num_parts, 0);
+            auto chunk_parts = unordered_map<u64, size_t>();
+            for (size_t i = 0; i < num_parts; ++i)
+            {
+                for (auto& p : fs::directory_iterator(param.part_dirname[i] + L'\\'))
+                {
+                    auto fname = p.path().filename().wstring();
+                    if (_wcsnicmp(fname.data(), L"chunk", 5) != 0) continue;
+
+                    auto* endp = PWSTR();
+                    auto idx = wcstoull(fname.data() + 5, &endp, 10);
+                    if (fname.data() + 5 == endp || *endp != L'\0' || errno == ERANGE || idx >= param.chunk_count) continue;
+
+                    if (!chunk_parts.emplace(idx, i).second) return ERROR_FILE_EXISTS;
+                    if (++part_current[i] > param.part_max[i]) return ERROR_PARAMETER_QUOTA_EXCEEDED;
+                }
+            }
+
+            // done
+            part_current_ = std::move(part_current);
+            chunk_parts_ = std::move(chunk_parts);
+        }
+        catch (const std::system_error& e)
+        {
+            return e.code().value();
+        }
+        catch (const bad_alloc&)
+        {
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+
+        return ERROR_SUCCESS;
+    }
+
 
     // chunks are not deleted (truncated when unmapped) so remember the last result
     // not thread safe
     size_t ChunkNewPart()
     {
-        auto num_parts = part_dirname.size();
+        auto num_parts = param.part_dirname.size();
         for (auto new_part = part_current_new_; new_part < num_parts; ++new_part)
         {
-            if (part_current_[new_part] < part_max[new_part])
+            if (part_current_[new_part] < param.part_max[new_part])
             {
                 part_current_new_ = new_part;
                 return new_part;
@@ -665,7 +773,7 @@ public:
         }
         for (size_t new_part = 0; new_part < part_current_new_; ++new_part)
         {
-            if (part_current_[new_part] < part_max[new_part])
+            if (part_current_[new_part] < param.part_max[new_part])
             {
                 part_current_new_ = new_part;
                 return new_part;
@@ -679,7 +787,7 @@ public:
     // no handle returned if chunk file is empty or does not exist
     DWORD ChunkOpen(u64 chunk_idx, bool is_write, FileHandle& handle_out)
     {
-        if (chunk_idx >= chunk_count) { return ERROR_INVALID_PARAMETER; }
+        if (chunk_idx >= param.chunk_count) { return ERROR_INVALID_PARAMETER; }
 
         // combination of GENERIC_READ and GENERIC_WRITE
         const auto desired_access = GENERIC_READ | (is_write ? GENERIC_WRITE : 0);
@@ -737,7 +845,7 @@ public:
             auto part_found = part_it != chunk_parts_.end();
             auto part_idx = part_found ? part_it->second : ChunkNewPart();
 
-            auto path = part_dirname[part_idx] + L"\\chunk" + std::to_wstring(chunk_idx);
+            auto path = param.part_dirname[part_idx] + L"\\chunk" + std::to_wstring(chunk_idx);
             h.reset(CreateFileW(path.data(),
                                   desired_access,
                                   FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
@@ -767,7 +875,7 @@ public:
             // check size, extend if necessary
             if (h)
             {
-                auto chunk_bytes = LONGLONG(chunk_length * block_size);
+                auto chunk_bytes = LONGLONG(param.chunk_length * param.block_size);
                 if (chunk_bytes <= 0) return ERROR_ARITHMETIC_OVERFLOW;
 
                 auto file_size = LARGE_INTEGER();
@@ -804,7 +912,7 @@ public:
     // FIXME: close handles on I/O error
     DWORD ChunkClose(u64 chunk_idx, FileHandle handle)
     {
-        if (chunk_idx >= chunk_count) { return ERROR_INVALID_PARAMETER; }
+        if (chunk_idx >= param.chunk_count) { return ERROR_INVALID_PARAMETER; }
 
         try
         {
@@ -833,7 +941,7 @@ public:
     // empty chunk
     DWORD ChunkUnmap(u64 chunk_idx)
     {
-        if (chunk_idx >= chunk_count) { return ERROR_INVALID_PARAMETER; }
+        if (chunk_idx >= param.chunk_count) { return ERROR_INVALID_PARAMETER; }
 
         auto gp = SRWLockGuard(&lock_parts_, false);
 
@@ -854,7 +962,7 @@ public:
         }
 
         auto part_idx = part_it->second;
-        auto path = part_dirname[part_idx] + L"\\chunk" + std::to_wstring(chunk_idx);
+        auto path = param.part_dirname[part_idx] + L"\\chunk" + std::to_wstring(chunk_idx);
         auto h = FileHandle(CreateFileW(path.data(),
             GENERIC_READ | GENERIC_WRITE,
             0, nullptr,
@@ -900,7 +1008,7 @@ public:
         for (auto it = cached_pages_.begin(); it != cached_pages_.end();)
         {
             auto [idx, pe] = *it;
-            if ((idx * page_length / chunk_length) < chunk_idx)
+            if ((idx * param.page_length / param.chunk_length) < chunk_idx)
             {
                 ++it;
                 continue;
@@ -939,8 +1047,8 @@ public:
 
                 if (emplaced)
                 {
-                    (*it2).second.vmem.reset(VirtualAlloc(
-                        nullptr, page_size, MEM_COMMIT, PAGE_READWRITE));
+                    (*it2).second.vmem.reset(VirtualAlloc(nullptr, param.page_length * param.block_size,
+                                             MEM_COMMIT, PAGE_READWRITE));
 
                     // try to evict
                     while (cached_pages_.size() > max_pages)
@@ -1020,17 +1128,9 @@ public:
     }
 
     SPD_STORAGE_UNIT* storage_unit = nullptr;
-    const u64 block_count = 0;            // disk size = block_count * block_size
-    const u32 block_size = 0;             // in bytes
-    const u64 chunk_count = 0;            // disk size = chunk_count * chunk_length * block_size
-    const u64 chunk_length = 0;           // in blocks
-    const vector<u64> part_max;           // part index -> max. # of chunks
-    const vector<wstring> part_dirname;   // part index -> chunk directory
+    const ChunkDiskParam param;
 
     const u32 max_handles = 1;
-
-    const u32 page_size = 4096;              // in bytes
-    const u32 page_length;                   // in blocks
     const u32 max_pages = 1;                 // may exceed if page is being used for I/O
 
 private:
@@ -1097,29 +1197,33 @@ static DWORD InternalReadPage(ChunkDisk* cdisk, HANDLE h,
         return 1;
     }
 
+    auto block_size = cdisk->param.block_size;
+    auto page_length = cdisk->param.page_length;
+    auto page_size = cdisk->param.page_length * block_size;
+
     if (!page.is_hit)
     {
         auto length_read = DWORD();
-        if (!ReadFile(h, page.ptr, cdisk->page_size, &length_read, nullptr)
-            || length_read != cdisk->page_size)
+        if (!ReadFile(h, page.ptr, page_size, &length_read, nullptr)
+            || length_read != page_size)
         {
             SetMediumError(Status, 1, true,
-                           page_idx * cdisk->page_length + (length_read + 1) / cdisk->block_size);
+                           page_idx * page_length + (length_read + 1) / block_size);
             return 2;
         }
     }
     else
     {
         // advance pointer as if read from file
-        if (!SetFilePointerEx(h, LARGE_INTEGER{.QuadPart = cdisk->page_size}, nullptr, FILE_CURRENT))
+        if (!SetFilePointerEx(h, LARGE_INTEGER{.QuadPart = page_size}, nullptr, FILE_CURRENT))
         {
             SetMediumError(Status, 1);
             return 1;
         }
     }
 
-    auto size = (end_off - start_off) * cdisk->block_size;
-    memcpy(buffer, recast<u8*>(page.ptr) + u64(start_off) * cdisk->block_size, size);
+    auto size = (end_off - start_off) * block_size;
+    memcpy(buffer, recast<u8*>(page.ptr) + u64(start_off) * block_size, size);
     buffer = recast<u8*>(buffer) + size;
     return ERROR_SUCCESS;
 }
@@ -1140,7 +1244,11 @@ static DWORD InternalWritePage(ChunkDisk* cdisk, HANDLE h,
         return 1;
     }
 
-    if (!page.is_hit && (start_off != 0 || end_off != cdisk->page_length))
+    auto block_size = cdisk->param.block_size;
+    auto page_length = cdisk->param.page_length;
+    auto page_size = cdisk->param.page_length * block_size;
+
+    if (!page.is_hit && (start_off != 0 || end_off != page_length))
     {
         // writing to page partially, read it first
         auto pos = LARGE_INTEGER();
@@ -1151,11 +1259,11 @@ static DWORD InternalWritePage(ChunkDisk* cdisk, HANDLE h,
         }
 
         auto length_read = DWORD();
-        if (!ReadFile(h, page.ptr, cdisk->page_size, &length_read, nullptr)
-            || length_read != cdisk->page_size)
+        if (!ReadFile(h, page.ptr, page_size, &length_read, nullptr)
+            || length_read != page_size)
         {
             SetMediumError(Status, sense, true,
-                           page_idx * cdisk->page_length + (length_read + 1) / cdisk->block_size);
+                           page_idx * page_length + (length_read + 1) / block_size);
             return 2;
         }
 
@@ -1166,23 +1274,23 @@ static DWORD InternalWritePage(ChunkDisk* cdisk, HANDLE h,
         }
     }
 
-    auto size = (end_off - start_off) * cdisk->block_size;
+    auto size = (end_off - start_off) * block_size;
     if (buffer != nullptr)
     {
-        memcpy(recast<u8*>(page.ptr) + u64(start_off) * cdisk->block_size, buffer, size);
+        memcpy(recast<u8*>(page.ptr) + u64(start_off) * block_size, buffer, size);
     }
     else
     {
-        memset(recast<u8*>(page.ptr) + u64(start_off) * cdisk->block_size, 0, size);
+        memset(recast<u8*>(page.ptr) + u64(start_off) * block_size, 0, size);
     }
 
     // write through
     auto length_written = DWORD();
-    if (!WriteFile(h, page.ptr, cdisk->page_size, &length_written, nullptr)
-        || length_written != cdisk->page_size)
+    if (!WriteFile(h, page.ptr, page_size, &length_written, nullptr)
+        || length_written != page_size)
     {
         SetMediumError(Status, sense, true,
-                       page_idx * cdisk->page_length + (length_written + 1) / cdisk->block_size);
+                       page_idx * page_length + (length_written + 1) / block_size);
         return 2;
     }
 
@@ -1198,7 +1306,12 @@ static DWORD InternalReadChunk(ChunkDisk* cdisk, PVOID& buffer,
     auto err = cdisk->ChunkOpen(chunk_idx, false, h);
     if (err != ERROR_SUCCESS) return 1;
 
-    auto length_bytes = (end_off - start_off) * cdisk->block_size;
+    auto block_size = cdisk->param.block_size;
+    auto page_length = cdisk->param.page_length;
+    auto page_size = cdisk->param.page_length * block_size;
+    auto chunk_length = cdisk->param.chunk_length;
+
+    auto length_bytes = (end_off - start_off) * block_size;
     if (!h)
     {
         memset(buffer, 0, length_bytes);
@@ -1206,14 +1319,14 @@ static DWORD InternalReadChunk(ChunkDisk* cdisk, PVOID& buffer,
         return ERROR_SUCCESS;
     }
 
-    auto r = cdisk->BlockPageRange(start_off, end_off);
+    auto r = cdisk->param.BlockPageRange(start_off, end_off);
 
-    if (r.start_off == 0 && r.end_off == cdisk->page_length && (recast<size_t>(buffer) % cdisk->page_size) == 0)
+    if (r.start_off == 0 && r.end_off == page_length && (recast<size_t>(buffer) % page_size) == 0)
     {
         // aligned to page
         cdisk->RemovePages(r);  // Windows caches buffer
 
-        auto off = LARGE_INTEGER{.QuadPart = LONGLONG(start_off * cdisk->block_size)};
+        auto off = LARGE_INTEGER{.QuadPart = LONGLONG(start_off * block_size)};
         if (!SetFilePointerEx(h.get(), off, nullptr, FILE_BEGIN))
         {
             SetMediumError(Status, 1);
@@ -1225,7 +1338,7 @@ static DWORD InternalReadChunk(ChunkDisk* cdisk, PVOID& buffer,
             || length_bytes != length_read)
         {
             SetMediumError(Status, 1, true,
-                           chunk_idx * cdisk->chunk_length + start_off + (length_read + 1) / cdisk->block_size);
+                           chunk_idx * chunk_length + start_off + (length_read + 1) / block_size);
             return 2;
         }
         buffer = recast<u8*>(buffer) + length_bytes;
@@ -1233,17 +1346,17 @@ static DWORD InternalReadChunk(ChunkDisk* cdisk, PVOID& buffer,
     else
     {
         // not aligned to page
-        auto off = LARGE_INTEGER{.QuadPart = LONGLONG(r.start_idx * cdisk->page_size)};
+        auto off = LARGE_INTEGER{.QuadPart = LONGLONG(r.start_idx * page_size)};
         if (!SetFilePointerEx(h.get(), off, nullptr, FILE_BEGIN))
         {
             SetMediumError(Status, 1);
             return 1;
         }
 
-        auto base_idx = chunk_idx * cdisk->chunk_length / cdisk->page_length;
+        auto base_idx = chunk_idx * chunk_length / page_length;
         err = InternalReadPage(
             cdisk, h.get(), buffer, base_idx + r.start_idx,
-            r.start_off, r.start_idx == r.end_idx ? r.end_off : cdisk->page_length, Status);
+            r.start_off, r.start_idx == r.end_idx ? r.end_off : page_length, Status);
         if (err != ERROR_SUCCESS) return err;
 
         if (r.start_idx != r.end_idx)
@@ -1252,7 +1365,7 @@ static DWORD InternalReadChunk(ChunkDisk* cdisk, PVOID& buffer,
             {
                 err = InternalReadPage(
                     cdisk, h.get(), buffer, base_idx + i,
-                    0, cdisk->page_length, Status);
+                    0, page_length, Status);
                 if (err != ERROR_SUCCESS) return err;
             }
             err = InternalReadPage(cdisk, h.get(), buffer, base_idx + r.end_idx,
@@ -1277,18 +1390,23 @@ static DWORD InternalWriteChunk(ChunkDisk* cdisk, PVOID& buffer,
     auto err = cdisk->ChunkOpen(chunk_idx, true, h);
     if (err != ERROR_SUCCESS) return 1;
 
-    auto length_bytes = (end_off - start_off) * cdisk->block_size;
+    auto block_size = cdisk->param.block_size;
+    auto page_length = cdisk->param.page_length;
+    auto page_size = cdisk->param.page_length * block_size;
+    auto chunk_length = cdisk->param.chunk_length;
 
-    auto r = cdisk->BlockPageRange(start_off, end_off);
+    auto length_bytes = (end_off - start_off) * block_size;
 
-    if (r.start_off == 0 && r.end_off == cdisk->page_length && (recast<size_t>(buffer) % cdisk->page_size) == 0)
+    auto r = cdisk->param.BlockPageRange(start_off, end_off);
+
+    if (r.start_off == 0 && r.end_off == page_length && (recast<size_t>(buffer) % page_size) == 0)
     {
         // aligned to page
         cdisk->RemovePages(r);  // Windows caches buffer
 
         if (buffer != nullptr)
         {
-            auto off = LARGE_INTEGER{.QuadPart = LONGLONG(start_off * cdisk->block_size)};
+            auto off = LARGE_INTEGER{.QuadPart = LONGLONG(start_off * block_size)};
             if (!SetFilePointerEx(h.get(), off, nullptr, FILE_BEGIN))
             {
                 SetMediumError(Status, sense);
@@ -1300,7 +1418,7 @@ static DWORD InternalWriteChunk(ChunkDisk* cdisk, PVOID& buffer,
                 || length_bytes != length_written)
             {
                 SetMediumError(Status, sense, true,
-                               chunk_idx * cdisk->chunk_length + start_off + (length_written + 1) / cdisk->block_size);
+                               chunk_idx * chunk_length + start_off + (length_written + 1) / block_size);
                 return 2;
             }
             buffer = recast<u8*>(buffer) + length_bytes;
@@ -1308,8 +1426,8 @@ static DWORD InternalWriteChunk(ChunkDisk* cdisk, PVOID& buffer,
         else
         {
             FILE_ZERO_DATA_INFORMATION zero_info;
-            zero_info.FileOffset.QuadPart = LONGLONG(start_off * cdisk->block_size);
-            zero_info.BeyondFinalZero.QuadPart = LONGLONG(end_off * cdisk->block_size);
+            zero_info.FileOffset.QuadPart = LONGLONG(start_off * block_size);
+            zero_info.BeyondFinalZero.QuadPart = LONGLONG(end_off * block_size);
 
             auto bytes_returned = DWORD();
             if (!DeviceIoControl(
@@ -1324,17 +1442,17 @@ static DWORD InternalWriteChunk(ChunkDisk* cdisk, PVOID& buffer,
     else
     {
         // not aligned to page
-        auto off = LARGE_INTEGER{.QuadPart = LONGLONG(r.start_idx * cdisk->page_size)};
+        auto off = LARGE_INTEGER{.QuadPart = LONGLONG(r.start_idx * page_size)};
         if (!SetFilePointerEx(h.get(), off, nullptr, FILE_BEGIN))
         {
             SetMediumError(Status, sense);
             return 1;
         }
 
-        auto base_idx = chunk_idx * cdisk->chunk_length / cdisk->page_length;
+        auto base_idx = chunk_idx * chunk_length / page_length;
         err = InternalWritePage(
             cdisk, h.get(), buffer, base_idx + r.start_idx,
-            r.start_off, r.start_idx == r.end_idx ? r.end_off : cdisk->page_length, Status);
+            r.start_off, r.start_idx == r.end_idx ? r.end_off : page_length, Status);
         if (err != ERROR_SUCCESS) return err;
 
         if (r.start_idx != r.end_idx)
@@ -1343,7 +1461,7 @@ static DWORD InternalWriteChunk(ChunkDisk* cdisk, PVOID& buffer,
             {
                 err = InternalWritePage(
                     cdisk, h.get(), buffer, base_idx + i,
-                    0, cdisk->page_length, Status);
+                    0, page_length, Status);
                 if (err != ERROR_SUCCESS) return err;
             }
             err = InternalWritePage(cdisk, h.get(), buffer, base_idx + r.end_idx,
@@ -1360,7 +1478,7 @@ static DWORD InternalWriteChunk(ChunkDisk* cdisk, PVOID& buffer,
 static DWORD InternalFlushChunk(ChunkDisk* cdisk, u64 chunk_idx,
                                 u64 start_off, u64 end_off, SPD_STORAGE_UNIT_STATUS* Status)
 {
-    if (start_off == 0 && end_off == cdisk->chunk_length)
+    if (start_off == 0 && end_off == cdisk->param.chunk_length)
     {
         // flush metadata
         auto h = FileHandle();
@@ -1387,7 +1505,7 @@ static DWORD InternalFlushChunk(ChunkDisk* cdisk, u64 chunk_idx,
 static DWORD InternalUnmapChunk(ChunkDisk* cdisk, u64 chunk_idx,
                                 u64 start_off, u64 end_off, SPD_STORAGE_UNIT_STATUS* Status)
 {
-    if (start_off == 0 && end_off == cdisk->chunk_length)
+    if (start_off == 0 && end_off == cdisk->param.chunk_length)
     {
         auto err = cdisk->ChunkUnmap(chunk_idx);
         if (err == ERROR_FILE_NOT_FOUND) return ERROR_SUCCESS;
@@ -1412,28 +1530,30 @@ static BOOLEAN InternalFlush(SPD_STORAGE_UNIT* StorageUnit,
                              SPD_STORAGE_UNIT_STATUS* Status)
 {
     auto* cdisk = StorageUnitChunkDisk(StorageUnit);
+    auto& param = cdisk->param;
+
     if (BlockCount == 0)
     {
         // for simpliciy ignore BlockAddress % cdisk->chunk_length
         // let Windows flush
-        if (cdisk->FlushAll(BlockAddress / cdisk->chunk_length) != ERROR_SUCCESS)
+        if (cdisk->FlushAll(BlockAddress / param.chunk_length) != ERROR_SUCCESS)
         {
             SetMediumError(Status, 2);
         }
         return TRUE;
     }
 
-    auto r = cdisk->BlockChunkRange(BlockAddress, BlockCount);
+    auto r = param.BlockChunkRange(BlockAddress, BlockCount);
 
     auto err = InternalFlushChunk(
-        cdisk, r.start_idx, r.start_off, r.start_idx == r.end_idx ? r.end_off : cdisk->chunk_length, Status);
+        cdisk, r.start_idx, r.start_off, r.start_idx == r.end_idx ? r.end_off : param.chunk_length, Status);
     if (err != ERROR_SUCCESS) return TRUE;
 
     if (r.start_idx != r.end_idx)
     {
         for (auto i = r.start_idx + 1; i < r.end_idx; ++i)
         {
-            err = InternalFlushChunk(cdisk, i, 0, cdisk->chunk_length, Status);
+            err = InternalFlushChunk(cdisk, i, 0, param.chunk_length, Status);
             if (err != ERROR_SUCCESS) return TRUE;
         }
         err = InternalFlushChunk(cdisk, r.end_idx, 0, r.end_off, Status);
@@ -1457,18 +1577,19 @@ static BOOLEAN Read(SPD_STORAGE_UNIT* StorageUnit,
     }
 
     auto* cdisk = StorageUnitChunkDisk(StorageUnit);
-    auto r = cdisk->BlockChunkRange(BlockAddress, BlockCount);
+    auto& param = cdisk->param;
+    auto r = param.BlockChunkRange(BlockAddress, BlockCount);
 
     auto err = InternalReadChunk(
         cdisk, Buffer,
-        r.start_idx, r.start_off, r.start_idx == r.end_idx ? r.end_off : cdisk->chunk_length, Status);
+        r.start_idx, r.start_off, r.start_idx == r.end_idx ? r.end_off : param.chunk_length, Status);
     if (err != ERROR_SUCCESS) return TRUE;
 
     if (r.start_idx != r.end_idx)
     {
         for (auto i = r.start_idx + 1; i < r.end_idx; ++i)
         {
-            err = InternalReadChunk(cdisk, Buffer, i, 0, cdisk->chunk_length, Status);
+            err = InternalReadChunk(cdisk, Buffer, i, 0, param.chunk_length, Status);
             if (err != ERROR_SUCCESS) return TRUE;
         }
         err = InternalReadChunk(cdisk, Buffer, r.end_idx, 0, r.end_off, Status);
@@ -1486,18 +1607,19 @@ static BOOLEAN Write(SPD_STORAGE_UNIT* StorageUnit,
     WARNONCE(StorageUnit->StorageUnitParams.CacheSupported || FlushFlag);
 
     auto* cdisk = StorageUnitChunkDisk(StorageUnit);
-    auto r = cdisk->BlockChunkRange(BlockAddress, BlockCount);
+    auto& param = cdisk->param;
+    auto r = param.BlockChunkRange(BlockAddress, BlockCount);
 
     auto err = InternalWriteChunk(
         cdisk, Buffer,
-        r.start_idx, r.start_off, r.start_idx == r.end_idx ? r.end_off : cdisk->chunk_length, Status);
+        r.start_idx, r.start_off, r.start_idx == r.end_idx ? r.end_off : param.chunk_length, Status);
     if (err != ERROR_SUCCESS) return TRUE;
 
     if (r.start_idx != r.end_idx)
     {
         for (auto i = r.start_idx + 1; i < r.end_idx; ++i)
         {
-            err = InternalWriteChunk(cdisk, Buffer, i, 0, cdisk->chunk_length, Status);
+            err = InternalWriteChunk(cdisk, Buffer, i, 0, param.chunk_length, Status);
             if (err != ERROR_SUCCESS) return TRUE;
         }
         err = InternalWriteChunk(cdisk, Buffer, r.end_idx, 0, r.end_off, Status);
@@ -1574,21 +1696,22 @@ static BOOLEAN Unmap(SPD_STORAGE_UNIT* StorageUnit,
     Descriptors[new_count] = {prev_addr, prev_count, 0};
     ++new_count;
 
+    auto& param = cdisk->param;
     for (UINT32 I = 0; I < new_count; ++I)
     {
         // NOTE: a chunk gets truncated only if single block range covers it
-        auto r = cdisk->BlockChunkRange(Descriptors[I].BlockAddress, Descriptors[I].BlockCount);
+        auto r = param.BlockChunkRange(Descriptors[I].BlockAddress, Descriptors[I].BlockCount);
 
         // no buffer to track
         // abort zero filling a chunk if error
         InternalUnmapChunk(cdisk,
-            r.start_idx, r.start_off, r.start_idx == r.end_idx ? r.end_off : cdisk->chunk_length, Status);
+            r.start_idx, r.start_off, r.start_idx == r.end_idx ? r.end_off : param.chunk_length, Status);
 
         if (r.start_idx != r.end_idx)
         {
             for (auto i = r.start_idx + 1; i < r.end_idx; ++i)
             {
-                InternalUnmapChunk(cdisk, i, 0, cdisk->chunk_length, Status);
+                InternalUnmapChunk(cdisk, i, 0, param.chunk_length, Status);
             }
             InternalUnmapChunk(cdisk, r.end_idx, 0, r.end_off, Status);
         }
@@ -1604,115 +1727,6 @@ static SPD_STORAGE_UNIT_INTERFACE CHUNK_DISK_INTERFACE =
     Flush,
     Unmap,
 };
-
-/*
- * read .chunkdisk file
- *
- * disk size in bytes: must be a multiple of 4096
- * chunk size in bytes: must be a multiple of 4096
- * number path/to/dir...: max. # of chunks in part directory
- */
-static DWORD ReadChunkDiskFile(PCWSTR cdisk_path, DWORD thread_count, unique_ptr<ChunkDisk>& cdisk)
-{
-    try
-    {
-        // read .chunkdisk and convert to wstr
-        auto h = FileHandle(CreateFileW(
-            cdisk_path, GENERIC_READ, FILE_SHARE_READ, nullptr,
-            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
-        if (!h) return GetLastError();
-
-        auto size = LARGE_INTEGER();
-        if (!GetFileSizeEx(h.get(), &size)) return GetLastError();
-        if (size.HighPart != 0) return ERROR_ARITHMETIC_OVERFLOW;
-        if (size.LowPart == 0) return ERROR_INVALID_PARAMETER;
-
-        auto buf = unique_ptr<u8[]>(new u8[size_t(size.LowPart)]);
-        auto bytes_read = DWORD();
-        if (!ReadFile(h.get(), buf.get(), size.LowPart, &bytes_read, nullptr)) return GetLastError();
-
-        auto wbuf = wstring();
-        auto err = ConvertUTF8(buf.get(), bytes_read, wbuf);
-        if (err != ERROR_SUCCESS) return err;
-
-        // parse .chunkdisk
-        buf.reset();
-
-        // disk size
-        auto* state = PWSTR();
-        auto* token = wcstok_s(wbuf.data(), L"\n", &state);
-        auto* endp = PWSTR();
-        if (!token) return ERROR_INVALID_PARAMETER;
-        auto disk_size = wcstoull(token, &endp, 10);
-        if (token == endp || (*endp != L'\r' && *endp != L'\0') || errno == ERANGE) return ERROR_INVALID_PARAMETER;
-
-        // chunk size
-        token = wcstok_s(nullptr, L"\n", &state);
-        if (!token) return ERROR_INVALID_PARAMETER;
-        auto chunk_size = wcstoull(token, &endp, 10);
-        if (token == endp || (*endp != L'\r' && *endp != L'\0') || errno == ERANGE) return ERROR_INVALID_PARAMETER;
-
-        // parts
-        auto part_max = vector<u64>();
-        auto part_dirname = vector<wstring>();
-
-        token = wcstok_s(nullptr, L"\n", &state);
-        for (; token; token = wcstok_s(nullptr, L"\n", &state))
-        {
-            auto pmax = wcstoull(token, &endp, 10);
-            if (token == endp || *endp != L' ' || errno == ERANGE) return ERROR_INVALID_PARAMETER;
-
-            auto dirname = wstring(endp + 1);
-            if (!dirname.empty() && dirname[dirname.size() - 1] == L'\r') dirname.erase(dirname.size() - 1);
-            if (!dirname.empty() && dirname[dirname.size() - 1] == L'\\') dirname.erase(dirname.size() - 1);
-            if (!dirname.empty() && dirname[dirname.size() - 1] == L'/')  dirname.erase(dirname.size() - 1);
-            auto dirpath = fs::path(std::move(dirname));
-            if (!dirpath.is_absolute()) return ERROR_INVALID_PARAMETER;
-
-            part_max.push_back(pmax);
-            part_dirname.emplace_back(dirpath.wstring());
-        }
-
-        // check parameters
-        const auto block_size = u32(512);
-        if (disk_size == 0 || chunk_size == 0) return ERROR_INVALID_PARAMETER;
-        if (disk_size % block_size || chunk_size > disk_size) return ERROR_INVALID_PARAMETER;
-        if (chunk_size % block_size) return ERROR_INVALID_PARAMETER;
-
-        auto chunk_count = (disk_size + (chunk_size - 1)) / chunk_size;
-        if (chunk_count == 0) return ERROR_INVALID_PARAMETER;
-        if (chunk_count > std::accumulate(part_max.begin(), part_max.end(), 0ull)) return ERROR_INVALID_PARAMETER;
-        auto chunk_length = chunk_size / block_size;
-
-        if (thread_count == 0)
-        {
-            err = GetThreadCount(&thread_count);
-            if (err != ERROR_SUCCESS) return err;
-        }
-
-        auto new_disk = std::make_unique<ChunkDisk>(
-            disk_size / block_size,
-            block_size,
-            chunk_count,
-            chunk_length,
-            std::move(part_max),
-            std::move(part_dirname),
-            max(thread_count * 32, 2048),
-            max(thread_count * 2, 128));
-
-        if (disk_size % new_disk->page_size) return ERROR_INVALID_PARAMETER;
-        if (chunk_size % new_disk->page_size) return ERROR_INVALID_PARAMETER;
-        if (new_disk->page_size % block_size) return ERROR_INVALID_PARAMETER;
-
-        cdisk = std::move(new_disk);
-    }
-    catch (const bad_alloc&)
-    {
-        return ERROR_NOT_ENOUGH_MEMORY;
-    }
-
-    return ERROR_SUCCESS;
-}
 
 // align buffer to pages
 static PVOID BufferAlloc(size_t Size)
@@ -1734,8 +1748,8 @@ static DWORD CreateChunkDiskStorageUnit(ChunkDisk* cdisk, BOOLEAN write_protecte
 
     memset(&unit_params, 0, sizeof unit_params);
     UuidCreate(&unit_params.Guid);
-    unit_params.BlockCount = cdisk->block_count;
-    unit_params.BlockLength = cdisk->block_size;
+    unit_params.BlockCount = cdisk->param.block_count;
+    unit_params.BlockLength = cdisk->param.block_size;
     unit_params.MaxTransferLength = 64 * 1024;
     if (WideCharToMultiByte(
             CP_UTF8, 0,
@@ -1857,9 +1871,18 @@ int wmain(int argc, wchar_t** argv)
     if (argp[0] != nullptr || ChunkDiskFile == nullptr)
         usage();
 
-    HANDLE DebugLogHandle;
     DWORD err;
+    if (NumThreads == 0)
+    {
+        err = GetThreadCount(&NumThreads);
+        if (err != ERROR_SUCCESS)
+        {
+            logerr(L"error: failed to get number of CPU threads with error %lu", err);
+            return err;
+        }
+    }
 
+    HANDLE DebugLogHandle;
     if (DebugLogFile != nullptr)
     {
         if (DebugLogFile[0] == L'-' && DebugLogFile[1] == L'\0')
@@ -1882,12 +1905,27 @@ int wmain(int argc, wchar_t** argv)
     }
 
     unique_ptr<ChunkDisk> cdisk;
-    err = ReadChunkDiskFile(ChunkDiskFile, NumThreads, cdisk);
-    if (err != ERROR_SUCCESS)
+    try
     {
-        logerr(L"error: parsing failed with error %lu", err);
-        return err;
+        auto cdisk_param = ChunkDiskParam();
+        err = ReadChunkDiskParam(ChunkDiskFile, cdisk_param);
+        if (err != ERROR_SUCCESS)
+        {
+            logerr(L"error: parsing failed with error %lu", err);
+            return err;
+        }
+
+        cdisk = std::make_unique<ChunkDisk>(
+            std::move(cdisk_param),
+            max(NumThreads * 32, 2048),
+            max(NumThreads * 2, 128));
     }
+    catch (const bad_alloc&)
+    {
+        logerr(L"error: not enough memory to start");
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+
     err = cdisk->LockParts();
     if (err != ERROR_SUCCESS)
     {
