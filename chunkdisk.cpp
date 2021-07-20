@@ -106,7 +106,7 @@ struct Map
             return *this;
         }
 
-        auto operator==(const iterator& other) const noexcept
+        bool operator==(const iterator& other) const noexcept
         {
             return map_ == other.map_ && it_ == other.it_ && end_it_ == other.end_it_;
         }
@@ -229,12 +229,8 @@ static DWORD GetThreadCount(PDWORD ThreadCount)
     DWORD Result;
     DWORD_PTR ProcessMask, SystemMask;
 
-    if (!GetProcessAffinityMask(GetCurrentProcess(), &ProcessMask, &SystemMask))
-        return GetLastError();
-
-    for (Result = 0; 0 != ProcessMask; ProcessMask >>= 1)
-        Result += ProcessMask & 1;
-
+    if (!GetProcessAffinityMask(GetCurrentProcess(), &ProcessMask, &SystemMask)) return GetLastError();
+    for (Result = 0; 0 != ProcessMask; ProcessMask >>= 1) Result += ProcessMask & 1;
     *ThreadCount = Result;
     return ERROR_SUCCESS;
 }
@@ -374,7 +370,7 @@ public:
         return *this;
     }
 
-    operator bool() const noexcept { return handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE; }
+    explicit operator bool() const noexcept { return handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE; }
 
     HANDLE get() const noexcept { return handle_; }
 
@@ -413,7 +409,7 @@ public:
 
     SRWLockGuard(SRWLockGuard&& other) noexcept : SRWLockGuard(nullptr, false) { swap(*this, other); }
 
-    operator bool() const noexcept { return lock_ != nullptr; }
+    explicit operator bool() const noexcept { return lock_ != nullptr; }
 
     bool is_exclusive() const noexcept { return is_exclusive_; }
 
@@ -1095,7 +1091,7 @@ public:
 
             return AcquiredPage{
                 ERROR_SUCCESS,
-                SRWLockGuard(&((*it1).second.lock), is_hit ? is_write : true),
+                SRWLockGuard(&((*it1).second.lock), !is_hit || is_write),
                 (*it1).second.vmem.get(),
                 is_write,
                 is_hit};
@@ -1660,9 +1656,8 @@ static BOOLEAN Unmap(SPD_STORAGE_UNIT* StorageUnit,
     std::sort(Descriptors, Descriptors + Count,
               [](const auto& a, const auto& b)
               {
-                  return (a.BlockAddress < b.BlockAddress) ? (true)
-                             : ((a.BlockAddress == b.BlockAddress) ? (a.BlockCount < b.BlockCount)
-                                 : false);
+                  return (a.BlockAddress < b.BlockAddress) ||
+                         (a.BlockAddress == b.BlockAddress) && (a.BlockCount < b.BlockCount);
               });
 
     auto new_count = UINT32();
