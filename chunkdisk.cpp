@@ -1102,7 +1102,7 @@ public:
         }
     }
 
-    DWORD RemovePages(PageRange r)
+    DWORD RemovePages(u64 base_idx, PageRange r)
     {
         auto gp = SRWLockGuard(&lock_pages_, true);
 
@@ -1110,7 +1110,7 @@ public:
 
         for (auto i = r.start_idx; i <= r.end_idx; ++i)
         {
-            auto it = cached_pages_.find(i);
+            auto it = cached_pages_.find(base_idx + i);
             if (it == cached_pages_.end()) continue;
 
             // wait for I/O to complete
@@ -1315,12 +1315,13 @@ static DWORD InternalReadChunk(ChunkDisk* cdisk, PVOID& buffer,
         return ERROR_SUCCESS;
     }
 
+    auto base_idx = chunk_idx * chunk_length / page_length;
     auto r = cdisk->param.BlockPageRange(start_off, end_off);
 
     if (r.start_off == 0 && r.end_off == page_length && (recast<size_t>(buffer) % page_size) == 0)
     {
         // aligned to page
-        cdisk->RemovePages(r);  // Windows caches buffer
+        cdisk->RemovePages(base_idx, r);  // Windows caches buffer
 
         auto off = LARGE_INTEGER{.QuadPart = LONGLONG(start_off * block_size)};
         if (!SetFilePointerEx(h.get(), off, nullptr, FILE_BEGIN))
@@ -1349,7 +1350,6 @@ static DWORD InternalReadChunk(ChunkDisk* cdisk, PVOID& buffer,
             return 1;
         }
 
-        auto base_idx = chunk_idx * chunk_length / page_length;
         err = InternalReadPage(
             cdisk, h.get(), buffer, base_idx + r.start_idx,
             r.start_off, r.start_idx == r.end_idx ? r.end_off : page_length, Status);
@@ -1393,12 +1393,13 @@ static DWORD InternalWriteChunk(ChunkDisk* cdisk, PVOID& buffer,
 
     auto length_bytes = (end_off - start_off) * block_size;
 
+    auto base_idx = chunk_idx * chunk_length / page_length;
     auto r = cdisk->param.BlockPageRange(start_off, end_off);
 
     if (r.start_off == 0 && r.end_off == page_length && (recast<size_t>(buffer) % page_size) == 0)
     {
         // aligned to page
-        cdisk->RemovePages(r);  // Windows caches buffer
+        cdisk->RemovePages(base_idx, r);  // Windows caches buffer
 
         if (buffer != nullptr)
         {
@@ -1445,7 +1446,6 @@ static DWORD InternalWriteChunk(ChunkDisk* cdisk, PVOID& buffer,
             return 1;
         }
 
-        auto base_idx = chunk_idx * chunk_length / page_length;
         err = InternalWritePage(
             cdisk, h.get(), buffer, base_idx + r.start_idx,
             r.start_off, r.start_idx == r.end_idx ? r.end_off : page_length, Status);
