@@ -439,19 +439,20 @@ protected:
 // [start_idx, end_idx], [start_off, end_off), 0 < end_off <= chunk_length
 struct ChunkRange
 {
-    const u64 start_idx;
-    const u64 start_off;
-    const u64 end_idx;
-    const u64 end_off;
+    u64 start_idx;
+    u64 start_off;
+    u64 end_idx;
+    u64 end_off;
 };
 
 // [start_idx, end_idx], [start_off, end_off), 0 < end_off <= page_length
 struct PageRange
 {
-    const u64 start_idx;
-    const u32 start_off;
-    const u64 end_idx;
-    const u32 end_off;
+    u64 base_idx;
+    u64 start_idx;
+    u32 start_off;
+    u64 end_idx;
+    u32 end_off;
 };
 
 struct PageDeleter
@@ -516,8 +517,9 @@ struct ChunkDiskParam
     }
 
     // start_off, end_off: block offsets
-    PageRange BlockPageRange(u64 start_off, u64 end_off) const
+    PageRange BlockPageRange(u64 chunk_idx, u64 start_off, u64 end_off) const
     {
+        auto base_idx = chunk_idx * (chunk_length / page_length);
         auto count = end_off - start_off;
 
         auto sidx = start_off / page_length;
@@ -527,7 +529,7 @@ struct ChunkDiskParam
         // sidx: [soff, page_length)
         if (count <= page_length - soff)
         {
-            return PageRange{sidx, soff, eidx, u32(soff + count)};
+            return PageRange{base_idx, sidx, soff, eidx, u32(soff + count)};
         }
 
         // align to the next page
@@ -539,7 +541,7 @@ struct ChunkDiskParam
             eidx -= 1;
             eoff = page_length;
         }
-        return PageRange{sidx, soff, eidx, eoff};
+        return PageRange{base_idx, sidx, soff, eidx, eoff};
     }
 };
 
@@ -1102,7 +1104,7 @@ public:
         }
     }
 
-    DWORD RemovePages(u64 base_idx, PageRange r)
+    DWORD RemovePages(PageRange r)
     {
         auto gp = SRWLockGuard(&lock_pages_, true);
 
@@ -1110,7 +1112,7 @@ public:
 
         for (auto i = r.start_idx; i <= r.end_idx; ++i)
         {
-            auto it = cached_pages_.find(base_idx + i);
+            auto it = cached_pages_.find(r.base_idx + i);
             if (it == cached_pages_.end()) continue;
 
             // wait for I/O to complete
@@ -1316,12 +1318,12 @@ static DWORD InternalReadChunk(ChunkDisk* cdisk, PVOID& buffer,
     }
 
     auto base_idx = chunk_idx * chunk_length / page_length;
-    auto r = cdisk->param.BlockPageRange(start_off, end_off);
+    const auto r = cdisk->param.BlockPageRange(chunk_idx, start_off, end_off);
 
     if (r.start_off == 0 && r.end_off == page_length && (recast<size_t>(buffer) % page_size) == 0)
     {
         // aligned to page
-        cdisk->RemovePages(base_idx, r);  // Windows caches buffer
+        cdisk->RemovePages(r);  // Windows caches buffer
 
         auto off = LARGE_INTEGER{.QuadPart = LONGLONG(start_off * block_size)};
         if (!SetFilePointerEx(h.get(), off, nullptr, FILE_BEGIN))
@@ -1351,7 +1353,7 @@ static DWORD InternalReadChunk(ChunkDisk* cdisk, PVOID& buffer,
         }
 
         err = InternalReadPage(
-            cdisk, h.get(), buffer, base_idx + r.start_idx,
+            cdisk, h.get(), buffer, r.base_idx + r.start_idx,
             r.start_off, r.start_idx == r.end_idx ? r.end_off : page_length, Status);
         if (err != ERROR_SUCCESS) return err;
 
@@ -1360,11 +1362,11 @@ static DWORD InternalReadChunk(ChunkDisk* cdisk, PVOID& buffer,
             for (auto i = r.start_idx + 1; i < r.end_idx; ++i)
             {
                 err = InternalReadPage(
-                    cdisk, h.get(), buffer, base_idx + i,
+                    cdisk, h.get(), buffer, r.base_idx + i,
                     0, page_length, Status);
                 if (err != ERROR_SUCCESS) return err;
             }
-            err = InternalReadPage(cdisk, h.get(), buffer, base_idx + r.end_idx,
+            err = InternalReadPage(cdisk, h.get(), buffer, r.base_idx + r.end_idx,
                                    0, r.end_off, Status);
             if (err != ERROR_SUCCESS) return err;
         }
@@ -1393,13 +1395,12 @@ static DWORD InternalWriteChunk(ChunkDisk* cdisk, PVOID& buffer,
 
     auto length_bytes = (end_off - start_off) * block_size;
 
-    auto base_idx = chunk_idx * chunk_length / page_length;
-    auto r = cdisk->param.BlockPageRange(start_off, end_off);
+    const auto r = cdisk->param.BlockPageRange(chunk_idx, start_off, end_off);
 
     if (r.start_off == 0 && r.end_off == page_length && (recast<size_t>(buffer) % page_size) == 0)
     {
         // aligned to page
-        cdisk->RemovePages(base_idx, r);  // Windows caches buffer
+        cdisk->RemovePages(r);  // Windows caches buffer
 
         if (buffer != nullptr)
         {
@@ -1447,7 +1448,7 @@ static DWORD InternalWriteChunk(ChunkDisk* cdisk, PVOID& buffer,
         }
 
         err = InternalWritePage(
-            cdisk, h.get(), buffer, base_idx + r.start_idx,
+            cdisk, h.get(), buffer, r.base_idx + r.start_idx,
             r.start_off, r.start_idx == r.end_idx ? r.end_off : page_length, Status);
         if (err != ERROR_SUCCESS) return err;
 
@@ -1456,11 +1457,11 @@ static DWORD InternalWriteChunk(ChunkDisk* cdisk, PVOID& buffer,
             for (auto i = r.start_idx + 1; i < r.end_idx; ++i)
             {
                 err = InternalWritePage(
-                    cdisk, h.get(), buffer, base_idx + i,
+                    cdisk, h.get(), buffer, r.base_idx + i,
                     0, page_length, Status);
                 if (err != ERROR_SUCCESS) return err;
             }
-            err = InternalWritePage(cdisk, h.get(), buffer, base_idx + r.end_idx,
+            err = InternalWritePage(cdisk, h.get(), buffer, r.base_idx + r.end_idx,
                                    0, r.end_off, Status);
             if (err != ERROR_SUCCESS) return err;
         }
@@ -1539,7 +1540,7 @@ static BOOLEAN InternalFlush(SPD_STORAGE_UNIT* StorageUnit,
         return TRUE;
     }
 
-    auto r = param.BlockChunkRange(BlockAddress, BlockCount);
+    const auto r = param.BlockChunkRange(BlockAddress, BlockCount);
 
     auto err = InternalFlushChunk(
         cdisk, r.start_idx, r.start_off, r.start_idx == r.end_idx ? r.end_off : param.chunk_length, Status);
@@ -1574,7 +1575,7 @@ static BOOLEAN Read(SPD_STORAGE_UNIT* StorageUnit,
 
     auto* cdisk = StorageUnitChunkDisk(StorageUnit);
     auto& param = cdisk->param;
-    auto r = param.BlockChunkRange(BlockAddress, BlockCount);
+    const auto r = param.BlockChunkRange(BlockAddress, BlockCount);
 
     auto err = InternalReadChunk(
         cdisk, Buffer,
@@ -1604,7 +1605,7 @@ static BOOLEAN Write(SPD_STORAGE_UNIT* StorageUnit,
 
     auto* cdisk = StorageUnitChunkDisk(StorageUnit);
     auto& param = cdisk->param;
-    auto r = param.BlockChunkRange(BlockAddress, BlockCount);
+    const auto r = param.BlockChunkRange(BlockAddress, BlockCount);
 
     auto err = InternalWriteChunk(
         cdisk, Buffer,
@@ -1695,7 +1696,7 @@ static BOOLEAN Unmap(SPD_STORAGE_UNIT* StorageUnit,
     for (UINT32 I = 0; I < new_count; ++I)
     {
         // NOTE: a chunk gets truncated only if single block range covers it
-        auto r = param.BlockChunkRange(Descriptors[I].BlockAddress, Descriptors[I].BlockCount);
+        const auto r = param.BlockChunkRange(Descriptors[I].BlockAddress, Descriptors[I].BlockCount);
 
         // no buffer to track
         // abort zero filling a chunk if error
