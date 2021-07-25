@@ -492,6 +492,18 @@ struct ChunkDiskParam
     vector<u64> part_max;           // part index -> max. # of chunks
     vector<wstring> part_dirname;   // part index -> chunk directory
 
+    // unit conversions
+
+    u64 BlockBytes(u64 count) const { return block_size * count; }
+
+    auto ByteBlock(u64 addr) const { return make_pair(addr / block_size, addr % block_size); }
+
+    u64 PageBlocks(u64 count) const { return page_length * count; }
+
+    u64 PageBytes(u64 count) const { return BlockBytes(PageBlocks(count)); }
+
+    u64 ChunkBlocks(u64 count) const { return chunk_length * count; }
+
     ChunkRange BlockChunkRange(u64 block_addr, u32 count) const
     {
         auto start_idx = block_addr / chunk_length;
@@ -542,6 +554,13 @@ struct ChunkDiskParam
             eoff = page_length;
         }
         return PageRange{base_idx, sidx, soff, eidx, eoff};
+    }
+
+    // PageRange::start_off, PageRange::end_off
+    bool IsPageAligned(u64 start_off, u64 end_off, PVOID buffer = nullptr) const
+    {
+        return start_off == 0 && (end_off == 0 || end_off == page_length) &&
+               (buffer == nullptr || recast<size_t>(buffer) % PageBytes(1) == 0);
     }
 };
 
@@ -873,7 +892,7 @@ public:
             // check size, extend if necessary
             if (h)
             {
-                auto chunk_bytes = LONGLONG(param.chunk_length * param.block_size);
+                auto chunk_bytes = LONGLONG(param.BlockBytes(param.ChunkBlocks(1)));
                 if (chunk_bytes <= 0) return ERROR_ARITHMETIC_OVERFLOW;
 
                 auto file_size = LARGE_INTEGER();
@@ -1006,7 +1025,7 @@ public:
         for (auto it = cached_pages_.begin(); it != cached_pages_.end();)
         {
             auto [idx, pe] = *it;
-            if ((idx * param.page_length / param.chunk_length) < chunk_idx)
+            if ((idx * param.page_length) / param.chunk_length < chunk_idx)
             {
                 ++it;
                 continue;
@@ -1045,7 +1064,7 @@ public:
 
                 if (emplaced)
                 {
-                    (*it2).second.vmem.reset(VirtualAlloc(nullptr, param.page_length * param.block_size,
+                    (*it2).second.vmem.reset(VirtualAlloc(nullptr, param.PageBytes(1),
                                              MEM_COMMIT, PAGE_READWRITE));
 
                     // try to evict
@@ -1195,33 +1214,30 @@ static DWORD InternalReadPage(ChunkDisk* cdisk, HANDLE h,
         return 1;
     }
 
-    auto block_size = cdisk->param.block_size;
-    auto page_length = cdisk->param.page_length;
-    auto page_size = cdisk->param.page_length * block_size;
-
+    auto& param = cdisk->param;
     if (!page.is_hit)
     {
         auto length_read = DWORD();
-        if (!ReadFile(h, page.ptr, page_size, &length_read, nullptr)
-            || length_read != page_size)
+        if (!ReadFile(h, page.ptr, u32(param.PageBytes(1)), &length_read, nullptr)
+            || length_read != param.PageBytes(1))
         {
             SetMediumError(Status, 1, true,
-                           page_idx * page_length + (length_read + 1) / block_size);
+                           param.PageBlocks(page_idx) + param.ByteBlock(length_read + 1).first);
             return 2;
         }
     }
     else
     {
         // advance pointer as if read from file
-        if (!SetFilePointerEx(h, LARGE_INTEGER{.QuadPart = page_size}, nullptr, FILE_CURRENT))
+        if (!SetFilePointerEx(h, LARGE_INTEGER{.QuadPart = u32(param.PageBytes(1))}, nullptr, FILE_CURRENT))
         {
             SetMediumError(Status, 1);
             return 1;
         }
     }
 
-    auto size = (end_off - start_off) * block_size;
-    memcpy(buffer, recast<u8*>(page.ptr) + u64(start_off) * block_size, size);
+    auto size = param.BlockBytes(end_off - start_off);
+    memcpy(buffer, recast<u8*>(page.ptr) + param.BlockBytes(start_off), size);
     buffer = recast<u8*>(buffer) + size;
     return ERROR_SUCCESS;
 }
@@ -1242,11 +1258,8 @@ static DWORD InternalWritePage(ChunkDisk* cdisk, HANDLE h,
         return 1;
     }
 
-    auto block_size = cdisk->param.block_size;
-    auto page_length = cdisk->param.page_length;
-    auto page_size = cdisk->param.page_length * block_size;
-
-    if (!page.is_hit && (start_off != 0 || end_off != page_length))
+    auto& param = cdisk->param;
+    if (!page.is_hit && !param.IsPageAligned(start_off, end_off))
     {
         // writing to page partially, read it first
         auto pos = LARGE_INTEGER();
@@ -1257,11 +1270,11 @@ static DWORD InternalWritePage(ChunkDisk* cdisk, HANDLE h,
         }
 
         auto length_read = DWORD();
-        if (!ReadFile(h, page.ptr, page_size, &length_read, nullptr)
-            || length_read != page_size)
+        if (!ReadFile(h, page.ptr, u32(param.PageBytes(1)), &length_read, nullptr)
+            || length_read != param.PageBytes(1))
         {
             SetMediumError(Status, sense, true,
-                           page_idx * page_length + (length_read + 1) / block_size);
+                           param.PageBlocks(page_idx) + param.ByteBlock(length_read + 1).first);
             return 2;
         }
 
@@ -1272,23 +1285,23 @@ static DWORD InternalWritePage(ChunkDisk* cdisk, HANDLE h,
         }
     }
 
-    auto size = (end_off - start_off) * block_size;
+    auto size = param.BlockBytes(end_off - start_off);
     if (buffer != nullptr)
     {
-        memcpy(recast<u8*>(page.ptr) + u64(start_off) * block_size, buffer, size);
+        memcpy(recast<u8*>(page.ptr) + param.BlockBytes(start_off), buffer, size);
     }
     else
     {
-        memset(recast<u8*>(page.ptr) + u64(start_off) * block_size, 0, size);
+        memset(recast<u8*>(page.ptr) + param.BlockBytes(start_off), 0, size);
     }
 
     // write through
     auto length_written = DWORD();
-    if (!WriteFile(h, page.ptr, page_size, &length_written, nullptr)
-        || length_written != page_size)
+    if (!WriteFile(h, page.ptr, u32(param.PageBytes(1)), &length_written, nullptr)
+        || length_written != param.PageBytes(1))
     {
         SetMediumError(Status, sense, true,
-                       page_idx * page_length + (length_written + 1) / block_size);
+                       param.PageBlocks(page_idx) + param.ByteBlock(length_written + 1).first);
         return 2;
     }
 
@@ -1304,12 +1317,8 @@ static DWORD InternalReadChunk(ChunkDisk* cdisk, PVOID& buffer,
     auto err = cdisk->ChunkOpen(chunk_idx, false, h);
     if (err != ERROR_SUCCESS) return 1;
 
-    auto block_size = cdisk->param.block_size;
-    auto page_length = cdisk->param.page_length;
-    auto page_size = cdisk->param.page_length * block_size;
-    auto chunk_length = cdisk->param.chunk_length;
-
-    auto length_bytes = (end_off - start_off) * block_size;
+    auto& param = cdisk->param;
+    auto length_bytes = param.BlockBytes(end_off - start_off);
     if (!h)
     {
         memset(buffer, 0, length_bytes);
@@ -1317,15 +1326,13 @@ static DWORD InternalReadChunk(ChunkDisk* cdisk, PVOID& buffer,
         return ERROR_SUCCESS;
     }
 
-    auto base_idx = chunk_idx * chunk_length / page_length;
     const auto r = cdisk->param.BlockPageRange(chunk_idx, start_off, end_off);
-
-    if (r.start_off == 0 && r.end_off == page_length && (recast<size_t>(buffer) % page_size) == 0)
+    if (param.IsPageAligned(r.start_off, r.end_off, buffer))
     {
         // aligned to page
         cdisk->RemovePages(r);  // Windows caches buffer
 
-        auto off = LARGE_INTEGER{.QuadPart = LONGLONG(start_off * block_size)};
+        auto off = LARGE_INTEGER{.QuadPart = LONGLONG(param.BlockBytes(start_off))};
         if (!SetFilePointerEx(h.get(), off, nullptr, FILE_BEGIN))
         {
             SetMediumError(Status, 1);
@@ -1337,7 +1344,7 @@ static DWORD InternalReadChunk(ChunkDisk* cdisk, PVOID& buffer,
             || length_bytes != length_read)
         {
             SetMediumError(Status, 1, true,
-                           chunk_idx * chunk_length + start_off + (length_read + 1) / block_size);
+                           param.ChunkBlocks(chunk_idx) + start_off + param.ByteBlock(length_read + 1).first);
             return 2;
         }
         buffer = recast<u8*>(buffer) + length_bytes;
@@ -1345,7 +1352,7 @@ static DWORD InternalReadChunk(ChunkDisk* cdisk, PVOID& buffer,
     else
     {
         // not aligned to page
-        auto off = LARGE_INTEGER{.QuadPart = LONGLONG(r.start_idx * page_size)};
+        auto off = LARGE_INTEGER{.QuadPart = LONGLONG(param.PageBytes(r.start_idx))};
         if (!SetFilePointerEx(h.get(), off, nullptr, FILE_BEGIN))
         {
             SetMediumError(Status, 1);
@@ -1354,7 +1361,7 @@ static DWORD InternalReadChunk(ChunkDisk* cdisk, PVOID& buffer,
 
         err = InternalReadPage(
             cdisk, h.get(), buffer, r.base_idx + r.start_idx,
-            r.start_off, r.start_idx == r.end_idx ? r.end_off : page_length, Status);
+            r.start_off, r.start_idx == r.end_idx ? r.end_off : param.page_length, Status);
         if (err != ERROR_SUCCESS) return err;
 
         if (r.start_idx != r.end_idx)
@@ -1363,7 +1370,7 @@ static DWORD InternalReadChunk(ChunkDisk* cdisk, PVOID& buffer,
             {
                 err = InternalReadPage(
                     cdisk, h.get(), buffer, r.base_idx + i,
-                    0, page_length, Status);
+                    0, param.page_length, Status);
                 if (err != ERROR_SUCCESS) return err;
             }
             err = InternalReadPage(cdisk, h.get(), buffer, r.base_idx + r.end_idx,
@@ -1388,23 +1395,18 @@ static DWORD InternalWriteChunk(ChunkDisk* cdisk, PVOID& buffer,
     auto err = cdisk->ChunkOpen(chunk_idx, true, h);
     if (err != ERROR_SUCCESS) return 1;
 
-    auto block_size = cdisk->param.block_size;
-    auto page_length = cdisk->param.page_length;
-    auto page_size = cdisk->param.page_length * block_size;
-    auto chunk_length = cdisk->param.chunk_length;
-
-    auto length_bytes = (end_off - start_off) * block_size;
+    auto& param = cdisk->param;
+    auto length_bytes = param.BlockBytes(end_off - start_off);
 
     const auto r = cdisk->param.BlockPageRange(chunk_idx, start_off, end_off);
-
-    if (r.start_off == 0 && r.end_off == page_length && (recast<size_t>(buffer) % page_size) == 0)
+    if (param.IsPageAligned(r.start_off, r.end_off, buffer))
     {
         // aligned to page
         cdisk->RemovePages(r);  // Windows caches buffer
 
         if (buffer != nullptr)
         {
-            auto off = LARGE_INTEGER{.QuadPart = LONGLONG(start_off * block_size)};
+            auto off = LARGE_INTEGER{.QuadPart = LONGLONG(param.BlockBytes(start_off))};
             if (!SetFilePointerEx(h.get(), off, nullptr, FILE_BEGIN))
             {
                 SetMediumError(Status, sense);
@@ -1416,7 +1418,7 @@ static DWORD InternalWriteChunk(ChunkDisk* cdisk, PVOID& buffer,
                 || length_bytes != length_written)
             {
                 SetMediumError(Status, sense, true,
-                               chunk_idx * chunk_length + start_off + (length_written + 1) / block_size);
+                               param.ChunkBlocks(chunk_idx) + start_off + param.ByteBlock(length_written + 1).first);
                 return 2;
             }
             buffer = recast<u8*>(buffer) + length_bytes;
@@ -1424,8 +1426,8 @@ static DWORD InternalWriteChunk(ChunkDisk* cdisk, PVOID& buffer,
         else
         {
             FILE_ZERO_DATA_INFORMATION zero_info;
-            zero_info.FileOffset.QuadPart = LONGLONG(start_off * block_size);
-            zero_info.BeyondFinalZero.QuadPart = LONGLONG(end_off * block_size);
+            zero_info.FileOffset.QuadPart = LONGLONG(param.BlockBytes(start_off));
+            zero_info.BeyondFinalZero.QuadPart = LONGLONG(param.BlockBytes(end_off));
 
             auto bytes_returned = DWORD();
             if (!DeviceIoControl(
@@ -1440,7 +1442,7 @@ static DWORD InternalWriteChunk(ChunkDisk* cdisk, PVOID& buffer,
     else
     {
         // not aligned to page
-        auto off = LARGE_INTEGER{.QuadPart = LONGLONG(r.start_idx * page_size)};
+        auto off = LARGE_INTEGER{.QuadPart = LONGLONG(param.PageBytes(r.start_idx))};
         if (!SetFilePointerEx(h.get(), off, nullptr, FILE_BEGIN))
         {
             SetMediumError(Status, sense);
@@ -1449,7 +1451,7 @@ static DWORD InternalWriteChunk(ChunkDisk* cdisk, PVOID& buffer,
 
         err = InternalWritePage(
             cdisk, h.get(), buffer, r.base_idx + r.start_idx,
-            r.start_off, r.start_idx == r.end_idx ? r.end_off : page_length, Status);
+            r.start_off, r.start_idx == r.end_idx ? r.end_off : param.page_length, Status);
         if (err != ERROR_SUCCESS) return err;
 
         if (r.start_idx != r.end_idx)
@@ -1458,7 +1460,7 @@ static DWORD InternalWriteChunk(ChunkDisk* cdisk, PVOID& buffer,
             {
                 err = InternalWritePage(
                     cdisk, h.get(), buffer, r.base_idx + i,
-                    0, page_length, Status);
+                    0, param.page_length, Status);
                 if (err != ERROR_SUCCESS) return err;
             }
             err = InternalWritePage(cdisk, h.get(), buffer, r.base_idx + r.end_idx,
