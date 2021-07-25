@@ -95,7 +95,7 @@ struct Map
         std::pair<const KT&, VT&> operator*() const noexcept
         {
             auto& p = *it_;
-            return std::make_pair(std::ref(p.first), std::ref(p.second.val));
+            return make_pair(std::ref(p.first), std::ref(p.second.val));
         }
 
         auto operator++() noexcept
@@ -149,7 +149,7 @@ struct Map
     {
         auto [it, emplaced] = map_.emplace(std::forward<Args>(args)...);
         if (emplaced) it->second.it = key_order_.emplace(key_order_.end(), &it->first);
-        return std::make_pair(iterator(&map_, it, key_order_.end()), emplaced);
+        return make_pair(iterator(&map_, it, key_order_.end()), emplaced);
     }
 
     template <class... Args>
@@ -157,7 +157,7 @@ struct Map
     {
         auto [it, emplaced] = map_.try_emplace(k, std::forward<Args>(args)...);
         if (emplaced) it->second.it = key_order_.emplace(key_order_.end(), &it->first);
-        return std::make_pair(iterator(&map_, it, key_order_.end()), emplaced);
+        return make_pair(iterator(&map_, it, key_order_.end()), emplaced);
     }
 
     template <class... Args>
@@ -165,7 +165,7 @@ struct Map
     {
         auto [it, emplaced] = map_.try_emplace(std::move(k), std::forward<Args>(args)...);
         if (emplaced) it->second.it = key_order_.emplace(key_order_.end(), &it->first);
-        return std::make_pair(iterator(&map_, it, key_order_.end()), emplaced);
+        return make_pair(iterator(&map_, it, key_order_.end()), emplaced);
     }
 
     // invalidates only key_order_ iterator
