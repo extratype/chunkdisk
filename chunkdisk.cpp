@@ -15,9 +15,8 @@
  *
  * TRIM (Unmap): make chunk empty if whole, zero-fill otherwise
  * TODO: check partition -> TRIM -> shrink -> delete orphan empty chunks
- * TODO: sparse chunk
- * TODO: asynchronous (overlapped) file operations
- * TODO: differential disk (take snapshots and merge later)
+ * TODO: sparse chunk?
+ * TODO: differential (take snapshots and merge later) disk (xor or copy?)
  */
 
 #include <type_traits>
@@ -36,8 +35,12 @@
 #include <filesystem>
 #include <winspd/winspd.h>
 
+// FIXME separate modules
+// FIXME static -> anonymous namespace
+// FIXME docs
+
 template <class T, class U>
-constexpr T recast(U arg)
+static constexpr T recast(U arg)
 {
     return reinterpret_cast<T>(arg);
 }
@@ -172,17 +175,15 @@ struct Map
     // invalidates only key_order_ iterator
     void reinsert_front(iterator it)
     {
-        auto* key = &((*it).first);
-        key_order_.erase(it.it_->second.it);
-        it.it_->second.it = key_order_.emplace(key_order_.begin(), key);
+        key_order_.splice(key_order_.begin(), key_order_, it.it_->second.it);
+        it.it_->second.it = key_order_.begin();
     }
 
     // invalidates only key_order_ iterator
     void reinsert_back(iterator it)
     {
-        auto* key = &((*it).first);
-        key_order_.erase(it.it_->second.it);
-        it.it_->second.it = key_order_.emplace(key_order_.end(), key);
+        key_order_.splice(key_order_.end(), key_order_, it.it_->second.it);
+        it.it_->second.it = --key_order_.end();
     }
 
     void pop_front()
@@ -263,19 +264,19 @@ static DWORD ConvertUTF8(const u8* text, int size, wstring& result)
 }
 
 template <class... Ts>
-void info(PCWSTR format, Ts&&... args)
+static void info(PCWSTR format, Ts&&... args)
 {
     SpdServiceLog(EVENTLOG_INFORMATION_TYPE, const_cast<PWSTR>(format), std::forward<Ts>(args)...);
 }
 
 template <class... Ts>
-void warn(PCWSTR format, Ts&&... args)
+static void warn(PCWSTR format, Ts&&... args)
 {
     SpdServiceLog(EVENTLOG_WARNING_TYPE, const_cast<PWSTR>(format), std::forward<Ts>(args)...);
 }
 
 template <class... Ts>
-void logerr(PCWSTR format, Ts&&... args)
+static void logerr(PCWSTR format, Ts&&... args)
 {
     SpdServiceLog(EVENTLOG_ERROR_TYPE, const_cast<PWSTR>(format), std::forward<Ts>(args)...);
 }
@@ -323,19 +324,20 @@ using FileHandle = unique_ptr<void, FileHandleDeleter>;
 
 // like lock_guard<SRWLOCK>
 // can be reset
+// NOTE: it's a programming error to try to acquire an SRW lock recursively.
 class SRWLockGuard
 {
 public:
     SRWLockGuard() : lock_(nullptr), is_exclusive_(false) {}
 
-    explicit SRWLockGuard(PSRWLOCK lock, bool is_exclusive) noexcept
+    explicit SRWLockGuard(PSRWLOCK lock, bool is_exclusive)
         : lock_(lock), is_exclusive_(is_exclusive)
     {
         if (!*this) return;
         is_exclusive_ ? AcquireSRWLockExclusive(lock_) : AcquireSRWLockShared(lock_);
     }
 
-    virtual ~SRWLockGuard() { reset(); }
+    ~SRWLockGuard() { reset(); }
 
     SRWLockGuard(const SRWLockGuard&) = delete;
 
@@ -353,7 +355,7 @@ public:
     }
 
     // release *this and take the ownership of other
-    void reset(SRWLockGuard&& other) noexcept { swap(*this, other); }
+    void reset(SRWLockGuard&& other) { swap(*this, other); }
 
 protected:
     PSRWLOCK lock_;
@@ -367,6 +369,27 @@ protected:
         swap(a.is_exclusive_, b.is_exclusive_);
     }
 };
+
+void SetScsiStatus(SPD_IOCTL_STORAGE_UNIT_STATUS* status, u8 sense_key, u8 asc)
+{
+    status->ScsiStatus = SCSISTAT_CHECK_CONDITION;
+    status->SenseKey = sense_key;
+    status->ASC = asc;
+}
+
+void SetScsiStatus(SPD_IOCTL_STORAGE_UNIT_STATUS* status, u8 sense_key, u8 asc, u64 info)
+{
+    SetScsiStatus(status, sense_key, asc);
+    status->Information = info;
+    status->InformationValid = 1;
+}
+
+// FIXME constants
+constexpr auto BLOCK_SIZE = u32(512);
+constexpr auto PAGE_SIZE = u32(4096);
+constexpr auto STANDBY_MS = u32(60000);
+constexpr auto MAX_TRANSFER_LENGTH = u32(64 * 1024);    // FIXME must be a multiple of PAGE_SIZE
+constexpr auto MAX_QD = u32(32);    // QD32
 
 // [start_idx, end_idx], [start_off, end_off), 0 < end_off <= chunk_length
 struct ChunkRange
@@ -399,19 +422,52 @@ using Pages = unique_ptr<void, PagesDeleter>;
 
 struct PageEntry
 {
-    Pages vmem;
-    SRWLOCK lock = SRWLOCK_INIT;    // acquire it while using vmem
+    Pages mem;
+    // acquire it while using mem
+    SRWLOCK lock = SRWLOCK_INIT;
+    // thread ID owning lock exclusively
+    // ID 0 is in use by Windows kernel
+    // not safe if compared to other threads
+    DWORD owner = 0;
+};
+
+// Don't upcast a pointer to SRWLockGuard
+class PageGuard : public SRWLockGuard
+{
+public:
+    PageGuard() : SRWLockGuard() {}
+
+    explicit PageGuard(PageEntry* entry, bool is_exclusive)
+        : SRWLockGuard(&entry->lock, is_exclusive)
+    {
+        if (is_exclusive) entry->owner = GetCurrentThreadId();
+    }
+
+    ~PageGuard() { reset(); }
+
+    PageGuard(PageGuard&& other) noexcept : PageGuard() { swap(*this, other); }
+
+    void reset()
+    {
+        if (!*this) return;
+        if (is_exclusive()) page_entry()->owner = 0;
+        SRWLockGuard::reset();
+    }
+
+    // release *this and take the ownership of other
+    void reset(PageGuard&& other) { swap(*this, other); }
+
+private:
+    PageEntry* page_entry() { return CONTAINING_RECORD(lock_, PageEntry, lock); }
 };
 
 // current thread only
-struct AcquiredPage
+// should be local
+struct PageResult
 {
     DWORD error;                    // page invalid if not ERROR_SUCCESS
-    SRWLockGuard guard;             // hold while using ptr
-
-    LPVOID ptr = nullptr;           // ChunkDisk::page_size
-    const bool is_write = false;    // ChunkDisk::AcquirePage()
-    const bool is_hit = false;      // ptr is zero initialized if !is_hit
+    PageGuard guard;                // hold while using ptr
+    LPVOID ptr = nullptr;           // size: ChunkDiskParam::PageBytes(1)
 };
 
 struct ChunkDiskParam
@@ -501,8 +557,8 @@ struct ChunkDiskParam
 /*
  * read .chunkdisk file
  *
- * disk size in bytes: must be a multiple of 4096
- * chunk size in bytes: must be a multiple of 4096
+ * disk size in bytes: must be a multiple of PAGE_SIZE
+ * chunk size in bytes: must be a multiple of PAGE_SIZE
  * number path/to/dir...: max. # of chunks in part directory
  */
 static DWORD ReadChunkDiskParam(PCWSTR cdisk_path, ChunkDiskParam& param)
@@ -567,24 +623,23 @@ static DWORD ReadChunkDiskParam(PCWSTR cdisk_path, ChunkDiskParam& param)
         }
 
         // check parameters
-        constexpr auto block_size = u32(512);
+
         if (disk_size == 0 || chunk_size == 0) return ERROR_INVALID_PARAMETER;
-        if (disk_size % block_size || chunk_size > disk_size) return ERROR_INVALID_PARAMETER;
-        if (chunk_size % block_size) return ERROR_INVALID_PARAMETER;
+        if (disk_size % BLOCK_SIZE || chunk_size > disk_size) return ERROR_INVALID_PARAMETER;
+        if (chunk_size % BLOCK_SIZE) return ERROR_INVALID_PARAMETER;
 
         auto chunk_count = (disk_size + (chunk_size - 1)) / chunk_size;
         if (chunk_count == 0) return ERROR_INVALID_PARAMETER;
         if (chunk_count > std::accumulate(part_max.begin(), part_max.end(), 0ull)) return ERROR_INVALID_PARAMETER;
-        auto chunk_length = chunk_size / block_size;
+        auto chunk_length = chunk_size / BLOCK_SIZE;
 
-        constexpr auto page_size = u32(4096);
-        if (disk_size % page_size) return ERROR_INVALID_PARAMETER;
-        if (chunk_size % page_size) return ERROR_INVALID_PARAMETER;
+        if (disk_size % PAGE_SIZE) return ERROR_INVALID_PARAMETER;
+        if (chunk_size % PAGE_SIZE) return ERROR_INVALID_PARAMETER;
         // if (page_size % block_size) return ERROR_INVALID_PARAMETER;
 
-        param.block_size = block_size;
-        param.page_length = page_size / block_size;
-        param.block_count = disk_size / block_size;
+        param.block_size = BLOCK_SIZE;
+        param.page_length = PAGE_SIZE / BLOCK_SIZE;
+        param.block_count = disk_size / BLOCK_SIZE;
         param.chunk_length = chunk_length;
         param.chunk_count = chunk_count;
         param.part_max = std::move(part_max);
@@ -597,8 +652,7 @@ static DWORD ReadChunkDiskParam(PCWSTR cdisk_path, ChunkDiskParam& param)
     }
 }
 
-// FIXME: no flush flag, metadata flushed after idling
-enum ChunkOp
+enum ChunkOp : u32
 {
     READ_CHUNK,
     WRITE_CHUNK,
@@ -606,6 +660,15 @@ enum ChunkOp
     WRITE_PAGE,             // not aligned, write in pages
     WRITE_PAGE_PARTIAL,     // not page aligned, read then write in pages
     UNMAP_CHUNK
+};
+
+// FIXME members
+enum ChunkOpStep : u32
+{
+    OP_READY = 0,       // nothing has been done
+    OP_DONE,            // completed or error
+    OP_WAIT_PAGE,       // waiting for page I/O
+    OP_READ_PAGE        // for WRITE_PAGE_PARTIAL, page read, will be written
 };
 
 class ChunkDisk
@@ -618,7 +681,7 @@ public:
         cached_pages_.reserve(max_pages);
     }
 
-    virtual ~ChunkDisk()
+    ~ChunkDisk()
     {
         FlushAll();
         if (storage_unit != nullptr) SpdStorageUnitDelete(storage_unit);
@@ -725,7 +788,6 @@ public:
     {
         try
         {
-            // FIXME granularity
             // check existence
             auto g = SRWLockGuard(&lock_parts_, true);
 
@@ -795,13 +857,12 @@ public:
                     }
                     else
                     {
-                        file_size.QuadPart = chunk_bytes;
-                        if (!SetFilePointerEx(h.get(), file_size, nullptr, FILE_BEGIN)) return GetLastError();
-                        if (!SetEndOfFile(h.get())) return GetLastError();
                         // This just reserves disk space and sets file length on NTFS.
                         // Writing to the file actually extends the physical data, but synchronously.
                         // See https://devblogs.microsoft.com/oldnewthing/20150710-00/?p=45171.
-                        // FIXME: seek to EOF and write a byte to avoid synchronous writes?
+                        file_size.QuadPart = chunk_bytes;
+                        if (!SetFilePointerEx(h.get(), file_size, nullptr, FILE_BEGIN)) return GetLastError();
+                        if (!SetEndOfFile(h.get())) return GetLastError();
                     }
                 }
             }
@@ -821,7 +882,6 @@ public:
     {
         auto gp = SRWLockGuard(&lock_parts_, false);
 
-        // FIXME granularity
         auto part_it = chunk_parts_.find(chunk_idx);
         if (part_it == chunk_parts_.end()) return ERROR_SUCCESS; // not present
 
@@ -843,6 +903,7 @@ public:
         return ERROR_SUCCESS;
     }
 
+    // FIXME check busy
     // FIXME -> worker
     // release resources for all chunks >= chunk_idx
     DWORD FlushAll(u64 chunk_idx = 0)
@@ -858,7 +919,7 @@ public:
                 continue;
             }
 
-            // wait for I/O to complete
+            // wait for I/O to complete FIXME PageGuard
             {
                 auto gm = SRWLockGuard(&pe.lock, true);
             }
@@ -871,88 +932,114 @@ public:
         return ERROR_SUCCESS;
     }
 
-    // get or create page for buffering and synchronizing partial data
-    // is_write: write or remove access to existing page
-    // hit_only: don't create a page
-    AcquiredPage AcquirePage(u64 page_idx, bool is_write, bool hit_only=false)
+    // acquire shared lock for reading an existing page
+    PageResult PeekPage(u64 page_idx)
     {
+        auto g = SRWLockGuard(&lock_pages_, false);
+        auto it = cached_pages_.find(page_idx);
+        if (it == cached_pages_.end()) return PageResult{ERROR_NOT_FOUND};
+
+        auto& entry = (*it).second;
+        if (entry.owner == GetCurrentThreadId()) return PageResult{ERROR_BUSY};
+        return PageResult{
+            ERROR_SUCCESS,
+            PageGuard(&entry, false),
+            (*it).second.mem.get()};
+    }
+
+    // set exclusive lock for updating a page
+    // the calling thread must FreePage() later
+    PageResult LockPage(u64 page_idx)
+    {
+        // try to keep < max_pages
+        auto trim_pages = [this]()
+        {
+            while (cached_pages_.size() >= max_pages)
+            {
+                auto progress = false;
+                for (auto it = cached_pages_.begin(); it != cached_pages_.end();)
+                {
+                    auto& entry = (*it).second;
+                    if (entry.owner == GetCurrentThreadId())
+                    {
+                        ++it;
+                        continue;
+                    }
+                    if (!TryAcquireSRWLockExclusive(&entry.lock))
+                    {
+                        ++it;
+                        continue;
+                    }
+                    ReleaseSRWLockExclusive(&entry.lock);
+                    auto it_next = it;
+                    ++it_next;
+                    cached_pages_.erase(it);
+                    it = it_next;
+                    progress = true;
+                    break;
+                }
+                if (!progress) break;
+            }
+        };
+
         try
         {
-            auto g1 = SRWLockGuard(&lock_pages_, false);
-            auto it1 = cached_pages_.find(page_idx);
+            // will reinsert_back() if hit
+            auto g = SRWLockGuard(&lock_pages_, true);
+            auto it = cached_pages_.find(page_idx);
             auto is_hit = false;
 
-            if (!hit_only && it1 == cached_pages_.end())
+            if (it == cached_pages_.end())
             {
-                g1.reset();
-                auto g2 = SRWLockGuard(&lock_pages_, true);
+                trim_pages();
 
-                // try to create page
-                auto [it2, emplaced] = cached_pages_.try_emplace(page_idx);
-
-                if (emplaced)
-                {
-                    (*it2).second.vmem.reset(VirtualAlloc(nullptr, param.PageBytes(1),
-                                             MEM_COMMIT, PAGE_READWRITE));
-
-                    // try to evict
-                    while (cached_pages_.size() > max_pages)
-                    {
-                        auto progress = false;
-                        for (auto it3 = cached_pages_.begin(); it3 != cached_pages_.end();)
-                        {
-                            if (it3 == it2)
-                            {
-                                ++it3;
-                                continue;
-                            }
-
-                            auto& entry = (*it3).second;
-                            if (TryAcquireSRWLockExclusive(&entry.lock))
-                            {
-                                // page not in use for I/O
-                                ReleaseSRWLockExclusive(&entry.lock);
-                                auto it3_next = it3;
-                                ++it3_next;
-                                cached_pages_.erase(it3);
-                                it3 = it3_next;
-                                progress = true;
-                                break;
-                            }
-
-                            ++it3;
-                        }
-                        if (!progress) break;
-                    }
-                }
-                else
-                {
-                    is_hit = true;
-                }
-
-                it1 = it2;
-                g1.reset(std::move(g2));
-            }
-            else if (hit_only && it1 == cached_pages_.end())
-            {
-                return AcquiredPage{.error=ERROR_SUCCESS, .is_write=is_write, .is_hit=false};
+                it = cached_pages_.emplace(page_idx).first;
+                auto mem = VirtualAlloc(nullptr, param.PageBytes(1), MEM_COMMIT, PAGE_READWRITE);
+                if (mem == nullptr) return PageResult{ERROR_NOT_ENOUGH_MEMORY};
+                (*it).second.mem.reset(mem);
             }
             else
             {
                 is_hit = true;
+                cached_pages_.reinsert_back(it);
             }
 
-            return AcquiredPage{
+            auto& entry = (*it).second;
+            if (entry.owner == GetCurrentThreadId()) return PageResult{ERROR_BUSY};
+            AcquireSRWLockExclusive(&entry.lock);
+            entry.owner = GetCurrentThreadId();
+            return PageResult{
                 ERROR_SUCCESS,
-                SRWLockGuard(&((*it1).second.lock), !is_hit || is_write),
-                (*it1).second.vmem.get(),
-                is_write,
-                is_hit};
+                PageGuard(),
+                entry.mem.get()};
         }
         catch (const bad_alloc&)
         {
-            return AcquiredPage{.error = ERROR_NOT_ENOUGH_MEMORY};
+            return PageResult{ERROR_NOT_ENOUGH_MEMORY};
         }
+    }
+
+    PageResult ClaimPage(u64 page_idx)
+    {
+        auto g = SRWLockGuard(&lock_pages_, false);
+        auto it = cached_pages_.find(page_idx);
+        if (it == cached_pages_.end()) return PageResult{ERROR_INVALID_PARAMETER};
+        auto& entry = (*it).second;
+        if (entry.owner != GetCurrentThreadId()) return PageResult{ERROR_INVALID_PARAMETER};
+        return PageResult{ERROR_SUCCESS, PageGuard(), entry.mem.get()};
+    }
+
+    // clear the lock and optionally remove the page
+    // the calling thread must have successfully called LockPage()
+    void FreePage(u64 page_idx, bool remove=false)
+    {
+        auto g = SRWLockGuard(&lock_pages_, remove);
+        auto it = cached_pages_.find(page_idx);
+        if (it == cached_pages_.end()) return;
+        auto& entry = (*it).second;
+        entry.owner = 0;
+        ReleaseSRWLockExclusive(&entry.lock);
+        if (remove) cached_pages_.erase(it);
     }
 
     DWORD RemovePages(PageRange r)
@@ -968,7 +1055,9 @@ public:
 
             // wait for I/O to complete
             {
-                auto gm = SRWLockGuard(&((*it).second.lock), true);
+                auto& entry = (*it).second;
+                if (entry.owner == GetCurrentThreadId()) return ERROR_BUSY;
+                auto gm = PageGuard(&entry, true);
             }
             cached_pages_.erase(it);
         }
@@ -990,77 +1079,91 @@ private:
     unordered_map<u64, size_t> chunk_parts_;    // chunk index -> part index
 
     SRWLOCK lock_pages_ = SRWLOCK_INIT;
-    // 512 bytes sector -> 4096 bytes page (VirtualAlloc)
+    // BLOCK_SIZE -> PAGE_SIZE access
     // read cache, write through
-    // push_back to add, pop_front to evict
-    // TODO: reinsert_back() if hit
+    // add to back, evict from front
     Map<u64, PageEntry> cached_pages_;
 };
 
-struct ChunkWork;
-
-struct ChunkOpState
-{
-    OVERLAPPED ovl;
-    ChunkWork* owner;
-    ChunkOp op;
-    u32 step;           // FIXME indicate completion
-    u64 idx;            // chunk_idx or page_idx
-    u64 start_off;
-    u64 end_off;
-    PVOID buffer;
-
-    ChunkOpState(ChunkOp op, u64 idx, u64 start_off, u64 end_off, LONGLONG file_off, PVOID buffer)
-        : ovl(), owner(), op(op), step(), idx(idx), start_off(start_off), end_off(end_off), buffer(buffer)
-    {
-        LARGE_INTEGER li{.QuadPart = file_off};
-        ovl.Offset = li.LowPart;
-        ovl.OffsetHigh = li.HighPart;
-    }
-};
-
-typedef std::list<ChunkWork>::iterator ChunkWorkIt;
+struct ChunkOpState;
 
 struct ChunkWork
 {
     vector<ChunkOpState> ops;
-    Pages buffer;               // for freeing buffer
-    ChunkWorkIt it;             // from ChunkDiskWorker::working_
+    Pages buffer;               // FIXME ReturnBuffer()
+    std::list<ChunkWork>::iterator it = {};        // from ChunkDiskWorker::working_ FIXME type
     u32 num_completed = 0;      // work finished when ops.size() == num_completed
     u32 num_errors = 0;         // failed op out of num_completed
 
     // Status: the first reported error
-    // Status.ScsiStatus: SCSISTAT_GOOD or SCSISTAT_CHECK_CONDITION
-    // Status.SenseKey: SCSI_SENSE_MEDIUM_ERROR, FIXME SCSI_SENSE_ABORTED_COMMAND
-    SPD_IOCTL_TRANSACT_RSP response;
+    SPD_IOCTL_TRANSACT_RSP response = {};
 
-    explicit ChunkWork(vector<ChunkOpState> ops) : ops(std::move(ops)), it(), response() {}
-
-    // FIXME SpdStorageUnitGetOperationContext()
     void SetContext(u64 hint, u8 kind)
     {
         response.Hint = hint;
         response.Kind = kind;
     }
 
-    // SpdStatusUnitStatusSetSense()
-    void SetStatusChecked(u8 sense_key, u8 asc, bool info_valid = false, u64 info = 0)
+    void SetStatusChecked(u8 sense_key, u8 asc)
     {
-        auto& status = response.Status;
-        if (status.ScsiStatus != SCSISTAT_GOOD) return;
+        if (response.Status.ScsiStatus != SCSISTAT_GOOD) return;
+        SetScsiStatus(&response.Status, sense_key, asc);
+    }
 
-        status.ScsiStatus = SCSISTAT_CHECK_CONDITION;
-        status.SenseKey = sense_key;
-        status.ASC = asc;
-        if (info_valid)
+    void SetStatusChecked(u8 sense_key, u8 asc, u64 info)
+    {
+        if (response.Status.ScsiStatus != SCSISTAT_GOOD) return;
+        SetScsiStatus(&response.Status, sense_key, asc, info);
+    }
+};
+
+struct ChunkOpState
+{
+    OVERLAPPED ovl = {};
+    ChunkWork* owner;
+    ChunkOp op;
+    ChunkOpStep step = OP_READY;
+    u64 idx;                        // chunk_idx or page_idx
+    u64 start_off;
+    u64 end_off;
+    PVOID buffer;
+
+    ChunkOpState(ChunkWork* owner, ChunkOp op, u64 idx, u64 start_off, u64 end_off, LONGLONG file_off, PVOID buffer)
+        : owner(owner), op(op), idx(idx), start_off(start_off), end_off(end_off), buffer(buffer)
+    {
+        LARGE_INTEGER li{.QuadPart = file_off};
+        ovl.Offset = li.LowPart;
+        ovl.OffsetHigh = li.HighPart;
+    }
+
+    void ReportResult()
+    {
+        step = OP_DONE;
+        ++owner->num_completed;
+    }
+
+    void ReportResult(DWORD error, u8 sense_key, u8 asc)
+    {
+        ReportResult();
+        if (error != ERROR_SUCCESS)
         {
-            status.Information = info;
-            status.InformationValid = 1;
+            ++owner->num_errors;
+            owner->SetStatusChecked(sense_key, asc);
+        }
+    }
+
+    void ReportResult(DWORD error, u8 sense_key, u8 asc, u64 info)
+    {
+        ReportResult();
+        if (error != ERROR_SUCCESS)
+        {
+            ++owner->num_errors;
+            owner->SetStatusChecked(sense_key, asc, info);
         }
     }
 };
 
-static ChunkOpState* GetOverlappedOp(LPOVERLAPPED ovl)
+static ChunkOpState* GetOverlappedOp(OVERLAPPED* ovl)
 {
     return CONTAINING_RECORD(ovl, ChunkOpState, ovl);
 }
@@ -1129,14 +1232,12 @@ public:
         return exit_code;
     }
 
-    // FIXME ERROR_SUCCESS or other error: synchronous
-    // SpdStorageUnitGetOperationContext() -> Response->Status, DataBuffer
-    // init async buffer to zero, write back to sync. buffer
-    // FIXME ERROR_IO_PENDING: asynchronous
-    // worker send response either case, return TRUE or FALSE in the SPD_STORAGE_UNIT_INTERFACE operations
-    //
+    // FIXME context from SpdStorageUnitGetOperationContext()
+    // FIXME ERROR_SUCCESS if done sync.
+    // FIXME ERROR_IO_PENDING if async.
+    // FIXME worker send response either case, return TRUE or FALSE in the SPD_STORAGE_UNIT_INTERFACE operations
     // op: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK
-    DWORD PostWork(ChunkOp op, u64 block_addr, u32 count)
+    DWORD PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, ChunkOp op, u64 block_addr, u32 count)
     {
         if (!IsRunning()) return ERROR_INVALID_STATE;
 
@@ -1144,44 +1245,59 @@ public:
         // single dispatcher, no more works to be queued
         {
             auto g = SRWLockGuard(&lock_working_, false);
-            if (working_.size() >= max_working) return ERROR_BUSY;
+            if (working_.size() >= MAX_QD) return ERROR_BUSY;
         }
 
         // prepare buffer
-        auto work_buffer = Pages();
+        // zero-fill work_buffer, write back to ctx_buffer if done sync.
+        auto ctx_buffer = context->DataBuffer;
+        auto work_buffer = Pages();     // nullptr if UNMAP_CHUNK
         if (op == READ_CHUNK || op == WRITE_CHUNK)
         {
-            auto buffer_size = owner_.param.BlockBytes(count);
-            // FIXME GetBuffer(), ReturnBuffer()
-            work_buffer.reset(VirtualAlloc(nullptr, buffer_size, MEM_COMMIT, PAGE_READWRITE));
-            if (!work_buffer) return GetLastError();
-            // FIXME get buffer from context
-            // FIXME buffer is nullptr for UNMAP_CHUNK
-            if (op == WRITE_CHUNK) memcpy(work_buffer.get(), buffer, buffer_size);
+            auto err = GetBuffer(work_buffer);
+            if (err != ERROR_SUCCESS)
+            {
+                SetScsiStatus(&context->Response->Status, SCSI_SENSE_HARDWARE_ERROR, SCSI_ADSENSE_NO_SENSE);
+                return err;
+            }
+            if (op == WRITE_CHUNK) memcpy(work_buffer.get(), ctx_buffer, owner_.param.BlockBytes(count));
         }
 
+        // prepare work
+        auto work = ChunkWork();
+        work.buffer = std::move(work_buffer);
+
+        auto err = PrepareOps(work, op, block_addr, count);
+        if (err != ERROR_SUCCESS)
+        {
+            if (work.num_errors == 0)
+            {
+                SetScsiStatus(&context->Response->Status, SCSI_SENSE_HARDWARE_ERROR, SCSI_ADSENSE_NO_SENSE);
+            }
+            else
+            {
+                context->Response->Status = work.response.Status;
+            }
+            return err;
+        }
+
+        if (work.num_completed == work.ops.size())
+        {
+            // all done sync.
+            if (op == READ_CHUNK) memcpy(ctx_buffer, work.buffer.get(), MAX_TRANSFER_LENGTH);
+            return ERROR_SUCCESS;
+        }
+
+        // start async.
+        work.SetContext(context->Response->Hint, context->Response->Kind);
         try
         {
             auto g = SRWLockGuard(&lock_working_, true);
-
-            vector<ChunkOpState> ops;
-            auto err = PrepareOps(ops, op, block_addr, count, work_buffer.get());
-            if (err != ERROR_SUCCESS)
-            {
-                // FIXME synchronous I/O failure -> cancel all
-            }
-
-            if (ops.empty())
-            {
-                // FIXME zero ops -> done immediately
-            }
-
-            auto work_it = working_.emplace(working_.end(), std::move(ops));
+            auto work_it = working_.emplace(working_.end(), std::move(work));
             work_it->it = work_it;
-            work_it->buffer = std::move(work_buffer);
 
             if (!PostQueuedCompletionStatus(iocp_.get(), 0,
-                                            CK_POST, recast<LPOVERLAPPED>(&*work_it)))
+                                            CK_POST, recast<OVERLAPPED*>(&*work_it)))
             {
                 working_.erase(work_it);
                 return GetLastError();
@@ -1191,17 +1307,15 @@ public:
         {
             return ERROR_NOT_ENOUGH_MEMORY;
         }
-        return ERROR_SUCCESS;
+        return ERROR_IO_PENDING;
     }
-
-    static constexpr u32 max_working = 32;     // QD32
 
 private:
     enum IOCPKey
     {
-        CK_IO = 0,      // file I/O
-        CK_POST,        // disk I/O request from PostWork()
-        CK_FAIL         // failed to start file I/O
+        CK_IO = 0,      // file I/O succeeded
+        CK_FAIL,        // file I/O failed
+        CK_POST         // disk I/O request from PostWork()
     };
 
     static DWORD ThreadProc(LPVOID param)
@@ -1216,12 +1330,12 @@ private:
     {
         auto bytes_transmitted = DWORD();
         auto ckey = u64();
-        auto overlapped = LPOVERLAPPED();
+        auto overlapped = (OVERLAPPED*)(nullptr);
 
         while (true)
         {
             auto err = GetQueuedCompletionStatus(
-                iocp_.get(), &bytes_transmitted, &ckey, &overlapped, 60000)
+                    iocp_.get(), &bytes_transmitted, &ckey, &overlapped, STANDBY_MS)
                 ? ERROR_SUCCESS : GetLastError();
 
             if (overlapped == nullptr)
@@ -1242,151 +1356,38 @@ private:
             if (ckey == CK_POST)
             {
                 auto& work = *recast<ChunkWork*>(overlapped);
-                // FIXME zero ops
 
-                PostIO(work);    // FIXME on error
-                // FIXME release work, buffer
+                // FIXME on error
+                for (auto& op : work.ops)
+                {
+                    if (op.step != OP_DONE) PostOp(op);
+                }
                 continue;
             }
-            else if (ckey == CK_IO)
+
+            if (ckey == CK_IO)
             {
                 auto& state = *GetOverlappedOp(overlapped);
+
+                // FIXME completed ops
+                // FIXME erase work, ReturnBuffer()
+                CompleteIO(state, err, bytes_transmitted);
+
+
             }
-        }
-    }
-
-    // FIXME OpenPage, ClosePage
-    // FIXME synchronous
-    /*
-        loop:
-            a. prepare work
-                blocked by page -> add wait (also to working)
-                check wait: if passed -> post I/O
-            b. complete I/O
-            c. complete work
-
-
-        synchronous page ops
-            read:
-                try_acquire (SHARED only):
-                    if hit:
-                        copy and done
-                otherwise: async
-
-            write:
-                EXCLUSIVE
-                async only
-
-            continue to async:
-                if OPEN: wait
-                else: OpenPage, do I/O
-     */
-    DWORD PreparePageOps(vector<ChunkOpState>& ops, bool is_write, u64 page_idx,
-                        u32 start_off, u32 end_off, LONGLONG& file_off, PVOID& buffer)
-    {
-        auto& param = owner_.param;
-        auto op = is_write ? WRITE_PAGE : READ_PAGE;
-        if (is_write && !param.IsPageAligned(start_off, end_off)) op = WRITE_PAGE_PARTIAL;
-
-        ops.emplace_back(op, page_idx, start_off, end_off, file_off, buffer);
-        file_off += LONGLONG(param.PageBytes(1));
-        if (!(is_write && buffer == nullptr)) buffer = recast<u8*>(buffer) + param.BlockBytes(end_off - start_off);
-
-        return ERROR_SUCCESS;
-    }
-
-    // nothing added to ops if nothing to do in async
-    DWORD PrepareChunkOps(vector<ChunkOpState>& ops, ChunkOp op, u64 chunk_idx,
-                         u64 start_off, u64 end_off, PVOID& buffer)
-    {
-        auto& param = owner_.param;
-
-        // synchronous I/O
-        // FIXME set sense
-        if (op == READ_CHUNK || op == UNMAP_CHUNK)
-        {
-            if (op == UNMAP_CHUNK && param.IsWholeChunk(start_off, end_off)) return owner_.UnmapChunk(chunk_idx);
-
-            auto h = HANDLE(INVALID_HANDLE_VALUE);
-            auto err = OpenChunk(chunk_idx, false, h);
-            if (err != ERROR_SUCCESS) return err;
-            // FIXME buffer was zero-filled if READ_CHUNK
-            // nothing to do if UNMAP_CHUNK
-            if (h == INVALID_HANDLE_VALUE) return ERROR_SUCCESS;
-
-            CloseChunk(chunk_idx);
-            if (op == UNMAP_CHUNK)
+            else if (ckey == CK_FAIL)
             {
-                op = WRITE_CHUNK;
-                // buffer is nullptr for UNMAP_CHUNK
+                auto& state = *recast<ChunkOpState*>(overlapped);
             }
         }
-
-        // prepare asynchronous I/O
-        auto is_write = (op == WRITE_CHUNK);
-        if (param.IsPageAligned(start_off, end_off, buffer))
-        {
-            // aligned to page
-            ops.emplace_back(op, chunk_idx, start_off, end_off, LONGLONG(param.BlockBytes(start_off)), buffer);
-            if (!(is_write && buffer == nullptr)) buffer = recast<u8*>(buffer) + param.BlockBytes(end_off - start_off);
-
-            // FIXME page ops
-        }
-        else
-        {
-            // not aligned to page
-            const auto r = param.BlockPageRange(chunk_idx, start_off, end_off);
-            auto file_off = LONGLONG(param.PageBytes(r.start_idx));
-
-            auto err = PreparePageOps(ops, is_write, r.base_idx + r.start_idx, r.start_off,
-                                      r.start_idx == r.end_idx ? r.end_off : param.page_length, file_off, buffer);
-            if (err != ERROR_SUCCESS) return err;
-            if (r.start_idx != r.end_idx)
-            {
-                for (auto i = r.start_idx + 1; i < r.end_idx; ++i)
-                {
-                    err = PreparePageOps(ops, is_write, r.base_idx + i, 0, param.page_length, file_off, buffer);
-                    if (err != ERROR_SUCCESS) return err;
-                }
-                err = PreparePageOps(ops, is_write, r.base_idx + r.end_idx, 0, r.end_off, file_off, buffer);
-                if (err != ERROR_SUCCESS) return err;
-            }
-        }
-
-        return ERROR_SUCCESS;
-    }
-
-    // op: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK
-    // nothing added to ops if nothing to do in async
-    DWORD PrepareOps(vector<ChunkOpState>& ops, ChunkOp op, u64 block_addr, u32 count, PVOID buffer)
-    {
-        const auto r = owner_.param.BlockChunkRange(block_addr, count);
-
-        auto err = PrepareChunkOps(ops, op, r.start_idx, r.start_off,
-                                   r.start_idx == r.end_idx ? r.end_off : owner_.param.chunk_length, buffer);
-        if (err != ERROR_SUCCESS) return err;
-        if (r.start_idx != r.end_idx)
-        {
-            for (auto i = r.start_idx + 1; i < r.end_idx; ++i)
-            {
-                err = PrepareChunkOps(ops, op, i, 0, owner_.param.chunk_length, buffer);
-                if (err != ERROR_SUCCESS) return err;
-            }
-            err = PrepareChunkOps(ops, op, r.end_idx, 0, r.end_off, buffer);
-            if (err != ERROR_SUCCESS) return err;
-        }
-
-        return ERROR_SUCCESS;
     }
 
     DWORD GetBuffer(Pages& buffer)
     {
         if (buffers_.empty())
         {
-            // FIXME MaxTransferLength
             // align buffer to pages
-            constexpr auto buffer_size = u32(64 * 1024);
-            auto new_buffer = Pages(VirtualAlloc(nullptr, buffer_size, MEM_COMMIT, PAGE_READWRITE));
+            auto new_buffer = Pages(VirtualAlloc(nullptr, MAX_TRANSFER_LENGTH, MEM_COMMIT, PAGE_READWRITE));
             if (!new_buffer) return GetLastError();
             buffer = std::move(new_buffer);
             return ERROR_SUCCESS;
@@ -1402,9 +1403,7 @@ private:
 
     DWORD ReturnBuffer(Pages buffer)
     {
-        // FIXME MaxTransferLength
-        constexpr auto buffer_size = u32(64 * 1024);
-        memset(buffer.get(), 0, buffer_size);
+        memset(buffer.get(), 0, MAX_TRANSFER_LENGTH);
         try
         {
             buffers_.emplace_front(std::move(buffer));
@@ -1416,7 +1415,7 @@ private:
         return ERROR_SUCCESS;
     }
 
-    // FIXME: close old HANDLEs (max_working, reinsert_back() if hit)
+    // FIXME: close old HANDLEs (keep <= MAX_QD, reinsert_back() if hit)
     DWORD OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_out)
     {
         // check HANDLE pool
@@ -1453,7 +1452,7 @@ private:
         {
             try
             {
-                it = chunk_handles_.try_emplace(chunk_idx).first;
+                it = chunk_handles_.emplace(chunk_idx).first;
             }
             catch (const bad_alloc& e)
             {
@@ -1475,8 +1474,7 @@ private:
         return ERROR_SUCCESS;
     }
 
-    // FIXME: close ALL if idle (don't close in eager, may be used later)
-    // FIXME: close handles on I/O error?
+    // FIXME: close ALL when idle (don't close in eager, may be used later) (PageOps)
     DWORD CloseChunk(u64 chunk_idx)
     {
         auto it = chunk_handles_.find(chunk_idx);
@@ -1488,45 +1486,182 @@ private:
         return ERROR_SUCCESS;
     }
 
-    /*
-     * FIXME implement
-     */
-    DWORD OpenPage(u64 page_idx, bool is_write, AcquiredPage** page)
+    DWORD PreparePageOps(ChunkWork& work, bool is_write, u64 page_idx,
+                        u32 start_off, u32 end_off, LONGLONG& file_off, PVOID& buffer)
     {
-        // FIXME check pages
-        auto it = acquired_pages_.find(page_idx);
-        if (it != acquired_pages_.end())
-        {
+        auto& param = owner_.param;
+        auto& ops = work.ops;
+        auto op = is_write ? WRITE_PAGE : READ_PAGE;
+        if (is_write && !param.IsPageAligned(start_off, end_off)) op = WRITE_PAGE_PARTIAL;
 
+        try
+        {
+            auto it = ops.emplace(ops.end(), &work, op, page_idx, start_off, end_off, file_off, buffer);
+            file_off += LONGLONG(param.PageBytes(1));
+            if (!(is_write && buffer == nullptr)) buffer = recast<u8*>(buffer) + param.BlockBytes(end_off - start_off);
+
+            // try to do synchronously
+            if (op == READ_PAGE || op == WRITE_PAGE_PARTIAL)
+            {
+                auto page = owner_.PeekPage(page_idx);
+                if (page.error == ERROR_SUCCESS)
+                {
+                    auto size = param.BlockBytes(it->end_off - it->start_off);
+                    memcpy(it->buffer, recast<u8*>(page.ptr) + param.BlockBytes(it->start_off), size);
+                    if (op == READ_PAGE)
+                    {
+                        it->ReportResult();
+                    }
+                    else
+                    {
+                        // WRITE_PAGE_PARTIAL
+                        it->step = OP_READ_PAGE;
+                    }
+                    return ERROR_SUCCESS;
+                }
+            }
+        }
+        catch (const bad_alloc&)
+        {
+            return ERROR_NOT_ENOUGH_MEMORY;
         }
 
-        auto acquired = owner_.AcquirePage(page_idx, is_write);
-        if (acquired.error != ERROR_SUCCESS) return acquired.error;
-
-        auto it = acquired_pages_.try_emplace(page_idx, std::move(acquired)).first;
-
-        *page = &((*it).second);
         return ERROR_SUCCESS;
     }
 
-    DWORD ClosePage(u64 page_idx)
+    DWORD PrepareChunkOps(ChunkWork& work, ChunkOp op, u64 chunk_idx,
+                         u64 start_off, u64 end_off, PVOID& buffer)
     {
-        // FIXME implement
+        auto& param = owner_.param;
+        auto& ops = work.ops;
+
+        // synchronous I/O
+        if (op == READ_CHUNK || op == UNMAP_CHUNK)
+        {
+            if (op == UNMAP_CHUNK && param.IsWholeChunk(start_off, end_off))
+            {
+                try
+                {
+                    auto it = ops.emplace(ops.end(), &work, op, chunk_idx, start_off, end_off, 0, nullptr);
+                    auto err = owner_.UnmapChunk(chunk_idx);
+                    it->ReportResult(err, SCSI_SENSE_MEDIUM_ERROR, SCSI_ADSENSE_NO_SENSE);
+                    return err;
+                }
+                catch (const bad_alloc&)
+                {
+                    return ERROR_NOT_ENOUGH_MEMORY;
+                }
+            }
+
+            auto h = HANDLE(INVALID_HANDLE_VALUE);
+            auto err = OpenChunk(chunk_idx, false, h);
+            if (err != ERROR_SUCCESS) return err;
+            if (h == INVALID_HANDLE_VALUE)
+            {
+                try
+                {
+                    // buffer was zero-filled, nothing to do if READ_CHUNK
+                    // nothing to do if UNMAP_CHUNK
+                    auto it = ops.emplace(ops.end(), &work, op, chunk_idx, start_off, end_off,
+                                          LONGLONG(param.BlockBytes(start_off)), buffer);
+                    it->ReportResult();
+                    return ERROR_SUCCESS;
+                }
+                catch (const bad_alloc&)
+                {
+                    return ERROR_NOT_ENOUGH_MEMORY;
+                }
+            }
+            else
+            {
+                CloseChunk(chunk_idx);
+            }
+
+            // Unmap chunk partially, zero-fill it
+            if (op == UNMAP_CHUNK)
+            {
+                op = WRITE_CHUNK;
+                // buffer is nullptr for UNMAP_CHUNK
+            }
+        }
+
+        // prepare asynchronous I/O
+        auto is_write = (op == WRITE_CHUNK);
+        if (param.IsPageAligned(start_off, end_off, buffer))
+        {
+            // aligned to page
+            try
+            {
+                ops.emplace_back(&work, op, chunk_idx, start_off, end_off, LONGLONG(param.BlockBytes(start_off)), buffer);
+                if (!(is_write && buffer == nullptr)) buffer = recast<u8*>(buffer) + param.BlockBytes(end_off - start_off);
+            }
+            catch (const bad_alloc&)
+            {
+                return ERROR_NOT_ENOUGH_MEMORY;
+            }
+        }
+        else
+        {
+            // not aligned to page
+            const auto r = param.BlockPageRange(chunk_idx, start_off, end_off);
+            auto file_off = LONGLONG(param.PageBytes(r.start_idx));
+
+            auto err = PreparePageOps(work, is_write, r.base_idx + r.start_idx, r.start_off,
+                                      r.start_idx == r.end_idx ? r.end_off : param.page_length, file_off, buffer);
+            if (err != ERROR_SUCCESS) return err;
+            if (r.start_idx != r.end_idx)
+            {
+                for (auto i = r.start_idx + 1; i < r.end_idx; ++i)
+                {
+                    err = PreparePageOps(work, is_write, r.base_idx + i, 0, param.page_length, file_off, buffer);
+                    if (err != ERROR_SUCCESS) return err;
+                }
+                err = PreparePageOps(work, is_write, r.base_idx + r.end_idx, 0, r.end_off, file_off, buffer);
+                if (err != ERROR_SUCCESS) return err;
+            }
+        }
+
+        return ERROR_SUCCESS;
+    }
+
+    // op: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK
+    // try to complete some ops synchronously, abort if one of them fails
+    DWORD PrepareOps(ChunkWork& work, ChunkOp op, u64 block_addr, u32 count)
+    {
+        auto buffer = work.buffer.get();
+        const auto r = owner_.param.BlockChunkRange(block_addr, count);
+
+        auto err = PrepareChunkOps(work, op, r.start_idx, r.start_off,
+                                   r.start_idx == r.end_idx ? r.end_off : owner_.param.chunk_length, buffer);
+        if (err != ERROR_SUCCESS) return err;
+        if (r.start_idx != r.end_idx)
+        {
+            for (auto i = r.start_idx + 1; i < r.end_idx; ++i)
+            {
+                err = PrepareChunkOps(work, op, i, 0, owner_.param.chunk_length, buffer);
+                if (err != ERROR_SUCCESS) return err;
+            }
+            err = PrepareChunkOps(work, op, r.end_idx, 0, r.end_off, buffer);
+            if (err != ERROR_SUCCESS) return err;
+        }
+
+        return ERROR_SUCCESS;
     }
 
     DWORD PostReadChunk(ChunkOpState& state)
     {
-        // FIXME pending page I/O
         // aligned to page
         // Windows caches them
-        owner_.RemovePages(owner_.param.BlockPageRange(state.idx, state.start_off, state.end_off));
+        auto& param = owner_.param;
+        auto err = owner_.RemovePages(param.BlockPageRange(state.idx, state.start_off, state.end_off));
+        if (err != ERROR_SUCCESS) return err;
 
         auto h = HANDLE(INVALID_HANDLE_VALUE);
-        auto err = OpenChunk(state.idx, false, h);
+        err = OpenChunk(state.idx, false, h);
         if (err != ERROR_SUCCESS) return err;
         // file has been checked in PrepareChunkOps(), h should be valid
 
-        auto length_bytes = owner_.param.BlockBytes(state.end_off - state.start_off);
+        auto length_bytes = param.BlockBytes(state.end_off - state.start_off);
         err = ReadFile(h, state.buffer, DWORD(length_bytes), nullptr, &state.ovl) ? ERROR_SUCCESS : GetLastError();
         if (err != ERROR_SUCCESS && err != ERROR_IO_PENDING)
         {
@@ -1538,16 +1673,15 @@ private:
 
     DWORD PostWriteChunk(ChunkOpState& state)
     {
-        auto& param = owner_.param;
-        // FIXME pending page I/O
         // aligned to page
         // Windows caches them
-        owner_.RemovePages(param.BlockPageRange(state.idx, state.start_off, state.end_off));
+        auto& param = owner_.param;
+        auto err = owner_.RemovePages(param.BlockPageRange(state.idx, state.start_off, state.end_off));
+        if (err != ERROR_SUCCESS) return err;
 
         auto h = HANDLE(INVALID_HANDLE_VALUE);
-        auto err = OpenChunk(state.idx, false, h);
+        err = OpenChunk(state.idx, true, h);
         if (err != ERROR_SUCCESS) return err;
-        // file has been checked in PrepareChunkOps(), h should be valid
 
         if (state.buffer != nullptr)
         {
@@ -1564,8 +1698,7 @@ private:
                 h, FSCTL_SET_ZERO_DATA, &zero_info, sizeof(zero_info),
                 nullptr, 0, nullptr, &state.ovl) ? ERROR_SUCCESS : GetLastError();
         }
-
-        if (err != ERROR_SUCCESS & err != ERROR_IO_PENDING)
+        if (err != ERROR_SUCCESS && err != ERROR_IO_PENDING)
         {
             CloseChunk(state.idx);
             return err;
@@ -1573,87 +1706,218 @@ private:
         return ERROR_SUCCESS;
     }
 
-    /*
-     * FIXME shared lock: if read AND cache hit -> do synchronously
-     * unique reference to page in a thread, no refs
-     */
     DWORD PostReadPage(ChunkOpState& state)
     {
         auto& param = owner_.param;
-        auto page = owner_.AcquirePage(state.idx, false);
+        auto page = owner_.LockPage(state.idx);
         if (page.error != ERROR_SUCCESS) return page.error;
 
-        // FIXME remove page if error
-        if (!page.is_hit)
+        auto h = HANDLE(INVALID_HANDLE_VALUE);
+        auto err = OpenChunk(state.idx, false, h);
+        if (err != ERROR_SUCCESS) return err;
+        // file has been checked in PrepareChunkOps(), h should be valid
+
+        err = ReadFile(h, page.ptr, u32(param.PageBytes(1)), nullptr, &state.ovl) ? ERROR_SUCCESS : GetLastError();
+        if (err != ERROR_SUCCESS && err != ERROR_IO_PENDING)
         {
-            auto h = HANDLE(INVALID_HANDLE_VALUE);
-            auto err = OpenChunk(state.idx, false, h);
-            if (err != ERROR_SUCCESS) return err;
-            // file has been checked in PrepareChunkOps(), h should be valid
-
-            // FIXME hold page while IO
+            CloseChunk(state.idx);
+            owner_.FreePage(state.idx, true);
+            return err;
         }
-
-
-        // FIXME
+        return ERROR_SUCCESS;
     }
 
     DWORD PostWritePage(ChunkOpState& state)
     {
-        // FIXME
+        if (state.op == WRITE_PAGE_PARTIAL && state.step == OP_READY) return PostReadPage(state);
+        // WRITE_PAGE_PARTIAL and OP_READ_PAGE below
+
+        auto page = (state.op != WRITE_PAGE_PARTIAL) ? owner_.LockPage(state.idx) : owner_.ClaimPage(state.idx);
+        if (page.error != ERROR_SUCCESS) return page.error;
+
+        auto h = HANDLE(INVALID_HANDLE_VALUE);
+        auto err = OpenChunk(state.idx, true, h);
+        if (err != ERROR_SUCCESS) return err;
+
+        // WRITE_PAGE
+        auto& param = owner_.param;
+        auto size = param.BlockBytes(state.end_off - state.start_off);
+        if (state.buffer != nullptr)
+        {
+            memcpy(recast<u8*>(page.ptr) + param.BlockBytes(state.start_off), state.buffer, size);
+        }
+        else
+        {
+            memset(recast<u8*>(page.ptr) + param.BlockBytes(state.start_off), 0, size);
+        }
+
+        // write through
+        err = WriteFile(h, page.ptr, u32(param.PageBytes(1)), nullptr, &state.ovl) ? ERROR_SUCCESS : GetLastError();
+        if (err != ERROR_SUCCESS && err != ERROR_IO_PENDING)
+        {
+            CloseChunk(state.idx);
+            owner_.FreePage(state.idx, true);
+            return err;
+        }
+        return ERROR_SUCCESS;
+    }
+
+    void ReportOpResult(ChunkOpState& state, DWORD error)
+    {
+        if (error == ERROR_SUCCESS)
+        {
+            state.ReportResult();
+        }
+        else if (error == ERROR_NOT_ENOUGH_MEMORY)
+        {
+            state.ReportResult(error, SCSI_SENSE_HARDWARE_ERROR, SCSI_ADSENSE_NO_SENSE);
+        }
+        else if (error == ERROR_OPERATION_ABORTED)
+        {
+            state.ReportResult(error, SCSI_SENSE_ABORTED_COMMAND, SCSI_ADSENSE_NO_SENSE);
+        }
+        else
+        {
+            auto asc = u8(SCSI_ADSENSE_NO_SENSE);
+            auto op = state.op;
+            if (op == READ_CHUNK || op == READ_PAGE)
+            {
+                asc = SCSI_ADSENSE_UNRECOVERED_ERROR;
+            }
+            else if (op == WRITE_CHUNK || op == WRITE_PAGE)
+            {
+                asc = (state.buffer != nullptr) ? SCSI_ADSENSE_WRITE_ERROR : SCSI_ADSENSE_NO_SENSE;
+            }
+            else if (op == WRITE_PAGE_PARTIAL)
+            {
+                asc = (state.step == OP_READY) ? SCSI_ADSENSE_UNRECOVERED_ERROR : SCSI_ADSENSE_WRITE_ERROR;
+            }
+
+            if (asc == SCSI_ADSENSE_NO_SENSE)
+            {
+                state.ReportResult(error, SCSI_SENSE_MEDIUM_ERROR, asc);
+            }
+            else
+            {
+                auto& param = owner_.param;
+                auto info = u64();
+                if (op == READ_PAGE || op == WRITE_PAGE || op == WRITE_PAGE_PARTIAL)
+                {
+                    info = param.PageBlocks(state.idx) + state.start_off;
+                }
+                else
+                {
+                    info = param.ChunkBlocks(state.idx) + state.start_off;
+                }
+                state.ReportResult(error, SCSI_SENSE_MEDIUM_ERROR, asc, info);
+            }
+        }
     }
 
     void PostOp(ChunkOpState& state)
     {
         auto err = DWORD();
-
-        switch (state.op)
+        auto op = state.op;
+        if (op == READ_CHUNK)
         {
-            case READ_CHUNK:
-                err = PostReadChunk(state);
-                break;
-            case WRITE_CHUNK:
-                err = PostWriteChunk(state);
-                break;
-            case READ_PAGE:
-                err = PostReadPage(state);
-                break;
-            case WRITE_PAGE:
-            case WRITE_PAGE_PARTIAL:
-                err = PostWritePage(state);
-                break;
-            default:
-                break;
+            err = PostReadChunk(state);
+        }
+        else if (op == WRITE_CHUNK)
+        {
+            err = PostWriteChunk(state);
+        }
+        else if (op == READ_PAGE)
+        {
+            err = PostReadPage(state);
+        }
+        else if (op == WRITE_PAGE || op == WRITE_PAGE_PARTIAL)
+        {
+            err = PostWritePage(state);
+        }
+        else
+        {
+            err = ERROR_INVALID_FUNCTION;
         }
 
-        // FIXME CloseChunk() after complete
-        // FIXME check length
+        // CK_IO sent if ERROR_SUCCESS
+        if (err == ERROR_SUCCESS) return;
 
-        if (err != ERROR_SUCCESS)
+        if (err == ERROR_BUSY)
         {
-            // failed to initiate asynchronous I/O
-            // FIXME CK_FAIL
+            state.step = OP_WAIT_PAGE;
+            return;
         }
+
+        ReportOpResult(state, err);
+
+        // FIXME terminate work if this fails (out of resources)
+        PostQueuedCompletionStatus(iocp_.get(), 0, CK_FAIL, recast<OVERLAPPED*>(&state));
     }
 
-    DWORD PostIO(ChunkWork& work)
+    /* FIXME comment
+        loop:
+        1. prepare work
+            acquired page
+            or blocked by page -> add wait (also to working)
+        2. complete I/O
+            wait async I/O while handling requests (may recurse acquire!)
+            page cached (remove page if failed)
+        3. complete work
+            check wait: if passed -> post I/O
+     */
+
+    // Requested async I/O (it may be done schronously)
+    DWORD CompleteIO(ChunkOpState& state, DWORD error, DWORD bytes_transmitted)
     {
+        auto& param = owner_.param;
+        auto length_bytes = param.BlockBytes(state.end_off - state.start_off);
 
-    }
+        if (state.op == READ_CHUNK || state.op == WRITE_CHUNK)
+        {
+            if (error == ERROR_SUCCESS && bytes_transmitted != length_bytes) error = ERROR_INVALID_DATA;
+            CloseChunk(state.idx);
+            ReportOpResult(state, error);
+        }
+        else if (state.op == READ_PAGE)
+        {
+            if (error == ERROR_SUCCESS && bytes_transmitted != param.PageBytes(1)) error = ERROR_INVALID_DATA;
+            CloseChunk(state.idx);
+            if (error != ERROR_SUCCESS)
+            {
+                owner_.FreePage(state.idx, true);
+            }
+            else
+            {
+                auto page = owner_.ClaimPage(state.idx);
+                memcpy(state.buffer, recast<u8*>(page.ptr) + param.BlockBytes(state.start_off), length_bytes);
+                owner_.FreePage(state.idx);
+            }
+            ReportOpResult(state, error);
+        }
+        else if (state.op == WRITE_PAGE_PARTIAL && state.step == OP_READY)
+        {
+            if (error == ERROR_SUCCESS && bytes_transmitted != param.PageBytes(1)) error = ERROR_INVALID_DATA;
+            CloseChunk(state.idx);
+            if (error != ERROR_SUCCESS)
+            {
+                owner_.FreePage(state.idx, true);
+                ReportOpResult(state, error);
+            }
+            else
+            {
+                state.step = OP_READ_PAGE;
+                PostOp(state);  // FIXME wait
+            }
+        }
+        else if (state.op == WRITE_PAGE_PARTIAL || state.op == WRITE_PAGE)
+        {
+            if (error == ERROR_SUCCESS && bytes_transmitted != param.PageBytes(1)) error = ERROR_INVALID_DATA;
+            CloseChunk(state.idx);
+            owner_.FreePage(state.idx, error != ERROR_SUCCESS);
+            ReportOpResult(state, error);
+        }
 
-    DWORD CompleteIO(ChunkOpState& state, DWORD err)
-    {
-        // FIXME PostReadChunk()
-        auto& work = *state.owner;
-
-        if (err == ERROR_SUCCESS) ++work.num_completed;
-
-        CloseChunk(state.idx);
-
-
-
-        // FIXME cases
-
+        return state.owner->num_completed == state.owner->ops.size() ? ERROR_SUCCESS : ERROR_IO_INCOMPLETE;
     }
 
     ChunkDisk& owner_;
@@ -1661,17 +1925,10 @@ private:
     GenericHandle iocp_;
 
     std::list<ChunkWork> working_;
-    SRWLOCK lock_working_ = SRWLOCK_INIT;
-
-    // not shared, no locks
+    SRWLOCK lock_working_ = SRWLOCK_INIT;   // with the dispatcher thread
 
     deque<Pages> buffers_;
-
-    // file HANDLE may be shared
     Map<u64, ChunkFileHandle> chunk_handles_;
-
-    // FIXME implement
-    Map<u64, AcquiredPage> acquired_pages_;
     std::list<ChunkOpState*> waiting_page_;
 };
 
@@ -1681,25 +1938,8 @@ static ChunkDisk* StorageUnitChunkDisk(SPD_STORAGE_UNIT* StorageUnit)
 }
 
 // sense: 0 -> no sense, 1 -> read error, 2 -> write error
-static void SetMediumError(SPD_STORAGE_UNIT_STATUS* status, i32 sense, bool addr_valid = false, u64 addr = 0)
+static void SetMediumError(SPD_STORAGE_UNIT_STATUS* status, u8 asc, bool addr_valid = false, u64 addr = 0)
 {
-    u8 asc;
-
-    switch (sense)
-    {
-    case 1:
-        asc = SCSI_ADSENSE_UNRECOVERED_ERROR;
-        break;
-
-    case 2:
-        asc = SCSI_ADSENSE_WRITE_ERROR;
-        break;
-
-    default:
-        asc = SCSI_ADSENSE_NO_SENSE;
-        break;
-    }
-
     SpdStorageUnitStatusSetSense(status, SCSI_SENSE_MEDIUM_ERROR, asc, addr_valid ? &addr : nullptr);
 }
 
@@ -1712,7 +1952,7 @@ static DWORD InternalReadPage(ChunkDisk* cdisk, HANDLE h,
     auto page = cdisk->AcquirePage(page_idx, false);
     if (page.error != ERROR_SUCCESS)
     {
-        SetMediumError(Status, 1);
+        SetMediumError(Status, SCSI_ADSENSE_UNRECOVERED_ERROR);
         return 1;
     }
 
@@ -1723,7 +1963,7 @@ static DWORD InternalReadPage(ChunkDisk* cdisk, HANDLE h,
         if (!ReadFile(h, page.ptr, u32(param.PageBytes(1)), &length_read, nullptr)
             || length_read != param.PageBytes(1))
         {
-            SetMediumError(Status, 1, true,
+            SetMediumError(Status, SCSI_ADSENSE_UNRECOVERED_ERROR, true,
                            param.PageBlocks(page_idx) + param.ByteBlock(length_read + 1).first);
             return 2;
         }
@@ -1733,7 +1973,7 @@ static DWORD InternalReadPage(ChunkDisk* cdisk, HANDLE h,
         // advance pointer as if read from file
         if (!SetFilePointerEx(h, LARGE_INTEGER{.QuadPart = u32(param.PageBytes(1))}, nullptr, FILE_CURRENT))
         {
-            SetMediumError(Status, 1);
+            SetMediumError(Status, SCSI_ADSENSE_UNRECOVERED_ERROR);
             return 1;
         }
     }
@@ -1751,12 +1991,12 @@ static DWORD InternalWritePage(ChunkDisk* cdisk, HANDLE h,
                                PVOID& buffer, u64 page_idx, u32 start_off, u32 end_off,
                                SPD_STORAGE_UNIT_STATUS* Status)
 {
-    auto sense = buffer != nullptr ? 2 : 0;
+    auto asc = u8(buffer != nullptr ? SCSI_ADSENSE_WRITE_ERROR : SCSI_ADSENSE_NO_SENSE);
 
     auto page = cdisk->AcquirePage(page_idx, true);
     if (page.error != ERROR_SUCCESS)
     {
-        SetMediumError(Status, sense);
+        SetMediumError(Status, asc);
         return 1;
     }
 
@@ -1767,7 +2007,7 @@ static DWORD InternalWritePage(ChunkDisk* cdisk, HANDLE h,
         auto pos = LARGE_INTEGER();
         if (!SetFilePointerEx(h, LARGE_INTEGER(), &pos, FILE_CURRENT))
         {
-            SetMediumError(Status, sense, false);
+            SetMediumError(Status, asc, false);
             return 1;
         }
 
@@ -1775,14 +2015,14 @@ static DWORD InternalWritePage(ChunkDisk* cdisk, HANDLE h,
         if (!ReadFile(h, page.ptr, u32(param.PageBytes(1)), &length_read, nullptr)
             || length_read != param.PageBytes(1))
         {
-            SetMediumError(Status, sense, true,
+            SetMediumError(Status, asc, true,
                            param.PageBlocks(page_idx) + param.ByteBlock(length_read + 1).first);
             return 2;
         }
 
         if (!SetFilePointerEx(h, pos, nullptr, FILE_BEGIN))
         {
-            SetMediumError(Status, sense, false);
+            SetMediumError(Status, asc, false);
             return 1;
         }
     }
@@ -1802,7 +2042,7 @@ static DWORD InternalWritePage(ChunkDisk* cdisk, HANDLE h,
     if (!WriteFile(h, page.ptr, u32(param.PageBytes(1)), &length_written, nullptr)
         || length_written != param.PageBytes(1))
     {
-        SetMediumError(Status, sense, true,
+        SetMediumError(Status, asc, true,
                        param.PageBlocks(page_idx) + param.ByteBlock(length_written + 1).first);
         return 2;
     }
@@ -1837,7 +2077,7 @@ static DWORD InternalReadChunk(ChunkDisk* cdisk, PVOID& buffer,
         auto off = LARGE_INTEGER{.QuadPart = LONGLONG(param.BlockBytes(start_off))};
         if (!SetFilePointerEx(h.get(), off, nullptr, FILE_BEGIN))
         {
-            SetMediumError(Status, 1);
+            SetMediumError(Status, SCSI_ADSENSE_UNRECOVERED_ERROR);
             return 1;
         }
 
@@ -1845,7 +2085,7 @@ static DWORD InternalReadChunk(ChunkDisk* cdisk, PVOID& buffer,
         if (!ReadFile(h.get(), buffer, DWORD(length_bytes), &length_read, nullptr)
             || length_bytes != length_read)
         {
-            SetMediumError(Status, 1, true,
+            SetMediumError(Status, SCSI_ADSENSE_UNRECOVERED_ERROR, true,
                            param.ChunkBlocks(chunk_idx) + start_off + param.ByteBlock(length_read + 1).first);
             return 2;
         }
@@ -1857,7 +2097,7 @@ static DWORD InternalReadChunk(ChunkDisk* cdisk, PVOID& buffer,
         auto off = LARGE_INTEGER{.QuadPart = LONGLONG(param.PageBytes(r.start_idx))};
         if (!SetFilePointerEx(h.get(), off, nullptr, FILE_BEGIN))
         {
-            SetMediumError(Status, 1);
+            SetMediumError(Status, SCSI_ADSENSE_UNRECOVERED_ERROR);
             return 1;
         }
 
@@ -1891,7 +2131,7 @@ static DWORD InternalWriteChunk(ChunkDisk* cdisk, PVOID& buffer,
                                 u64 chunk_idx, u64 start_off, u64 end_off,
                                 SPD_STORAGE_UNIT_STATUS* Status)
 {
-    auto sense = buffer != nullptr ? 2 : 0;
+    auto asc = u8(buffer != nullptr ? SCSI_ADSENSE_WRITE_ERROR : SCSI_ADSENSE_NO_SENSE);
 
     auto h = FileHandle();
     auto err = cdisk->CreateChunk(chunk_idx, true, h);
@@ -1911,7 +2151,7 @@ static DWORD InternalWriteChunk(ChunkDisk* cdisk, PVOID& buffer,
             auto off = LARGE_INTEGER{.QuadPart = LONGLONG(param.BlockBytes(start_off))};
             if (!SetFilePointerEx(h.get(), off, nullptr, FILE_BEGIN))
             {
-                SetMediumError(Status, sense);
+                SetMediumError(Status, asc);
                 return 1;
             }
 
@@ -1919,7 +2159,7 @@ static DWORD InternalWriteChunk(ChunkDisk* cdisk, PVOID& buffer,
             if (!WriteFile(h.get(), buffer, DWORD(length_bytes), &length_written, nullptr)
                 || length_bytes != length_written)
             {
-                SetMediumError(Status, sense, true,
+                SetMediumError(Status, asc, true,
                                param.ChunkBlocks(chunk_idx) + start_off + param.ByteBlock(length_written + 1).first);
                 return 2;
             }
@@ -1936,7 +2176,7 @@ static DWORD InternalWriteChunk(ChunkDisk* cdisk, PVOID& buffer,
                     h.get(), FSCTL_SET_ZERO_DATA, &zero_info, sizeof(zero_info),
                     nullptr, 0, &bytes_returned, nullptr))
             {
-                SetMediumError(Status, sense);
+                SetMediumError(Status, asc);
                 return 1;
             }
         }
@@ -1947,7 +2187,7 @@ static DWORD InternalWriteChunk(ChunkDisk* cdisk, PVOID& buffer,
         auto off = LARGE_INTEGER{.QuadPart = LONGLONG(param.PageBytes(r.start_idx))};
         if (!SetFilePointerEx(h.get(), off, nullptr, FILE_BEGIN))
         {
-            SetMediumError(Status, sense);
+            SetMediumError(Status, asc);
             return 1;
         }
 
@@ -1986,13 +2226,13 @@ static DWORD InternalFlushChunk(ChunkDisk* cdisk, u64 chunk_idx,
         auto err = cdisk->CreateChunk(chunk_idx, true, h);
         if (err != ERROR_SUCCESS)
         {
-            SetMediumError(Status, 2);
+            SetMediumError(Status, SCSI_ADSENSE_WRITE_ERROR);
             return 1;
         }
 
         if (!FlushFileBuffers(h.get()))
         {
-            SetMediumError(Status, 2);
+            SetMediumError(Status, SCSI_ADSENSE_WRITE_ERROR);
             return 1;
         }
         // we may discard h on error
@@ -2025,6 +2265,7 @@ static DWORD InternalUnmapChunk(ChunkDisk* cdisk, u64 chunk_idx,
     return InternalWriteChunk(cdisk, buffer, chunk_idx, start_off, end_off, Status);
 }
 
+// FIXME: no flush, metadata flushed after idling
 static BOOLEAN InternalFlush(SPD_STORAGE_UNIT* StorageUnit,
                              UINT64 BlockAddress, UINT32 BlockCount,
                              SPD_STORAGE_UNIT_STATUS* Status)
@@ -2038,7 +2279,7 @@ static BOOLEAN InternalFlush(SPD_STORAGE_UNIT* StorageUnit,
         // let Windows flush
         if (cdisk->FlushAll(BlockAddress / param.chunk_length) != ERROR_SUCCESS)
         {
-            SetMediumError(Status, 2);
+            SetMediumError(Status, SCSI_ADSENSE_WRITE_ERROR);
         }
         return TRUE;
     }
@@ -2251,7 +2492,7 @@ static DWORD CreateChunkDiskStorageUnit(ChunkDisk* cdisk, BOOLEAN write_protecte
     UuidCreate(&unit_params.Guid);
     unit_params.BlockCount = cdisk->param.block_count;
     unit_params.BlockLength = cdisk->param.block_size;
-    unit_params.MaxTransferLength = 64 * 1024;
+    unit_params.MaxTransferLength = MAX_TRANSFER_LENGTH;
     if (WideCharToMultiByte(
             CP_UTF8, 0,
             ProductId, lstrlenW(ProductId),
@@ -2416,6 +2657,7 @@ int wmain(int argc, wchar_t** argv)
             return err;
         }
 
+        // FIXME constants
         cdisk = std::make_unique<ChunkDisk>(
             std::move(cdisk_param),
             max(NumThreads * 32, 2048),
