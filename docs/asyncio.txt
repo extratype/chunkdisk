@@ -1,0 +1,88 @@
+file HANDLE
+
+Block I/O -> Page I/O
+
+multiple outstanding I/Os in single thread
+
+Request -> Multiple Operations
+
+
+Read:
+    Read chunks...:
+        OpenChunk(read-only)
+        empty or not exist?
+            zero-fill buffer
+            will be done
+        exist?
+            continue
+        CloseChunk()
+
+        aligned access?
+            open file HANDLE for read access
+            RemovePages()...
+            ReadFile()...
+            close HANDLE
+
+        unaligned access?
+            Read pages...:
+                PeekPage() succeeded? copy to buffer, done
+                PeekPage() failed?
+                    LockPage()...
+                    open file HANDLE for read access
+                    ReadFile()... to page
+                    copy to buffer
+                    FreePage()
+
+Write:
+    Write chunks...:
+        aligned access?
+            open file HANDLE for read/write access
+            RemovePages()...
+            is buffer not null?
+                WriteFile()...
+            is buffer null?
+                DeviceIoControl(FSCTL_SET_ZERO_DATA...)...
+
+        unaligned access?
+            Write pages...:
+                not whole page?
+                    Read page...
+
+                LockPage()/ClaimPage()...
+                open file HANDLE for read/write access
+                copy/zero-fill page
+                WriteFile()... from page
+                FreePage()
+
+Unmap:
+    Unmap chunks...:
+        whole chunk?
+            if empty or not exist? done
+            truncate chunk to make it empty, done
+        partial?
+            write chunk, null buffer to zero-fill
+
+
+FIXME comment
+    loop:
+        1. prepare work
+            acquired page
+            or blocked by page -> add wait (also to working)
+        2. complete I/O
+            wait async I/O while handling requests (may recurse acquire!)
+            page cached (remove page if failed)
+        3. complete work
+            check wait: if passed -> post I/O
+
+cancel OP_WAIT_PAGE in working_
+    traverse table, abort it
+
+stop worker
+    1. CancelIo HANDLE
+    2. handle CK_IO's
+    ...
+
+only part of ops in work may be aborted!!
+... CancelIo() does NOT cancel IO atomically either
+
+Flush(0) at exit

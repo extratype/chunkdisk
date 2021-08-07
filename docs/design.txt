@@ -1,0 +1,28 @@
+C++
+WinSpd
+
+name.chunkdisk
+    disksize
+    chunksize
+    NUM path/to/dir/prefix...
+
+create chunk:
+    directory: use part from first...last
+    file name: chunk###
+    chunk size: 0 or chunksize; empty or full, no deletion
+
+read, write:
+    chunk not found or empty: zero-fill buffer for read
+    non-buffered file I/O: ReadFile, WriteFile
+        last modified timestamp update delayed up to 1 hour if not closed
+
+flush:
+    let Windows do it
+
+    FlushFileBuffers?
+        flush ALL data, not HANDLE specific
+        flush metadata
+
+unmap (a.k.a. TRIM):
+    unmap range >= chunk: Set size to 0
+    unmap range <  chunk: FSCTL_SET_ZERO_DATA

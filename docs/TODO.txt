@@ -1,0 +1,6 @@
+* merge ranges across (consecutive) calls
+    - naive impl.: only check consecutive calls (no multitasking)
+    - zero-fill, cache unmap range (clear if written), check if whole chunk
+* check partition -> TRIM -> shrink -> delete orphan empty chunks
+* sparse chunk?
+* differential (take snapshots and merge later) disk (xor or copy?)

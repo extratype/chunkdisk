@@ -1,0 +1,38 @@
+ErrorCode = SCSI_SENSE_ERRORCODE_FIXED_CURRENT
+
+Sense Key
+
+SCSI_SENSE_MEDIUM_ERROR
+    CreateChunk error
+    I/O error
+
+SCSI_SENSE_HARDWARE_ERROR
+    ERROR_NOT_ENOUGH_MEMORY
+
+SCSI_SENSE_ABORTED_COMMAND
+    Shutdown, Cancel work
+
+SCSI_SENSE_ILLEGAL_REQUEST
+    incorrect parameters
+
+
+ASC
+
+SCSI_ADSENSE_UNRECOVERED_ERROR
+    Read
+
+SCSI_ADSENSE_WRITE_ERROR
+    Write
+
+SCSI_ADSENSE_NO_SENSE
+    Unmap
+
+
+ASCQ
+
+SCSI_ADSENSE_ILLEGAL_BLOCK
+
+
+Information: SENSE_DATA::Information
+    Read, Write LBA: 64 bits in API -> 32 bits in driver
+    -> use SCSI_SENSE_ERRORCODE_DESCRIPTOR_CURRENT instead
