@@ -2,6 +2,8 @@
  * @file params.hpp
  *
  * @copyright 2021 extratype
+ *
+ * Parameters and conversions for chunkdisk.
  */
 
 #ifndef CHUNKDISK_PARAMS_HPP_

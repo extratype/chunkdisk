@@ -2,6 +2,8 @@
  * @file worker.hpp
  *
  * @copyright 2021 extratype
+ *
+ * Perform async I/O operations for chunkdisk.
  */
 
 #ifndef CHUNKDISK_WORKER_HPP_

@@ -2,6 +2,8 @@
  * @file service.hpp
  *
  * @copyright 2021 extratype
+ *
+ * Provide core functionality for workers.
  */
 
 #ifndef CHUNKDISK_SERVICE_HPP_

@@ -1,3 +1,9 @@
+/**
+ * @file service.cpp
+ *
+ * @copyright 2021 extratype
+ */
+
 #include "service.hpp"
 #include <unordered_set>
 #include <filesystem>

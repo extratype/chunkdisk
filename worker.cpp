@@ -1,3 +1,9 @@
+/**
+ * @file worker.cpp
+ *
+ * @copyright 2021 extratype
+ */
+
 #include "worker.hpp"
 
 using std::bad_alloc;
