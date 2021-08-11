@@ -19,7 +19,7 @@ DWORD ChunkDiskWorker::Start()
         INVALID_HANDLE_VALUE, nullptr, 0, 1));
     if (!iocp_) return GetLastError();
 
-    memset(&spd_ovl_, 0, sizeof(spd_ovl_));
+    spd_ovl_ = OVERLAPPED{};
     spd_ovl_.hEvent = CreateEventW(nullptr, TRUE, TRUE, nullptr);
     if (spd_ovl_.hEvent == nullptr)
     {
@@ -59,7 +59,7 @@ DWORD ChunkDiskWorker::Stop()
     CloseHandle(spd_ovl_.hEvent);
 
     // FIXME no exit code?
-    auto exit_code = DWORD();
+    auto exit_code = DWORD(ERROR_SUCCESS);
     GetExitCodeThread(thread_.native_handle(), &exit_code);
 
     thread_ = std::thread();
@@ -98,7 +98,21 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
     auto work = ChunkWork();
     work.buffer = std::move(work_buffer);
 
-    auto err = PrepareOps(work, op_kind, block_addr, count);
+    auto err = DWORD(ERROR_SUCCESS);
+    if (op_kind != UNMAP_CHUNK)
+    {
+        err = PrepareOps(work, op_kind, block_addr, count);
+    }
+    else
+    {
+        auto* descs = recast<SPD_UNMAP_DESCRIPTOR*>(ctx_buffer);
+        for (u32 i = 0; i < count; ++i)
+        {
+            err = PrepareOps(work, op_kind, descs[i].BlockAddress, descs[i].BlockCount);
+            if (err != ERROR_SUCCESS) break;
+        }
+    }
+
     if (err != ERROR_SUCCESS)
     {
         if (work.num_errors == 0)
@@ -200,7 +214,7 @@ void ChunkDiskWorker::PostOp(ChunkOpState& state)
 {
     if (state.step == OP_DONE) return;
 
-    auto err = DWORD();
+    auto err = DWORD(ERROR_SUCCESS);
     auto kind = state.kind;
     if (kind == READ_CHUNK)
     {
@@ -589,7 +603,6 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
         {
             CloseChunk(chunk_idx);
         }
-
 
         if (kind == UNMAP_CHUNK)
         {

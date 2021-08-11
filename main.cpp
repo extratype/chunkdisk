@@ -4,43 +4,176 @@
  * @copyright 2021 extratype
  */
 
-/*
-#include <type_traits>
-#include <cstddef>
-#include <utility>
+#include "utils.hpp"
+#include "params.hpp"
+#include "service.hpp"
+#include "worker.hpp"
 #include <memory>
-#include <cwchar>
-#include <string>
-#include <vector>
-#include <deque>
-#include <list>
-#include <unordered_set>
-#include <unordered_map>
 #include <numeric>
-#include <thread>
 #include <filesystem>
-*/
-#include <winspd/winspd.h>
 
-// FIXME static -> anonymous namespace
-// FIXME docs
-
-/*
-using std::size_t;
-using std::make_pair;
 using std::bad_alloc;
 using std::unique_ptr;
 using std::wstring;
 using std::vector;
-using std::deque;
-using std::unordered_set;
-using std::unordered_map;
 
 namespace fs = std::filesystem;
-*/
 
+// FIXME docs
 
+namespace chunkdisk
+{
 
+struct ChunkDisk
+{
+    ChunkDiskService service;
+    // FIXME workers are not stopping concurrently
+    vector<unique_ptr<ChunkDiskWorker>> workers;
+
+    ChunkDisk(ChunkDiskParams params, SPD_STORAGE_UNIT* storage_unit = nullptr)
+        : service(std::move(params), storage_unit) {}
+};
+
+namespace
+{
+
+ChunkDisk* StorageUnitChunkDisk(SPD_STORAGE_UNIT* StorageUnit)
+{
+    return recast<ChunkDisk*>(StorageUnit->UserContext);
+}
+
+// SPD_STORAGE_UNIT_INTERFACE operations
+// op_kind: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK
+BOOLEAN PostWork(SPD_STORAGE_UNIT* StorageUnit, ChunkOpKind op_kind, u64 block_addr, u32 count)
+{
+    auto context = SpdStorageUnitGetOperationContext();
+    // not necessary to align buffer
+
+    auto* cdisk = StorageUnitChunkDisk(StorageUnit);
+    auto& workers = cdisk->workers;
+
+    // FIXME root
+    auto start = (block_addr / cdisk->service.params.ByteBlock(1048576).first) % (workers.size());
+    auto err = DWORD(ERROR_BUSY);
+
+    for (auto i = start; i < workers.size(); ++i)
+    {
+        // FIXME err
+        err = workers[i]->PostWork(context, op_kind, block_addr, count);
+        if (err != ERROR_BUSY) break;
+    }
+    for (auto i = 0; i < start; ++i)
+    {
+        // FIXME err
+        err = workers[i]->PostWork(context, op_kind, block_addr, count);
+        if (err != ERROR_BUSY) break;
+    }
+    if (err == ERROR_BUSY) return err;
+
+    if (err == ERROR_IO_PENDING) return FALSE;
+
+    if (err == ERROR_SUCCESS) return TRUE;
+
+    // FIXME err
+    return err;
+}
+
+BOOLEAN Read(SPD_STORAGE_UNIT* StorageUnit,
+                    PVOID Buffer, UINT64 BlockAddress, UINT32 BlockCount, BOOLEAN FlushFlag,
+                    SPD_STORAGE_UNIT_STATUS* Status)
+{
+    SpdWarnOnce(StorageUnit->StorageUnitParams.CacheSupported || FlushFlag);
+
+    return PostWork(StorageUnit, READ_CHUNK, BlockAddress, BlockCount);
+}
+
+BOOLEAN Write(SPD_STORAGE_UNIT* StorageUnit,
+                     PVOID Buffer, UINT64 BlockAddress, UINT32 BlockCount, BOOLEAN FlushFlag,
+                     SPD_STORAGE_UNIT_STATUS* Status)
+{
+    SpdWarnOnce(!StorageUnit->StorageUnitParams.WriteProtected);
+    SpdWarnOnce(StorageUnit->StorageUnitParams.CacheSupported || FlushFlag);
+
+    return PostWork(StorageUnit, WRITE_CHUNK, BlockAddress, BlockCount);
+}
+
+BOOLEAN Flush(SPD_STORAGE_UNIT* StorageUnit,
+                     UINT64 BlockAddress, UINT32 BlockCount,
+                     SPD_STORAGE_UNIT_STATUS* Status)
+{
+    SpdWarnOnce(!StorageUnit->StorageUnitParams.WriteProtected);
+    SpdWarnOnce(StorageUnit->StorageUnitParams.CacheSupported);
+
+    // FIXME: no flush, metadata flushed after idling
+    // FIXME implement Flush(0, 0) (while exiting)
+    // no buffering or write through, nothing to flush
+    return ERROR_SUCCESS;
+}
+
+BOOLEAN Unmap(SPD_STORAGE_UNIT* StorageUnit,
+                     SPD_UNMAP_DESCRIPTOR Descriptors[], UINT32 Count,
+                     SPD_STORAGE_UNIT_STATUS* Status)
+{
+    SpdWarnOnce(!StorageUnit->StorageUnitParams.WriteProtected);
+    SpdWarnOnce(StorageUnit->StorageUnitParams.UnmapSupported);
+
+    auto* cdisk = StorageUnitChunkDisk(StorageUnit);
+
+    // Descriptors is just Buffer, writable
+    // merge ranges
+    if (Count == 0) return TRUE;
+
+    std::sort(Descriptors, Descriptors + Count,
+              [](const auto& a, const auto& b)
+              {
+                  return (a.BlockAddress < b.BlockAddress) ||
+                         (a.BlockAddress == b.BlockAddress) && (a.BlockCount < b.BlockCount);
+              });
+
+    auto new_count = UINT32();
+    auto prev_addr = Descriptors[0].BlockAddress;
+    auto prev_count = Descriptors[0].BlockCount;
+
+    for (UINT32 I = 0; I < Count; ++I)
+    {
+        auto addr = Descriptors[I].BlockAddress;
+        auto count = Descriptors[I].BlockCount;
+
+        if (count == 0) continue;
+
+        if (addr <= prev_addr + prev_count)
+        {
+            auto count_ext = max(addr + count, prev_addr + prev_count) - prev_addr;
+            if (count_ext <= UINT32(-1))
+            {
+                // no overflow
+                prev_count = UINT32(count_ext);
+                continue;
+            }
+        }
+
+        Descriptors[new_count] = {prev_addr, prev_count, 0};
+        ++new_count;
+        prev_addr = addr;
+        prev_count = count;
+    }
+
+    Descriptors[new_count] = {prev_addr, prev_count, 0};
+    ++new_count;
+
+    // FIXME comment
+    return PostWork(StorageUnit, UNMAP_CHUNK, 0, Count);
+}
+
+SPD_STORAGE_UNIT_INTERFACE CHUNK_DISK_INTERFACE =
+{
+    Read,
+    Write,
+    Flush,
+    Unmap,
+};
+
+}   // namespace
 
 /*
  * read .chunkdisk file
@@ -49,13 +182,13 @@ namespace fs = std::filesystem;
  * chunk size in bytes: must be a multiple of PAGE_SIZE
  * number path/to/dir...: max. # of chunks in part directory
  */
-static DWORD ReadChunkDiskParam(PCWSTR cdisk_path, ChunkDiskParams& param)
+DWORD ReadChunkDiskParams(PCWSTR chunkdisk_file, ChunkDiskParams& params)
 {
     try
     {
         // read .chunkdisk and convert to wstr
         auto h = FileHandle(CreateFileW(
-            cdisk_path, GENERIC_READ, FILE_SHARE_READ, nullptr,
+            chunkdisk_file, GENERIC_READ, FILE_SHARE_READ, nullptr,
             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
         if (!h) return GetLastError();
 
@@ -111,7 +244,6 @@ static DWORD ReadChunkDiskParam(PCWSTR cdisk_path, ChunkDiskParams& param)
         }
 
         // check parameters
-
         if (disk_size == 0 || chunk_size == 0) return ERROR_INVALID_PARAMETER;
         if (disk_size % BLOCK_SIZE || chunk_size > disk_size) return ERROR_INVALID_PARAMETER;
         if (chunk_size % BLOCK_SIZE) return ERROR_INVALID_PARAMETER;
@@ -123,321 +255,145 @@ static DWORD ReadChunkDiskParam(PCWSTR cdisk_path, ChunkDiskParams& param)
 
         if (disk_size % PAGE_SIZE) return ERROR_INVALID_PARAMETER;
         if (chunk_size % PAGE_SIZE) return ERROR_INVALID_PARAMETER;
-        // if (page_size % block_size) return ERROR_INVALID_PARAMETER;
+        // if (PAGE_SIZE % BLOCK_SIZE) return ERROR_INVALID_PARAMETER;
 
-        param.block_size = BLOCK_SIZE;
-        param.page_length = PAGE_SIZE / BLOCK_SIZE;
-        param.block_count = disk_size / BLOCK_SIZE;
-        param.chunk_length = chunk_length;
-        param.chunk_count = chunk_count;
-        param.part_max = std::move(part_max);
-        param.part_dirname = std::move(part_dirname);
-        return ERROR_SUCCESS;
+        params.block_size = BLOCK_SIZE;
+        params.page_length = PAGE_SIZE / BLOCK_SIZE;
+        params.block_count = disk_size / BLOCK_SIZE;
+        params.chunk_length = chunk_length;
+        params.chunk_count = chunk_count;
+        params.part_max = std::move(part_max);
+        params.part_dirname = std::move(part_dirname);
     }
     catch (const bad_alloc&)
     {
         return ERROR_NOT_ENOUGH_MEMORY;
     }
+    return ERROR_SUCCESS;
 }
 
-
-class ChunkDiskWorker;
-
-class ChunkDisk
+DWORD CreateStorageUnit(PWSTR chunkdisk_file, BOOLEAN write_protected, PWSTR pipe_name, unique_ptr<ChunkDisk>& cdisk_out)
 {
-public:
-    // num_workers, max_pages: MUST be positive
-    ChunkDisk(ChunkDiskParams param, u32 num_workers, u32 max_pages)
-            : param(std::move(param)), max_pages(max_pages)
+    // read chunkdisk file
+    auto params = ChunkDiskParams();
+    auto err = ReadChunkDiskParams(chunkdisk_file, params);
+    if (err != ERROR_SUCCESS)
     {
-        workers_.reserve(num_workers);
-        cached_pages_.reserve(max_pages);
-
-        for (u32 i = 0; i < num_workers; ++i) workers_.emplace_back(*this);
-    }
-
-    ~ChunkDisk()
-    {
-        // FIXME stop workers
-        FlushAll();
-        if (storage_unit != nullptr) SpdStorageUnitDelete(storage_unit);
-    }
-
-
-    DWORD StartWorkers()
-    {
-        auto result = DWORD(ERROR_SUCCESS);
-
-        for (auto& worker : workers_)
-        {
-            auto err = worker.Start();
-            if (err != ERROR_SUCCESS)
-            {
-                result = err;
-                break;
-            }
-        }
-
-        if (result != ERROR_SUCCESS)
-        {
-            // FIXME err?
-            for (auto& worker : workers_) worker.Stop();
-        }
-
-        return result;
-    }
-
-    void StopWorkers()
-    {
-        // FIXME err?
-        // FIXME not concurrent
-        for (auto& worker : workers_) worker.Stop();
-    }
-
-    // SPD_STORAGE_UNIT_INTERFACE operations
-    // op_kind: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK
-    BOOLEAN PostWork(ChunkOpKind op_kind, u64 block_addr, u32 count)
-    {
-        auto context = SpdStorageUnitGetOperationContext();
-
-        // FIXME root
-        auto start = (block_addr / param.ByteBlock(1048576).first) % (workers_.size());
-        auto err = DWORD(ERROR_BUSY);
-
-        for (auto i = start; i < workers_.size(); ++i)
-        {
-            // FIXME err
-            err = workers_[i].PostWork(context, op_kind, block_addr, count);
-            if (err != ERROR_BUSY) break;
-        }
-        for (auto i = 0; i < start; ++i)
-        {
-            // FIXME err
-            err = workers_[i].PostWork(context, op_kind, block_addr, count);
-            if (err != ERROR_BUSY) break;
-        }
-        if (err == ERROR_BUSY) return err;
-
-        if (err == ERROR_IO_PENDING) return FALSE;
-
-        if (err == ERROR_SUCCESS) return TRUE;
-
-        // FIXME err
+        SpdLogErr(L"error: parsing failed with error %lu", err);
         return err;
     }
 
-    SPD_STORAGE_UNIT* storage_unit = nullptr;
+    // create WinSpd unit
+    SPD_STORAGE_UNIT* unit = nullptr;
+    err = [&params, write_protected, pipe_name, &unit]() -> DWORD
+    {
+        constexpr wchar_t ProductId[] = L"ChunkDisk";
+        constexpr wchar_t ProductRevision[] = L"0.6";   // FIXME bump
+        SPD_STORAGE_UNIT_PARAMS unit_params = {};
 
+        UuidCreate(&unit_params.Guid);
+        unit_params.BlockCount = params.block_count;
+        unit_params.BlockLength = params.block_size;
+        unit_params.MaxTransferLength = MAX_TRANSFER_LENGTH;
+        if (WideCharToMultiByte(
+                CP_UTF8, 0,
+                ProductId, lstrlenW(ProductId),
+                LPSTR(unit_params.ProductId), sizeof(unit_params.ProductId),
+                nullptr, nullptr) == 0)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        if (WideCharToMultiByte(
+                CP_UTF8, 0,
+                ProductRevision, lstrlenW(ProductRevision),
+                LPSTR(unit_params.ProductRevisionLevel), sizeof(unit_params.ProductRevisionLevel),
+                nullptr, nullptr) == 0)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        unit_params.WriteProtected = write_protected;
+        unit_params.CacheSupported = TRUE;
+        unit_params.UnmapSupported = TRUE;
 
+        auto err = SpdStorageUnitCreate(pipe_name, &unit_params, &CHUNK_DISK_INTERFACE, &unit);
+        if (err != ERROR_SUCCESS) return err;
+        return ERROR_SUCCESS;
+    }();
+    if (err != ERROR_SUCCESS)
+    {
+        SpdLogErr(L"error: cannot create ChunkDisk: error %lu", err);
+        return err;
+    }
 
-};
+    // create ChunkDisk
+    auto cdisk = unique_ptr<ChunkDisk>();
+    try
+    {
+        // unit will be deleted when cdisk is deleted
+        cdisk = std::make_unique<ChunkDisk>(std::move(params), unit);
+        unit->UserContext = cdisk.get();
+    }
+    catch (const bad_alloc&)
+    {
+        SpdStorageUnitDelete(unit);
+        SpdLogErr(L"error: not enough memory to start");
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+    err = cdisk->service.LockParts();
+    if (err != ERROR_SUCCESS)
+    {
+        SpdLogErr(L"error: cannot lock parts: error %lu", err);
+        return err;
+    }
+    err = cdisk->service.ReadParts();
+    if (err != ERROR_SUCCESS)
+    {
+        SpdLogErr(L"error: cannot initialize ChunkDisk: error %lu", err);
+        return err;
+    }
 
-
-
-static ChunkDisk* StorageUnitChunkDisk(SPD_STORAGE_UNIT* StorageUnit)
-{
-    return recast<ChunkDisk*>(StorageUnit->UserContext);
+    cdisk_out = std::move(cdisk);
+    return ERROR_SUCCESS;
 }
 
-static DWORD InternalFlushChunk(ChunkDisk* cdisk, u64 chunk_idx,
-                                u64 start_off, u64 end_off, SPD_STORAGE_UNIT_STATUS* Status)
+// num_workers: must be positive
+DWORD StartWorkers(ChunkDisk& cdisk, u32 num_workers)
 {
-    if (cdisk->param.IsWholeChunk(start_off, end_off))
+    auto& workers = cdisk.workers;
+
+    workers.reserve(num_workers);
+    for (u32 i = 0; i < num_workers; ++i) workers.emplace_back(new ChunkDiskWorker(cdisk.service));
+    // FIXME bad_alloc
+
+    auto result = DWORD(ERROR_SUCCESS);
+
+    for (auto& worker : cdisk.workers)
     {
-        // flush metadata
-        auto h = FileHandle();
-        auto err = cdisk->CreateChunk(chunk_idx, true, h);
+        auto err = worker->Start();
         if (err != ERROR_SUCCESS)
         {
-            SetMediumError(Status, SCSI_ADSENSE_WRITE_ERROR);
-            return 1;
+            result = err;
+            break;
         }
-
-        if (!FlushFileBuffers(h.get()))
-        {
-            SetMediumError(Status, SCSI_ADSENSE_WRITE_ERROR);
-            return 1;
-        }
-        // FIXME we may discard h on error
-        // cdisk->ChunkClose(chunk_idx, std::move(h));
     }
 
-    // no buffering or write through, nothing to flush
-    return ERROR_SUCCESS;
-}
-
-static BOOLEAN Read(SPD_STORAGE_UNIT* StorageUnit,
-                    PVOID Buffer, UINT64 BlockAddress, UINT32 BlockCount, BOOLEAN FlushFlag,
-                    SPD_STORAGE_UNIT_STATUS* Status)
-{
-    SpdWarnOnce(StorageUnit->StorageUnitParams.CacheSupported || FlushFlag);
-
-    return StorageUnitChunkDisk(StorageUnit)->PostWork(READ_CHUNK, BlockAddress, BlockCount);
-}
-
-static BOOLEAN Write(SPD_STORAGE_UNIT* StorageUnit,
-                     PVOID Buffer, UINT64 BlockAddress, UINT32 BlockCount, BOOLEAN FlushFlag,
-                     SPD_STORAGE_UNIT_STATUS* Status)
-{
-    SpdWarnOnce(!StorageUnit->StorageUnitParams.WriteProtected);
-    SpdWarnOnce(StorageUnit->StorageUnitParams.CacheSupported || FlushFlag);
-
-    return StorageUnitChunkDisk(StorageUnit)->PostWork(WRITE_CHUNK, BlockAddress, BlockCount);
-}
-
-static BOOLEAN Flush(SPD_STORAGE_UNIT* StorageUnit,
-                     UINT64 BlockAddress, UINT32 BlockCount,
-                     SPD_STORAGE_UNIT_STATUS* Status)
-{
-    SpdWarnOnce(!StorageUnit->StorageUnitParams.WriteProtected);
-    SpdWarnOnce(StorageUnit->StorageUnitParams.CacheSupported);
-
-    // FIXME: no flush, metadata flushed after idling
-    auto* cdisk = StorageUnitChunkDisk(StorageUnit);
-    auto& param = cdisk->param;
-
-    if (BlockCount == 0)
+    if (result != ERROR_SUCCESS)
     {
-        // for simpliciy ignore BlockAddress % cdisk->chunk_length
-        // let Windows flush
-        if (cdisk->FlushAll(BlockAddress / param.chunk_length) != ERROR_SUCCESS)
-        {
-            SetMediumError(Status, SCSI_ADSENSE_WRITE_ERROR);
-        }
-        return TRUE;
+        // FIXME err?
+        for (auto& worker : workers) worker->Stop();
     }
 
-    // FIXME implement
+    return result;
 }
 
-static BOOLEAN Unmap(SPD_STORAGE_UNIT* StorageUnit,
-                     SPD_UNMAP_DESCRIPTOR Descriptors[], UINT32 Count,
-                     SPD_STORAGE_UNIT_STATUS* Status)
+}   // namespace chunkdisk
+
+namespace
 {
-    SpdWarnOnce(!StorageUnit->StorageUnitParams.WriteProtected);
-    SpdWarnOnce(StorageUnit->StorageUnitParams.UnmapSupported);
 
-    auto* cdisk = StorageUnitChunkDisk(StorageUnit);
+constexpr PCWSTR PROGNAME = L"chunkdisk";
 
-    // Descriptors is just Buffer, writable
-    // merge ranges
-    if (Count == 0) return TRUE;
-
-    std::sort(Descriptors, Descriptors + Count,
-              [](const auto& a, const auto& b)
-              {
-                  return (a.BlockAddress < b.BlockAddress) ||
-                         (a.BlockAddress == b.BlockAddress) && (a.BlockCount < b.BlockCount);
-              });
-
-    auto new_count = UINT32();
-    auto prev_addr = Descriptors[0].BlockAddress;
-    auto prev_count = Descriptors[0].BlockCount;
-
-    for (UINT32 I = 0; I < Count; ++I)
-    {
-        auto addr = Descriptors[I].BlockAddress;
-        auto count = Descriptors[I].BlockCount;
-
-        if (count == 0) continue;
-
-        if (addr <= prev_addr + prev_count)
-        {
-            auto count_ext = max(addr + count, prev_addr + prev_count) - prev_addr;
-            if (count_ext <= UINT32(-1))
-            {
-                // no overflow
-                prev_count = UINT32(count_ext);
-                continue;
-            }
-        }
-
-        Descriptors[new_count] = {prev_addr, prev_count, 0};
-        ++new_count;
-        prev_addr = addr;
-        prev_count = count;
-    }
-
-    Descriptors[new_count] = {prev_addr, prev_count, 0};
-    ++new_count;
-
-    auto& param = cdisk->param;
-    for (UINT32 I = 0; I < new_count; ++I)
-    {
-        // NOTE: a chunk gets truncated only if single block range covers it
-
-        // FIXME multiple UNMAP_CHUNK in ChunkWork
-        cdisk->PostWork(UNMAP_CHUNK, Descriptors[I].BlockAddress, Descriptors[I].BlockCount);
-    }
-
-    // FIXME FALSE
-    return TRUE;
-}
-
-static SPD_STORAGE_UNIT_INTERFACE CHUNK_DISK_INTERFACE =
-{
-    Read,
-    Write,
-    Flush,
-    Unmap,
-};
-
-// align buffer to pages
-static PVOID BufferAlloc(size_t Size)
-{
-    return VirtualAlloc(nullptr, Size, MEM_COMMIT, PAGE_READWRITE);
-}
-
-// align buffer to pages
-static void BufferFree(PVOID Pointer)
-{
-    VirtualFree(Pointer, 0, MEM_RELEASE);
-}
-
-static DWORD CreateChunkDiskStorageUnit(ChunkDisk* cdisk, BOOLEAN write_protected, PWSTR pipe_name)
-{
-    const wchar_t ProductId[] = L"ChunkDisk";
-    const wchar_t ProductRevision[] = L"0.6";
-    SPD_STORAGE_UNIT_PARAMS unit_params;
-
-    memset(&unit_params, 0, sizeof unit_params);
-    UuidCreate(&unit_params.Guid);
-    unit_params.BlockCount = cdisk->param.block_count;
-    unit_params.BlockLength = cdisk->param.block_size;
-    unit_params.MaxTransferLength = MAX_TRANSFER_LENGTH;
-    if (WideCharToMultiByte(
-            CP_UTF8, 0,
-            ProductId, lstrlenW(ProductId),
-            LPSTR(unit_params.ProductId), sizeof(unit_params.ProductId),
-            nullptr, nullptr) == 0)
-    {
-        return ERROR_INVALID_PARAMETER;
-    }
-    if (WideCharToMultiByte(
-            CP_UTF8, 0,
-            ProductRevision, lstrlenW(ProductRevision),
-            LPSTR(unit_params.ProductRevisionLevel), sizeof(unit_params.ProductRevisionLevel),
-            nullptr, nullptr) == 0)
-    {
-        return ERROR_INVALID_PARAMETER;
-    }
-    unit_params.WriteProtected = write_protected;
-    unit_params.CacheSupported = TRUE;
-    unit_params.UnmapSupported = TRUE;
-
-    SPD_STORAGE_UNIT* unit = nullptr;
-    auto err = SpdStorageUnitCreate(pipe_name, &unit_params, &CHUNK_DISK_INTERFACE, &unit);
-    if (err != ERROR_SUCCESS) return err;
-    SpdStorageUnitSetBufferAllocator(unit, BufferAlloc, BufferFree);
-
-    cdisk->storage_unit = unit;
-    unit->UserContext = cdisk;
-    return ERROR_SUCCESS;
-}
-
-static constexpr PCWSTR PROGNAME = L"chunkdisk";
-
-[[noreturn]] static void usage()
+[[noreturn]] void usage()
 {
     static WCHAR usage[] = L""
         "usage: %s OPTIONS\n"
@@ -455,7 +411,7 @@ static constexpr PCWSTR PROGNAME = L"chunkdisk";
     ExitProcess(ERROR_INVALID_PARAMETER);
 }
 
-static ULONG argtol(wchar_t** argp, ULONG deflt)
+ULONG argtol(wchar_t** argp, ULONG deflt)
 {
     if (argp[0] == nullptr)
         usage();
@@ -465,7 +421,7 @@ static ULONG argtol(wchar_t** argp, ULONG deflt)
     return argp[0][0] != L'\0' && *endp == L'\0' ? ul : deflt;
 }
 
-static PWSTR argtos(wchar_t** argp)
+PWSTR argtos(wchar_t** argp)
 {
     if (argp[0] == nullptr)
         usage();
@@ -473,13 +429,15 @@ static PWSTR argtos(wchar_t** argp)
     return argp[0];
 }
 
-static SPD_GUARD ConsoleCtrlGuard = SPD_GUARD_INIT;
+SPD_GUARD ConsoleCtrlGuard = SPD_GUARD_INIT;
 
-static BOOL WINAPI ConsoleCtrlHandler(DWORD CtrlType)
+BOOL WINAPI ConsoleCtrlHandler(DWORD CtrlType)
 {
-    SpdGuardExecute(&ConsoleCtrlGuard, recast<void(*)(PVOID)>(SpdStorageUnitShutdown));
+    SpdGuardExecute(&ConsoleCtrlGuard, (void(*)(PVOID))(SpdStorageUnitShutdown));
     return TRUE;
 }
+
+}   // namespace
 
 int wmain(int argc, wchar_t** argv)
 {
@@ -528,7 +486,7 @@ int wmain(int argc, wchar_t** argv)
     DWORD err;
     if (NumThreads == 0)
     {
-        err = GetThreadCount(&NumThreads);
+        err = chunkdisk::GetThreadCount(&NumThreads);
         if (err != ERROR_SUCCESS)
         {
             SpdLogErr(L"error: failed to get number of CPU threads with error %lu", err);
@@ -558,52 +516,15 @@ int wmain(int argc, wchar_t** argv)
         SpdDebugLogSetHandle(DebugLogHandle);
     }
 
-    unique_ptr<ChunkDisk> cdisk;
-    try
-    {
-        auto cdisk_param = ChunkDiskParams();
-        err = ReadChunkDiskParam(ChunkDiskFile, cdisk_param);
-        if (err != ERROR_SUCCESS)
-        {
-            SpdLogErr(L"error: parsing failed with error %lu", err);
-            return err;
-        }
+    auto cdisk = unique_ptr<chunkdisk::ChunkDisk>();
+    err = chunkdisk::CreateStorageUnit(ChunkDiskFile, !WriteAllowed, PipeName, cdisk);
+    if (err != ERROR_SUCCESS) return err;
+    err = chunkdisk::StartWorkers(*cdisk, NumThreads);
+    if (err != ERROR_SUCCESS) return err;
 
-        // FIXME constants
-        cdisk = std::make_unique<ChunkDisk>(
-            std::move(cdisk_param),
-            NumThreads,
-            max(NumThreads * 16, 1024));
-    }
-    catch (const bad_alloc&)
-    {
-        SpdLogErr(L"error: not enough memory to start");
-        return ERROR_NOT_ENOUGH_MEMORY;
-    }
-
-    err = cdisk->LockParts();
-    if (err != ERROR_SUCCESS)
-    {
-        SpdLogErr(L"error: cannot lock parts: error %lu", err);
-        return err;
-    }
-    err = cdisk->ReadParts();
-    if (err != ERROR_SUCCESS)
-    {
-        SpdLogErr(L"error: cannot initialize ChunkDisk: error %lu", err);
-        return err;
-    }
-    err = CreateChunkDiskStorageUnit(cdisk.get(), !WriteAllowed, PipeName);
-    if (err != ERROR_SUCCESS)
-    {
-        SpdLogErr(L"error: cannot create ChunkDisk: error %lu", err);
-        return err;
-    }
-    SpdStorageUnitSetDebugLog(cdisk->storage_unit, DebugFlags);
-
-    cdisk->StartWorkers();  // FIXME err
-
-    err = SpdStorageUnitStartDispatcher(cdisk->storage_unit, NumThreads);
+    auto* storage_unit = cdisk->service.storage_unit;
+    SpdStorageUnitSetDebugLog(storage_unit, DebugFlags);
+    err = SpdStorageUnitStartDispatcher(cdisk->service.storage_unit, 1);
     if (err != ERROR_SUCCESS)
     {
         SpdLogErr(L"error: cannot start ChunkDisk: error %lu", err);
@@ -618,12 +539,10 @@ int wmain(int argc, wchar_t** argv)
         nullptr != PipeName ? L" -p " : L"",
         nullptr != PipeName ? PipeName : L"");
 
-    SpdGuardSet(&ConsoleCtrlGuard, cdisk->storage_unit);
+    SpdGuardSet(&ConsoleCtrlGuard, storage_unit);
     SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
-    SpdStorageUnitWaitDispatcher(cdisk->storage_unit);
+    SpdStorageUnitWaitDispatcher(storage_unit);
     SpdGuardSet(&ConsoleCtrlGuard, nullptr);
-
-    cdisk->StopWorkers();   // FIXME err
 
     cdisk.reset();
     return ERROR_SUCCESS;

@@ -16,12 +16,6 @@ using std::unordered_map;
 namespace chunkdisk
 {
 
-ChunkDiskService::ChunkDiskService(ChunkDiskParams params, u32 max_pages)
-    : params(std::move(params)), max_pages(max_pages)
-{
-    cached_pages_.reserve(max_pages);
-}
-
 DWORD ChunkDiskService::LockParts()
 {
     auto num_parts = params.part_dirname.size();

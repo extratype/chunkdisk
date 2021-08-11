@@ -73,10 +73,10 @@ struct PageResult
 class ChunkDiskService
 {
 public:
-    // max_pages: MUST be positive
-    ChunkDiskService(ChunkDiskParams params, u32 max_pages);
+    ChunkDiskService(ChunkDiskParams params, SPD_STORAGE_UNIT* storage_unit = nullptr)
+        : params(std::move(params)), storage_unit(storage_unit) {}
 
-    ~ChunkDiskService() = default;
+    ~ChunkDiskService() { if (storage_unit != nullptr) SpdStorageUnitDelete(storage_unit); }
 
     // put a lock file to prevent accidental double use
     DWORD LockParts();
@@ -102,7 +102,7 @@ public:
         for (auto it = cached_pages_.begin(); it != cached_pages_.end();)
         {
             auto [idx, pe] = *it;
-            if ((idx * param.page_length) / param.chunk_length < chunk_idx)
+            if ((idx * params.page_length) / params.chunk_length < chunk_idx)
             {
                 ++it;
                 continue;
@@ -140,7 +140,11 @@ public:
 
     const ChunkDiskParams params;
 
-    const u32 max_pages = 1;                 // may exceed if page is being used for I/O
+    SPD_STORAGE_UNIT* const storage_unit;
+
+    // must be positive
+    // may exceed if page is being used for I/O
+    const u32 max_pages = MAX_PAGES;
 
 private:
     std::vector<FileHandle> part_lock_;              // part index -> .lock

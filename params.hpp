@@ -22,6 +22,7 @@ constexpr auto PAGE_SIZE = u32(4096);
 constexpr auto STANDBY_MS = u32(60000);
 constexpr auto MAX_TRANSFER_LENGTH = u32(64 * 1024);    // FIXME must be a multiple of PAGE_SIZE
 constexpr auto MAX_QD = u32(32);    // QD32
+constexpr auto MAX_PAGES = u32(1024);
 
 // [start_idx, end_idx], [start_off, end_off), 0 < end_off <= chunk_length
 struct ChunkRange

@@ -113,6 +113,11 @@ struct PagesDeleter
 
 using Pages = std::unique_ptr<void, PagesDeleter>;
 
+void SetScsiStatus(SPD_IOCTL_STORAGE_UNIT_STATUS* status, u8 sense_key, u8 asc);
+void SetScsiStatus(SPD_IOCTL_STORAGE_UNIT_STATUS* status, u8 sense_key, u8 asc, u64 info);
+
+}   // namespace chunkdisk
+
 template <class... Ts>
 static void SpdLogInfo(PCWSTR format, Ts&&... args)
 {
@@ -139,10 +144,5 @@ static void SpdLogErr(PCWSTR format, Ts&&... args)
             InterlockedCompareExchange(&Once, 1, 0) == 0)\
             SpdLogWarn(L"WARNONCE(%S) failed at %S:%d", #expr, __func__, __LINE__);\
     } while (0,0)
-
-void SetScsiStatus(SPD_IOCTL_STORAGE_UNIT_STATUS* status, u8 sense_key, u8 asc);
-void SetScsiStatus(SPD_IOCTL_STORAGE_UNIT_STATUS* status, u8 sense_key, u8 asc, u64 info);
-
-}
 
 #endif

@@ -109,10 +109,11 @@ class ChunkDiskWorker
 public:
     explicit ChunkDiskWorker(ChunkDiskService& service) : service_(service) {}
 
+    ~ChunkDiskWorker() { if (IsRunning()) Stop(); }
+
     bool IsRunning() { return iocp_ != nullptr; }
 
     // stop and start to restart
-    // CALL Stop() before destructed
     DWORD Start();
 
     // try to cancel all pending IO operations
@@ -128,6 +129,8 @@ public:
      * Asynchronously: Asynchronous I/O is requested and GetLastError() is ERROR_IO_PENDING.
      *
      * op_kind: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK
+     * For UNMAP_CHUNK, context->DataBuffer is SPD_UNMAP_DESCRIPTOR[],
+     * block_addr is ignored and count is the array length.
      * Return ERROR_SUCCESS when the request is done immediately.
      * Return ERROR_IO_PENDING when some operations are processed synchronously or asynchronously.
      */
@@ -216,7 +219,7 @@ private:
     ChunkDiskService& service_;
     std::thread thread_;
     GenericHandle iocp_;
-    OVERLAPPED spd_ovl_;
+    OVERLAPPED spd_ovl_ = {};
 
     std::list<ChunkWork> working_;
     SRWLOCK lock_working_ = SRWLOCK_INIT;   // with the dispatcher thread

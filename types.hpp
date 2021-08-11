@@ -22,6 +22,7 @@ typedef std::int64_t  i64;
 typedef std::uint8_t  u8;
 typedef std::uint32_t u32;
 typedef std::uint64_t u64;
+using std::size_t;
 
 template <class T, class U>
 static constexpr T recast(U arg)
