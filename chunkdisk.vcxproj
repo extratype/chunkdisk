@@ -159,10 +159,21 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="chunkdisk.cpp" />
+    <ClCompile Include="main.cpp" />
+    <ClCompile Include="params.cpp" />
+    <ClCompile Include="service.cpp" />
+    <ClCompile Include="worker.cpp" />
+    <ClCompile Include="utils.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="chunkdisk.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="params.hpp" />
+    <ClInclude Include="service.hpp" />
+    <ClInclude Include="worker.hpp" />
+    <ClInclude Include="types.hpp" />
+    <ClInclude Include="utils.hpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
