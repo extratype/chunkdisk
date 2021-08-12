@@ -360,4 +360,21 @@ DWORD ChunkDiskService::RemovePages(PageRange r, void*** user)
     return ERROR_SUCCESS;
 }
 
+void ChunkDiskService::FlushPages()
+{
+    auto gp = SRWLockGuard(&lock_pages_, true);
+
+    for (auto it = cached_pages_.begin(); it != cached_pages_.end();)
+    {
+        // wait for I/O to complete
+        {
+            auto gm = SRWLockGuard(&(*it).second.lock, true);
+        }
+        auto it_next = it;
+        ++it_next;
+        cached_pages_.erase(it);
+        it = it_next;
+    }
+}
+
 }

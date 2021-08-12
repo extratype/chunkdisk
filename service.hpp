@@ -94,35 +94,6 @@ public:
     // ERROR_SUCCESS if chunk does not exist
     DWORD UnmapChunk(u64 chunk_idx);
 
-    // FIXME check busy
-    // FIXME -> worker
-    // release resources for all chunks >= chunk_idx
-    DWORD FlushAll(u64 chunk_idx = 0)
-    {
-        auto gp = SRWLockGuard(&lock_pages_, true);
-
-        for (auto it = cached_pages_.begin(); it != cached_pages_.end();)
-        {
-            auto [idx, pe] = *it;
-            if ((idx * params.page_length) / params.chunk_length < chunk_idx)
-            {
-                ++it;
-                continue;
-            }
-
-            // wait for I/O to complete FIXME PageGuard
-            {
-                auto gm = SRWLockGuard(&pe.lock, true);
-            }
-            auto it_next = it;
-            ++it_next;
-            cached_pages_.erase(it);
-            it = it_next;
-        }
-
-        return ERROR_SUCCESS;
-    }
-
     // acquire shared lock for reading an existing page
     // local (with guard), no PageResult::user
     PageResult PeekPage(u64 page_idx);
@@ -141,6 +112,10 @@ public:
 
     // ERROR_BUSY and PageResult::user returned if a page is locked by the current thread
     DWORD RemovePages(PageRange r, void*** user = nullptr);
+
+    // release all cached pages
+    // don't call this in a thread using any pages
+    void FlushPages();
 
     const ChunkDiskParams params;
 
