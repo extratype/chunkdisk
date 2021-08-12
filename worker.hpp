@@ -56,13 +56,13 @@ struct ChunkWork
         response.Kind = kind;
     }
 
-    void SetStatusChecked(u8 sense_key, u8 asc)
+    void SetErrorChecked(u8 sense_key, u8 asc)
     {
         if (response.Status.ScsiStatus != SCSISTAT_GOOD) return;
         SetScsiError(&response.Status, sense_key, asc);
     }
 
-    void SetStatusChecked(u8 sense_key, u8 asc, u64 info)
+    void SetErrorChecked(u8 sense_key, u8 asc, u64 info)
     {
         if (response.Status.ScsiStatus != SCSISTAT_GOOD) return;
         SetScsiError(&response.Status, sense_key, asc, info);

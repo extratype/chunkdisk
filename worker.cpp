@@ -857,12 +857,12 @@ void ChunkDiskWorker::ReportOpResult(ChunkOpState& state, DWORD error)
     else if (error == ERROR_NOT_ENOUGH_MEMORY)
     {
         ++state.owner->num_errors;
-        state.owner->SetStatusChecked(SCSI_SENSE_HARDWARE_ERROR, SCSI_ADSENSE_NO_SENSE);
+        state.owner->SetErrorChecked(SCSI_SENSE_HARDWARE_ERROR, SCSI_ADSENSE_NO_SENSE);
     }
     else if (error == ERROR_OPERATION_ABORTED)
     {
         ++state.owner->num_errors;
-        state.owner->SetStatusChecked(SCSI_SENSE_ABORTED_COMMAND, SCSI_ADSENSE_NO_SENSE);
+        state.owner->SetErrorChecked(SCSI_SENSE_ABORTED_COMMAND, SCSI_ADSENSE_NO_SENSE);
     }
     else
     {
@@ -884,7 +884,7 @@ void ChunkDiskWorker::ReportOpResult(ChunkOpState& state, DWORD error)
         {
             // unmap request
             ++state.owner->num_errors;
-            state.owner->SetStatusChecked(SCSI_SENSE_MEDIUM_ERROR, asc);
+            state.owner->SetErrorChecked(SCSI_SENSE_MEDIUM_ERROR, asc);
         }
         else
         {
@@ -899,7 +899,7 @@ void ChunkDiskWorker::ReportOpResult(ChunkOpState& state, DWORD error)
                 info = service_.params.ChunkBlocks(state.idx) + state.start_off;
             }
             ++state.owner->num_errors;
-            state.owner->SetStatusChecked(SCSI_SENSE_MEDIUM_ERROR, asc, info);
+            state.owner->SetErrorChecked(SCSI_SENSE_MEDIUM_ERROR, asc, info);
         }
     }
 }
