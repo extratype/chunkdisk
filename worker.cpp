@@ -159,6 +159,12 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
     return ERROR_IO_PENDING;
 }
 
+DWORD ChunkDiskWorker::ThreadProc(LPVOID param)
+{
+    auto* self = recast<ChunkDiskWorker*>(param);
+    return self->DoWorks();
+}
+
 DWORD ChunkDiskWorker::DoWorks()
 {
     auto bytes_transmitted = DWORD();
@@ -500,7 +506,7 @@ void ChunkDiskWorker::FreePageAsync(ChunkOpState& state, u64 page_idx, bool remo
     if (next != nullptr) PostOp(*next);
 }
 
-DWORD ChunkDiskWorker::RemovePagesAsync(ChunkOpState& state, PageRange r)
+DWORD ChunkDiskWorker::RemovePagesAsync(ChunkOpState& state, const PageRange& r)
 {
     auto* user = (void**)(nullptr);
     auto err = service_.RemovePages(r, &user);

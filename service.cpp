@@ -333,7 +333,7 @@ void ChunkDiskService::FreePage(u64 page_idx, bool remove)
     if (remove) cached_pages_.erase(it);
 }
 
-DWORD ChunkDiskService::RemovePages(PageRange r, void*** user)
+DWORD ChunkDiskService::RemovePages(const PageRange& r, void*** user)
 {
     auto gp = SRWLockGuard(&lock_pages_, true);
 

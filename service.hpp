@@ -73,7 +73,8 @@ struct PageResult
 class ChunkDiskService
 {
 public:
-    ChunkDiskService(ChunkDiskParams params, SPD_STORAGE_UNIT* storage_unit = nullptr)
+    // delete the storage unit when deleted
+    explicit ChunkDiskService(ChunkDiskParams params, SPD_STORAGE_UNIT* storage_unit = nullptr)
         : params(std::move(params)), storage_unit(storage_unit) {}
 
     ~ChunkDiskService() { if (storage_unit != nullptr) SpdStorageUnitDelete(storage_unit); }
@@ -111,7 +112,7 @@ public:
     void FreePage(u64 page_idx, bool remove = false);
 
     // ERROR_BUSY and PageResult::user returned if a page is locked by the current thread
-    DWORD RemovePages(PageRange r, void*** user = nullptr);
+    DWORD RemovePages(const PageRange& r, void*** user = nullptr);
 
     // release all cached pages
     // don't call this in a thread using any pages

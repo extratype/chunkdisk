@@ -150,11 +150,7 @@ private:
         CK_STOP         // cancel pending I/O ops and stop DoWorks()
     };
 
-    static DWORD ThreadProc(LPVOID param)
-    {
-        auto* self = recast<ChunkDiskWorker*>(param);
-        return self->DoWorks();
-    }
+    static DWORD ThreadProc(LPVOID param);
 
     // for SINGLE worker and SINGLE dispatcher thread
     // Start() creates a thread starting at DoWorks()
@@ -188,7 +184,7 @@ private:
 
     void FreePageAsync(ChunkOpState& state, u64 page_idx, bool remove = false);
 
-    DWORD RemovePagesAsync(ChunkOpState& state, PageRange r);
+    DWORD RemovePagesAsync(ChunkOpState& state, const PageRange& r);
 
     DWORD PreparePageOps(ChunkWork& work, bool is_write, u64 page_idx,
                          u32 start_off, u32 end_off, LONGLONG& file_off, PVOID& buffer);

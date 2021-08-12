@@ -30,7 +30,7 @@ struct ChunkDisk
     // FIXME workers are not stopping concurrently
     vector<unique_ptr<ChunkDiskWorker>> workers;
 
-    ChunkDisk(ChunkDiskParams params, SPD_STORAGE_UNIT* storage_unit = nullptr)
+    explicit ChunkDisk(ChunkDiskParams params, SPD_STORAGE_UNIT* storage_unit = nullptr)
         : service(std::move(params), storage_unit) {}
 };
 
