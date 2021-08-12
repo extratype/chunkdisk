@@ -209,7 +209,7 @@ DWORD ChunkDiskService::UnmapChunk(u64 chunk_idx)
     auto gp = SRWLockGuard(&lock_parts_, false);
 
     auto part_it = chunk_parts_.find(chunk_idx);
-    if (part_it == chunk_parts_.end()) return ERROR_SUCCESS; // not present
+    if (part_it == chunk_parts_.end()) return ERROR_SUCCESS;
 
     auto part_idx = part_it->second;
     auto path = params.part_dirname[part_idx] + L"\\chunk" + std::to_wstring(chunk_idx);

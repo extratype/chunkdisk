@@ -31,14 +31,14 @@ enum ChunkOpKind : u32
 enum ChunkOpStep : u32
 {
     OP_READY = 0,       // op created
-    OP_DONE,            // completed or error
+    OP_DONE,            // completed, with or without error
     OP_HIT_PAGE,        // for WRITE_PAGE_PARTIAL, page hit, will be written
-    OP_READ_PAGE        // for WRITE_PAGE_PARTIAL, page read, will be written
+    OP_READ_PAGE        // for WRITE_PAGE_PARTIAL, page is read, will be written
 };
 
 struct ChunkOpState;
 
-// single request
+// single Read(), Write() or Unmap() request
 struct ChunkWork
 {
     std::vector<ChunkOpState> ops;
@@ -69,7 +69,7 @@ struct ChunkWork
     }
 };
 
-// single operation
+// single operation in ChunkWork
 struct ChunkOpState
 {
     OVERLAPPED ovl = {};
@@ -121,6 +121,8 @@ public:
     DWORD Stop();
 
     /*
+     * Perform an I/O operation for WinSpd.
+     *
      * Asynchronous file I/O is processed using IOCP.
      * An operation is processed either immediately, synchronously, asynchronously.
      *
@@ -131,8 +133,11 @@ public:
      * op_kind: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK
      * For UNMAP_CHUNK, context->DataBuffer is SPD_UNMAP_DESCRIPTOR[],
      * block_addr is ignored and count is the array length.
+     *
      * Return ERROR_SUCCESS when the request is done immediately.
      * Return ERROR_IO_PENDING when some operations are processed synchronously or asynchronously.
+     * Return an error with Response->Status set when an error occurred while doing immediately or starting operations.
+     * Response is sent when all operations are finished for ERROR_IO_PENDING.
      */
     DWORD PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, ChunkOpKind op_kind, u64 block_addr, u32 count);
 
@@ -191,6 +196,7 @@ private:
     DWORD PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 chunk_idx,
                           u64 start_off, u64 end_off, PVOID& buffer);
 
+    // add ops to work
     // kind: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK
     // try to complete some ops immediately (abort if one of them fails)
     DWORD PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_addr, u32 count);

@@ -84,12 +84,14 @@ public:
     // read parts and chunks, check consistency
     DWORD ReadParts();
 
-    // open chunk file HANDLE; unbuffered asynchronous I/O
-    // no handle returned if chunk file is empty or does not exist if !is_write
+    // open chunk file HANDLE for unbuffered asynchronous I/O
+    // no handle returned if chunk file is empty or does not exist if !is_write with ERROR_SUCCESS
     // create chunk file if is_write
+    // error if the file is inconsistent with internal state: existence, file size
     DWORD CreateChunk(u64 chunk_idx, bool is_write, FileHandle& handle_out);
 
-    // empty chunk (done immediately)
+    // empty chunk (via new synchronous HANDLE)
+    // ERROR_SUCCESS if chunk does not exist
     DWORD UnmapChunk(u64 chunk_idx);
 
     // FIXME check busy
@@ -122,10 +124,12 @@ public:
     }
 
     // acquire shared lock for reading an existing page
+    // local (with guard), no PageResult::user
     PageResult PeekPage(u64 page_idx);
 
     // set exclusive lock for updating a page
-    // the calling thread must FreePage() later
+    // persistent (without guard), the calling thread must FreePage() later
+    // PageResult::user valid for ERROR_SUCCESS and ERROR_BUSY
     PageResult LockPage(u64 page_idx);
 
     // get LockPage() result for the thread that have called it
@@ -143,16 +147,16 @@ public:
     SPD_STORAGE_UNIT* const storage_unit;
 
     // must be positive
-    // may exceed if page is being used for I/O
+    // may exceed temporarily when pages are being used for I/O
     const u32 max_pages = MAX_PAGES;
 
 private:
-    std::vector<FileHandle> part_lock_;              // part index -> .lock
+    std::vector<FileHandle> part_lock_;             // part index -> .lock
 
     SRWLOCK lock_parts_ = SRWLOCK_INIT;
-    std::vector<u64> part_current_;                  // part index -> # of chunks
-    size_t part_current_new_ = 0;               // part index for new chunks
-    std::unordered_map<u64, size_t> chunk_parts_;    // chunk index -> part index
+    std::vector<u64> part_current_;                 // part index -> # of chunks
+    size_t part_current_new_ = 0;                   // part index for new chunks
+    std::unordered_map<u64, size_t> chunk_parts_;   // chunk index -> part index
 
     SRWLOCK lock_pages_ = SRWLOCK_INIT;
     // BLOCK_SIZE -> PAGE_SIZE access

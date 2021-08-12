@@ -111,6 +111,7 @@ struct PagesDeleter
     }
 };
 
+// deleted by VirtualFree()
 using Pages = std::unique_ptr<void, PagesDeleter>;
 
 void SetScsiError(SPD_IOCTL_STORAGE_UNIT_STATUS* status, u8 sense_key, u8 asc);

@@ -50,8 +50,8 @@ struct ChunkDiskParams
     u64 block_count = 0;            // disk size = block_count * block_size
     u64 chunk_length = 0;           // in blocks
     u64 chunk_count = 0;            // disk size = chunk_count * chunk_length * block_size
-    std::vector<u64> part_max;           // part index -> max. # of chunks
-    std::vector<std::wstring> part_dirname;   // part index -> chunk directory
+    std::vector<u64> part_max;                  // part index -> max. # of chunks
+    std::vector<std::wstring> part_dirname;     // part index -> chunk directory
 
     // unit conversions
 
@@ -65,16 +65,18 @@ struct ChunkDiskParams
 
     u64 ChunkBlocks(u64 count) const { return chunk_length * count; }
 
+    // in blocks
     ChunkRange BlockChunkRange(u64 block_addr, u32 count) const;
 
     bool IsWholeChunk(u64 start_off, u64 end_off) const { return start_off == 0 && end_off == chunk_length; }
 
-    // start_off, end_off: block offsets
+    // start_off, end_off: block offsets relative to chunk
     PageRange BlockPageRange(u64 chunk_idx, u64 start_off, u64 end_off) const;
 
     // PageRange::start_off, PageRange::end_off
     bool IsPageAligned(u64 start_off, u64 end_off, void* buffer = nullptr) const
     {
+        // end_off == 0 if start_off == end_off
         return start_off == 0 && (end_off == 0 || end_off == page_length) &&
             (buffer == nullptr || recast<size_t>(buffer) % PageBytes(1) == 0);
     }
