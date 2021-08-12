@@ -502,12 +502,12 @@ void ChunkDiskWorker::FreePageAsync(ChunkOpState& state, u64 page_idx, bool remo
 
 DWORD ChunkDiskWorker::RemovePagesAsync(ChunkOpState& state, PageRange r)
 {
-    auto* user = (void*)(nullptr);
+    auto* user = (void**)(nullptr);
     auto err = service_.RemovePages(r, &user);
     if (err == ERROR_SUCCESS) return err;
     if (err != ERROR_BUSY) return err;
 
-    auto* cur = recast<ChunkOpState*>(user);
+    auto* cur = recast<ChunkOpState*>(*user);
     for (; cur->next != nullptr; cur = cur->next) {}
     cur->next = &state;
     return err;

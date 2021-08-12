@@ -139,8 +139,8 @@ public:
     // the calling thread must have successfully called LockPage()
     void FreePage(u64 page_idx, bool remove = false);
 
-    // may fail for pages locked by the current thread
-    DWORD RemovePages(PageRange r, void** user = nullptr);
+    // ERROR_BUSY and PageResult::user returned if a page is locked by the current thread
+    DWORD RemovePages(PageRange r, void*** user = nullptr);
 
     const ChunkDiskParams params;
 

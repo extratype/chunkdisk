@@ -333,7 +333,7 @@ void ChunkDiskService::FreePage(u64 page_idx, bool remove)
     if (remove) cached_pages_.erase(it);
 }
 
-DWORD ChunkDiskService::RemovePages(PageRange r, void** user)
+DWORD ChunkDiskService::RemovePages(PageRange r, void*** user)
 {
     auto gp = SRWLockGuard(&lock_pages_, true);
 
@@ -349,7 +349,7 @@ DWORD ChunkDiskService::RemovePages(PageRange r, void** user)
             auto& entry = (*it).second;
             if (entry.owner == GetCurrentThreadId())
             {
-                if (user != nullptr) *user = entry.user;
+                if (user != nullptr) *user = &entry.user;
                 return ERROR_BUSY;
             }
             auto gm = PageGuard(&entry, true);
