@@ -113,8 +113,8 @@ struct PagesDeleter
 
 using Pages = std::unique_ptr<void, PagesDeleter>;
 
-void SetScsiStatus(SPD_IOCTL_STORAGE_UNIT_STATUS* status, u8 sense_key, u8 asc);
-void SetScsiStatus(SPD_IOCTL_STORAGE_UNIT_STATUS* status, u8 sense_key, u8 asc, u64 info);
+void SetScsiError(SPD_IOCTL_STORAGE_UNIT_STATUS* status, u8 sense_key, u8 asc);
+void SetScsiError(SPD_IOCTL_STORAGE_UNIT_STATUS* status, u8 sense_key, u8 asc, u64 info);
 
 }   // namespace chunkdisk
 

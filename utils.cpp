@@ -46,16 +46,16 @@ DWORD GetThreadCount(PDWORD ThreadCount)
 }
 
 
-void SetScsiStatus(SPD_IOCTL_STORAGE_UNIT_STATUS* status, u8 sense_key, u8 asc)
+void SetScsiError(SPD_IOCTL_STORAGE_UNIT_STATUS* status, u8 sense_key, u8 asc)
 {
     status->ScsiStatus = SCSISTAT_CHECK_CONDITION;
     status->SenseKey = sense_key;
     status->ASC = asc;
 }
 
-void SetScsiStatus(SPD_IOCTL_STORAGE_UNIT_STATUS* status, u8 sense_key, u8 asc, u64 info)
+void SetScsiError(SPD_IOCTL_STORAGE_UNIT_STATUS* status, u8 sense_key, u8 asc, u64 info)
 {
-    SetScsiStatus(status, sense_key, asc);
+    SetScsiError(status, sense_key, asc);
     status->Information = info;
     status->InformationValid = 1;
 }

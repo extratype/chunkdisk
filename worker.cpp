@@ -86,7 +86,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
         auto err = GetBuffer(work_buffer);
         if (err != ERROR_SUCCESS)
         {
-            SetScsiStatus(&context->Response->Status, SCSI_SENSE_HARDWARE_ERROR, SCSI_ADSENSE_NO_SENSE);
+            SetScsiError(&context->Response->Status, SCSI_SENSE_HARDWARE_ERROR, SCSI_ADSENSE_NO_SENSE);
             return err;
         }
         // write is never done immediately
@@ -118,7 +118,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
         if (work.num_errors == 0)
         {
             // internal error, e.g. ERROR_NOT_ENOUGH_MEMORY
-            SetScsiStatus(&context->Response->Status, SCSI_SENSE_HARDWARE_ERROR, SCSI_ADSENSE_NO_SENSE);
+            SetScsiError(&context->Response->Status, SCSI_SENSE_HARDWARE_ERROR, SCSI_ADSENSE_NO_SENSE);
         }
         else
         {
@@ -153,7 +153,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
     }
     catch (const bad_alloc&)
     {
-        SetScsiStatus(&context->Response->Status, SCSI_SENSE_HARDWARE_ERROR, SCSI_ADSENSE_NO_SENSE);
+        SetScsiError(&context->Response->Status, SCSI_SENSE_HARDWARE_ERROR, SCSI_ADSENSE_NO_SENSE);
         return ERROR_NOT_ENOUGH_MEMORY;
     }
     return ERROR_IO_PENDING;

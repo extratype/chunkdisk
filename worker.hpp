@@ -59,13 +59,13 @@ struct ChunkWork
     void SetStatusChecked(u8 sense_key, u8 asc)
     {
         if (response.Status.ScsiStatus != SCSISTAT_GOOD) return;
-        SetScsiStatus(&response.Status, sense_key, asc);
+        SetScsiError(&response.Status, sense_key, asc);
     }
 
     void SetStatusChecked(u8 sense_key, u8 asc, u64 info)
     {
         if (response.Status.ScsiStatus != SCSISTAT_GOOD) return;
-        SetScsiStatus(&response.Status, sense_key, asc, info);
+        SetScsiError(&response.Status, sense_key, asc, info);
     }
 };
 
