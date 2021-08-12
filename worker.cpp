@@ -143,6 +143,8 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
         auto g = SRWLockGuard(&lock_working_, true);
         auto work_it = working_.emplace(working_.end(), std::move(work));
         work_it->it = work_it;
+        // owner has been moved
+        for (auto& op : work_it->ops) op.owner = &*work_it;
 
         if (!PostQueuedCompletionStatus(iocp_.get(), 0,
                                         CK_POST, recast<OVERLAPPED*>(&*work_it)))
