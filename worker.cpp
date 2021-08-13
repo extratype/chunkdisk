@@ -527,7 +527,7 @@ DWORD ChunkDiskWorker::PreparePageOps(ChunkWork& work, bool is_write, u64 page_i
     auto& params = service_.params;
     auto& ops = work.ops;
     auto kind = is_write ? WRITE_PAGE : READ_PAGE;
-    if (is_write && !params.IsPageAligned(start_off, end_off)) kind = WRITE_PAGE_PARTIAL;
+    if (is_write && !params.IsWholePages(start_off, end_off)) kind = WRITE_PAGE_PARTIAL;
 
     try
     {
@@ -622,7 +622,7 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
 
     // prepare asynchronous I/O
     auto is_write = (kind == WRITE_CHUNK);
-    if (params.IsPageAligned(start_off, end_off, buffer))
+    if (params.IsWholePages(start_off, end_off, buffer))
     {
         // aligned to page
         try
