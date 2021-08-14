@@ -13,7 +13,7 @@ create chunk:
 
 read, write:
     chunk not found or empty: zero-fill buffer for read
-    non-buffered file I/O: ReadFile, WriteFile
+    unbuffered file I/O: ReadFile, WriteFile
         last modified timestamp update delayed up to 1 hour if not closed
 
 flush:

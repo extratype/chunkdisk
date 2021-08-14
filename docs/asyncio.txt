@@ -2,7 +2,7 @@ file HANDLE
 
 Block I/O -> Page I/O
 
-multiple outstanding I/Os in single thread
+multiple outstanding I/O's in single thread
 
 Request -> Multiple Operations
 
