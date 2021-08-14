@@ -102,9 +102,11 @@ BOOLEAN Flush(SPD_STORAGE_UNIT* StorageUnit,
     SpdWarnOnce(!StorageUnit->StorageUnitParams.WriteProtected);
     SpdWarnOnce(StorageUnit->StorageUnitParams.CacheSupported);
 
-    // FIXME: no flush, metadata flushed after idling
-    // FIXME implement Flush(0, 0) (while exiting)
-    // no buffering or write through, nothing to flush
+    // release memory resources
+    // requested at exit
+    if (BlockAddress == 0 && BlockCount == 0) StorageUnitChunkDisk(StorageUnit)->service.FlushPages();
+
+    // unbuffered, pages write through, nothing to flush
     return ERROR_SUCCESS;
 }
 
