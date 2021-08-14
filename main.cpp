@@ -24,6 +24,11 @@ namespace fs = std::filesystem;
 namespace chunkdisk
 {
 
+// FIXME constants
+static constexpr auto BLOCK_SIZE = u32(512);
+static constexpr auto PAGE_SIZE = u32(4096);
+static constexpr auto MAX_TRANSFER_LENGTH = u32(64 * 1024);    // FIXME must be a multiple of PAGE_SIZE
+
 struct ChunkDisk
 {
     ChunkDiskService service;
@@ -34,8 +39,102 @@ struct ChunkDisk
         : service(std::move(params), storage_unit) {}
 };
 
-namespace
+/*
+ * read .chunkdisk file
+ *
+ * disk size in bytes: must be a multiple of PAGE_SIZE
+ * chunk size in bytes: must be a multiple of PAGE_SIZE
+ * number path/to/dir...: max. # of chunks in part directory
+ */
+DWORD ReadChunkDiskParams(PCWSTR chunkdisk_file, ChunkDiskParams& params)
 {
+    try
+    {
+        // read .chunkdisk and convert to wstr
+        auto h = FileHandle(CreateFileW(
+            chunkdisk_file, GENERIC_READ, FILE_SHARE_READ, nullptr,
+            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (!h) return GetLastError();
+
+        auto size = LARGE_INTEGER();
+        if (!GetFileSizeEx(h.get(), &size)) return GetLastError();
+        if (size.HighPart != 0) return ERROR_ARITHMETIC_OVERFLOW;
+        if (size.LowPart == 0) return ERROR_INVALID_PARAMETER;
+
+        auto buf = unique_ptr<u8[]>(new u8[size_t(size.LowPart)]);
+        auto bytes_read = DWORD();
+        if (!ReadFile(h.get(), buf.get(), size.LowPart, &bytes_read, nullptr)) return GetLastError();
+
+        auto wbuf = wstring();
+        auto err = ConvertUTF8(buf.get(), bytes_read, wbuf);
+        if (err != ERROR_SUCCESS) return err;
+
+        // parse .chunkdisk
+        buf.reset();
+
+        // disk size
+        auto* state = PWSTR();
+        auto* token = wcstok_s(wbuf.data(), L"\n", &state);
+        auto* endp = PWSTR();
+        if (!token) return ERROR_INVALID_PARAMETER;
+        auto disk_size = wcstoull(token, &endp, 10);
+        if (token == endp || (*endp != L'\r' && *endp != L'\0') || errno == ERANGE) return ERROR_INVALID_PARAMETER;
+
+        // chunk size
+        token = wcstok_s(nullptr, L"\n", &state);
+        if (!token) return ERROR_INVALID_PARAMETER;
+        auto chunk_size = wcstoull(token, &endp, 10);
+        if (token == endp || (*endp != L'\r' && *endp != L'\0') || errno == ERANGE) return ERROR_INVALID_PARAMETER;
+
+        // parts
+        auto part_max = vector<u64>();
+        auto part_dirname = vector<wstring>();
+
+        token = wcstok_s(nullptr, L"\n", &state);
+        for (; token; token = wcstok_s(nullptr, L"\n", &state))
+        {
+            auto pmax = wcstoull(token, &endp, 10);
+            if (token == endp || *endp != L' ' || errno == ERANGE) return ERROR_INVALID_PARAMETER;
+
+            auto dirname = wstring(endp + 1);
+            if (!dirname.empty() && dirname[dirname.size() - 1] == L'\r') dirname.erase(dirname.size() - 1);
+            if (!dirname.empty() && dirname[dirname.size() - 1] == L'\\') dirname.erase(dirname.size() - 1);
+            if (!dirname.empty() && dirname[dirname.size() - 1] == L'/')  dirname.erase(dirname.size() - 1);
+            auto dirpath = fs::path(std::move(dirname));
+            if (!dirpath.is_absolute()) return ERROR_INVALID_PARAMETER;
+
+            part_max.push_back(pmax);
+            part_dirname.emplace_back(dirpath.wstring());
+        }
+
+        // check parameters
+        if (disk_size == 0 || chunk_size == 0) return ERROR_INVALID_PARAMETER;
+        if (disk_size % BLOCK_SIZE || chunk_size > disk_size) return ERROR_INVALID_PARAMETER;
+        if (chunk_size % BLOCK_SIZE) return ERROR_INVALID_PARAMETER;
+
+        auto chunk_count = (disk_size + (chunk_size - 1)) / chunk_size;
+        if (chunk_count == 0) return ERROR_INVALID_PARAMETER;
+        if (chunk_count > std::accumulate(part_max.begin(), part_max.end(), 0ull)) return ERROR_INVALID_PARAMETER;
+        auto chunk_length = chunk_size / BLOCK_SIZE;
+
+        if (disk_size % PAGE_SIZE) return ERROR_INVALID_PARAMETER;
+        if (chunk_size % PAGE_SIZE) return ERROR_INVALID_PARAMETER;
+        // if (PAGE_SIZE % BLOCK_SIZE) return ERROR_INVALID_PARAMETER;
+
+        params.block_size = BLOCK_SIZE;
+        params.page_length = PAGE_SIZE / BLOCK_SIZE;
+        params.block_count = disk_size / BLOCK_SIZE;
+        params.chunk_length = chunk_length;
+        params.chunk_count = chunk_count;
+        params.part_max = std::move(part_max);
+        params.part_dirname = std::move(part_dirname);
+    }
+    catch (const bad_alloc&)
+    {
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+    return ERROR_SUCCESS;
+}
 
 ChunkDisk* StorageUnitChunkDisk(SPD_STORAGE_UNIT* StorageUnit)
 {
@@ -165,112 +264,13 @@ BOOLEAN Unmap(SPD_STORAGE_UNIT* StorageUnit,
     return PostWork(StorageUnit, UNMAP_CHUNK, 0, Count);
 }
 
-SPD_STORAGE_UNIT_INTERFACE CHUNK_DISK_INTERFACE =
+static SPD_STORAGE_UNIT_INTERFACE CHUNK_DISK_INTERFACE =
 {
     Read,
     Write,
     Flush,
     Unmap,
 };
-
-}   // namespace
-
-/*
- * read .chunkdisk file
- *
- * disk size in bytes: must be a multiple of PAGE_SIZE
- * chunk size in bytes: must be a multiple of PAGE_SIZE
- * number path/to/dir...: max. # of chunks in part directory
- */
-DWORD ReadChunkDiskParams(PCWSTR chunkdisk_file, ChunkDiskParams& params)
-{
-    try
-    {
-        // read .chunkdisk and convert to wstr
-        auto h = FileHandle(CreateFileW(
-            chunkdisk_file, GENERIC_READ, FILE_SHARE_READ, nullptr,
-            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
-        if (!h) return GetLastError();
-
-        auto size = LARGE_INTEGER();
-        if (!GetFileSizeEx(h.get(), &size)) return GetLastError();
-        if (size.HighPart != 0) return ERROR_ARITHMETIC_OVERFLOW;
-        if (size.LowPart == 0) return ERROR_INVALID_PARAMETER;
-
-        auto buf = unique_ptr<u8[]>(new u8[size_t(size.LowPart)]);
-        auto bytes_read = DWORD();
-        if (!ReadFile(h.get(), buf.get(), size.LowPart, &bytes_read, nullptr)) return GetLastError();
-
-        auto wbuf = wstring();
-        auto err = ConvertUTF8(buf.get(), bytes_read, wbuf);
-        if (err != ERROR_SUCCESS) return err;
-
-        // parse .chunkdisk
-        buf.reset();
-
-        // disk size
-        auto* state = PWSTR();
-        auto* token = wcstok_s(wbuf.data(), L"\n", &state);
-        auto* endp = PWSTR();
-        if (!token) return ERROR_INVALID_PARAMETER;
-        auto disk_size = wcstoull(token, &endp, 10);
-        if (token == endp || (*endp != L'\r' && *endp != L'\0') || errno == ERANGE) return ERROR_INVALID_PARAMETER;
-
-        // chunk size
-        token = wcstok_s(nullptr, L"\n", &state);
-        if (!token) return ERROR_INVALID_PARAMETER;
-        auto chunk_size = wcstoull(token, &endp, 10);
-        if (token == endp || (*endp != L'\r' && *endp != L'\0') || errno == ERANGE) return ERROR_INVALID_PARAMETER;
-
-        // parts
-        auto part_max = vector<u64>();
-        auto part_dirname = vector<wstring>();
-
-        token = wcstok_s(nullptr, L"\n", &state);
-        for (; token; token = wcstok_s(nullptr, L"\n", &state))
-        {
-            auto pmax = wcstoull(token, &endp, 10);
-            if (token == endp || *endp != L' ' || errno == ERANGE) return ERROR_INVALID_PARAMETER;
-
-            auto dirname = wstring(endp + 1);
-            if (!dirname.empty() && dirname[dirname.size() - 1] == L'\r') dirname.erase(dirname.size() - 1);
-            if (!dirname.empty() && dirname[dirname.size() - 1] == L'\\') dirname.erase(dirname.size() - 1);
-            if (!dirname.empty() && dirname[dirname.size() - 1] == L'/')  dirname.erase(dirname.size() - 1);
-            auto dirpath = fs::path(std::move(dirname));
-            if (!dirpath.is_absolute()) return ERROR_INVALID_PARAMETER;
-
-            part_max.push_back(pmax);
-            part_dirname.emplace_back(dirpath.wstring());
-        }
-
-        // check parameters
-        if (disk_size == 0 || chunk_size == 0) return ERROR_INVALID_PARAMETER;
-        if (disk_size % BLOCK_SIZE || chunk_size > disk_size) return ERROR_INVALID_PARAMETER;
-        if (chunk_size % BLOCK_SIZE) return ERROR_INVALID_PARAMETER;
-
-        auto chunk_count = (disk_size + (chunk_size - 1)) / chunk_size;
-        if (chunk_count == 0) return ERROR_INVALID_PARAMETER;
-        if (chunk_count > std::accumulate(part_max.begin(), part_max.end(), 0ull)) return ERROR_INVALID_PARAMETER;
-        auto chunk_length = chunk_size / BLOCK_SIZE;
-
-        if (disk_size % PAGE_SIZE) return ERROR_INVALID_PARAMETER;
-        if (chunk_size % PAGE_SIZE) return ERROR_INVALID_PARAMETER;
-        // if (PAGE_SIZE % BLOCK_SIZE) return ERROR_INVALID_PARAMETER;
-
-        params.block_size = BLOCK_SIZE;
-        params.page_length = PAGE_SIZE / BLOCK_SIZE;
-        params.block_count = disk_size / BLOCK_SIZE;
-        params.chunk_length = chunk_length;
-        params.chunk_count = chunk_count;
-        params.part_max = std::move(part_max);
-        params.part_dirname = std::move(part_dirname);
-    }
-    catch (const bad_alloc&)
-    {
-        return ERROR_NOT_ENOUGH_MEMORY;
-    }
-    return ERROR_SUCCESS;
-}
 
 DWORD CreateStorageUnit(PWSTR chunkdisk_file, BOOLEAN write_protected, PWSTR pipe_name, unique_ptr<ChunkDisk>& cdisk_out)
 {

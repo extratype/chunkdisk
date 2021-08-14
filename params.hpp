@@ -16,14 +16,6 @@
 namespace chunkdisk
 {
 
-// FIXME constants
-constexpr auto BLOCK_SIZE = u32(512);
-constexpr auto PAGE_SIZE = u32(4096);
-constexpr auto STANDBY_MS = u32(60000);
-constexpr auto MAX_TRANSFER_LENGTH = u32(64 * 1024);    // FIXME must be a multiple of PAGE_SIZE
-constexpr auto MAX_QD = u32(32);    // QD32
-constexpr auto MAX_PAGES = u32(1024);
-
 // [start_idx, end_idx], [start_off, end_off), 0 <= start_off <= end_off <= chunk_length
 struct ChunkRange
 {
@@ -47,8 +39,8 @@ struct ChunkDiskParams
 {
     u32 block_size = 0;             // in bytes
     u32 page_length = 0;            // in blocks
-    u64 block_count = 0;            // disk size = block_count * block_size
     u64 chunk_length = 0;           // in blocks
+    u64 block_count = 0;            // disk size = block_count * block_size
     u64 chunk_count = 0;            // disk size = chunk_count * chunk_length * block_size
     std::vector<u64> part_max;                  // part index -> max. # of chunks
     std::vector<std::wstring> part_dirname;     // part index -> chunk directory

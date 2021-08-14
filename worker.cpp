@@ -11,6 +11,9 @@ using std::bad_alloc;
 namespace chunkdisk
 {
 
+static constexpr auto STANDBY_MS = u32(60000);
+static constexpr auto MAX_QD = u32(32);    // QD32
+
 DWORD ChunkDiskWorker::Start()
 {
     if (IsRunning()) return ERROR_INVALID_STATE;

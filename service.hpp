@@ -75,7 +75,7 @@ class ChunkDiskService
 public:
     // delete the storage unit when deleted
     explicit ChunkDiskService(ChunkDiskParams params, SPD_STORAGE_UNIT* storage_unit = nullptr)
-        : params(std::move(params)), storage_unit(storage_unit) {}
+        : params(std::move(params)), storage_unit(storage_unit), max_pages(1024) {}
 
     ~ChunkDiskService() { if (storage_unit != nullptr) SpdStorageUnitDelete(storage_unit); }
 
@@ -124,7 +124,7 @@ public:
 
     // must be positive
     // may exceed temporarily when pages are being used for I/O
-    const u32 max_pages = MAX_PAGES;
+    const u32 max_pages;
 
 private:
     std::vector<FileHandle> part_lock_;             // part index -> .lock
