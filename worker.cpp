@@ -624,8 +624,9 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
     }
 
     // prepare asynchronous I/O
+    const auto r = params.BlockPageRange(chunk_idx, start_off, end_off);
     auto is_write = (kind == WRITE_CHUNK);
-    if (params.IsWholePages(start_off, end_off, buffer))
+    if (params.IsWholePages(r.start_off, r.end_off, buffer))
     {
         // aligned to page
         try
@@ -641,7 +642,6 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
     else
     {
         // not aligned to page
-        const auto r = params.BlockPageRange(chunk_idx, start_off, end_off);
         auto file_off = LONGLONG(params.PageBytes(r.start_idx));
 
         auto err = PreparePageOps(work, is_write, r.base_idx + r.start_idx, r.start_off,
