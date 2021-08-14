@@ -68,14 +68,12 @@ BOOLEAN PostWork(SPD_STORAGE_UNIT* StorageUnit, ChunkOpKind op_kind, u64 block_a
         err = workers[i]->PostWork(context, op_kind, block_addr, count);
         if (err != ERROR_BUSY) break;
     }
-    if (err == ERROR_BUSY) return err;
+
+    // FIXME if all ERROR_BUSY then wait
 
     if (err == ERROR_IO_PENDING) return FALSE;
 
-    if (err == ERROR_SUCCESS) return TRUE;
-
-    // FIXME err
-    return err;
+    return TRUE;
 }
 
 BOOLEAN Read(SPD_STORAGE_UNIT* StorageUnit,
