@@ -895,11 +895,13 @@ DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
             return ERROR_SUCCESS;
         }
     }
-    
+
     // page.is_hit || h == INVALID_HANDLE_VALUE
     // simulate ReadFile()
-    // set bytes_transmitted to -1 to indicate page hit
-    auto err = PostQueuedCompletionStatus(iocp_.get(), u32(-1), CK_IO, &state.ovl);
+    // set bytes_transmitted to -1 to indicate
+    auto err = PostQueuedCompletionStatus(
+        iocp_.get(), u32(-1), CK_IO, &state.ovl)
+        ? ERROR_SUCCESS : GetLastError();
     if (err != ERROR_SUCCESS)
     {
         FreePageAsync(state, state.idx, true);
