@@ -116,7 +116,7 @@ public:
     // ERROR_BUSY and PageResult::user returned if a page is locked by the current thread
     DWORD RemovePages(const PageRange& r, void*** user = nullptr);
 
-    // release all cached pages
+    // wait for I/O's to complete and release all cached pages
     // don't call this in a thread using any pages
     void FlushPages();
 

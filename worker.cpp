@@ -144,9 +144,8 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
     try
     {
         auto g = SRWLockGuard(&lock_working_, true);
-        auto work_it = working_.emplace(working_.end(), std::move(work));
+        auto work_it = working_.emplace(working_.end(), std::move(work));   // invalidates ChunkOpState::owner
         work_it->it = work_it;
-        // owner has been moved
         for (auto& op : work_it->ops) op.owner = &*work_it;
 
         if (!PostQueuedCompletionStatus(iocp_.get(), 0,
@@ -270,7 +269,6 @@ void ChunkDiskWorker::CompleteOp(ChunkOpState& state, DWORD error, DWORD bytes_t
     }
     else if (state.kind == WRITE_PAGE_PARTIAL && state.step == OP_READY)
     {
-        // OP_READY -> OP_READ_PAGE
         CompleteWritePartialReadPage(state, error, bytes_transmitted);
     }
     else if (state.kind == WRITE_PAGE_PARTIAL || state.kind == WRITE_PAGE)
@@ -325,6 +323,7 @@ void ChunkDiskWorker::StopWorks()
 {
     auto g = SRWLockGuard(&lock_working_, true);
 
+    // cancel ops waiting for a page
     for (auto& work : working_)
     {
         for (auto& op : work.ops)
@@ -337,6 +336,7 @@ void ChunkDiskWorker::StopWorks()
         }
     }
 
+    // cancel ops waiting for file I/O
     for (auto p : chunk_handles_)
     {
         auto& cfh = p.second;
@@ -344,7 +344,7 @@ void ChunkDiskWorker::StopWorks()
         if (cfh.handle_rw) CancelIo(cfh.handle_rw.get());
     }
 
-    // process ops
+    // process cancelled ops
     auto bytes_transmitted = DWORD();
     auto ckey = u64();
     auto* overlapped = (OVERLAPPED*)(nullptr);
@@ -486,13 +486,13 @@ PageResult ChunkDiskWorker::LockPageAsync(ChunkOpState& state, u64 page_idx)
 
     if (page.error == ERROR_SUCCESS)
     {
-        *page.user = &state;
+        *page.user = &state;    // state in ChunkWork::ops in working_
     }
     else if (page.error == ERROR_BUSY)
     {
         auto* cur = recast<ChunkOpState*>(*page.user);
         for (; cur->next != nullptr; cur = cur->next) {}
-        cur->next = &state;
+        cur->next = &state;    // state in ChunkWork::ops in working_
     }
 
     return page;
@@ -509,7 +509,7 @@ void ChunkDiskWorker::FreePageAsync(ChunkOpState& state, u64 page_idx, bool remo
     state.next = nullptr;
 
     service_.FreePage(page_idx, remove);
-    if (next != nullptr) PostOp(*next);
+    if (next != nullptr) PostOp(*next); // will retry LockPageAsync()
 }
 
 DWORD ChunkDiskWorker::RemovePagesAsync(ChunkOpState& state, const PageRange& r)
@@ -540,7 +540,7 @@ DWORD ChunkDiskWorker::PreparePageOps(ChunkWork& work, bool is_write, u64 page_i
         if (!(is_write && buffer == nullptr)) buffer = recast<u8*>(buffer) + params.BlockBytes(end_off - start_off);
 
         // try to complete immediately
-        // we can't lock or wait on a page here because work is not queued yet
+        // we can't lock or wait for a page here because work is not queued yet
         if (kind == READ_PAGE)
         {
             auto page = service_.PeekPage(page_idx);
@@ -612,7 +612,7 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
         if (kind == UNMAP_CHUNK)
         {
             // Unmap chunk partially, zero-fill it
-            // buffer is nullptr for UNMAP_CHUNK
+            // buffer is nullptr for UNMAP_CHUNK (ReportOpResult() depends on this)
             kind = WRITE_CHUNK;
         }
     }
@@ -682,7 +682,7 @@ DWORD ChunkDiskWorker::PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_a
 DWORD ChunkDiskWorker::PostReadChunk(ChunkOpState& state)
 {
     // aligned to page
-    // Windows caches them
+    // Windows caches disk
     auto& params = service_.params;
     auto err = RemovePagesAsync(state, params.BlockPageRange(state.idx, state.start_off, state.end_off));
     if (err != ERROR_SUCCESS) return err;
@@ -705,7 +705,7 @@ DWORD ChunkDiskWorker::PostReadChunk(ChunkOpState& state)
 DWORD ChunkDiskWorker::PostWriteChunk(ChunkOpState& state)
 {
     // aligned to page
-    // Windows caches them
+    // Windows caches disk
     auto& params = service_.params;
     auto err = RemovePagesAsync(state, params.BlockPageRange(state.idx, state.start_off, state.end_off));
     if (err != ERROR_SUCCESS) return err;
@@ -807,8 +807,6 @@ void ChunkDiskWorker::CompleteReadPage(ChunkOpState& state, DWORD error, DWORD b
 
 DWORD ChunkDiskWorker::PostWritePage(ChunkOpState& state)
 {
-    // FIXME comment
-    // lock it first, can't skip to OP_READ_PAGE imm.
     if (state.kind == WRITE_PAGE_PARTIAL && state.step == OP_READY) return PostReadPage(state);
 
     // Page was locked in PostReadPage() for WRITE_PAGE_PARTIAL

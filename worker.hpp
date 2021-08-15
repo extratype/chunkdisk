@@ -155,9 +155,12 @@ private:
     // Start() creates a thread starting at DoWorks()
     DWORD DoWorks();
 
+    // initiate async I/O
+    // post CK_IO (I/O result may be an error)
+    // post CK_FAIL if failed
     void PostOp(ChunkOpState& state);
 
-    // Requested async I/O (it may be done schronously)
+    // requested async I/O (it may have been done synchronously)
     void CompleteOp(ChunkOpState& state, DWORD error, DWORD bytes_transmitted);
 
     // send response and close work if it's done
@@ -179,15 +182,19 @@ private:
     // FIXME: close ALL when idle (don't close in eager, may be used later) (PageOps)
     DWORD CloseChunk(u64 chunk_idx);
 
+    // ChunkDiskService::LockPage() with waiting list
     PageResult LockPageAsync(ChunkOpState& state, u64 page_idx);
 
+    // ChunkDiskService::FreePage() and resume the waiting HEAD
     void FreePageAsync(ChunkOpState& state, u64 page_idx, bool remove = false);
 
+    // ChunkDiskService::RemovePages() and wait for a busy page
     DWORD RemovePagesAsync(ChunkOpState& state, const PageRange& r);
 
     DWORD PreparePageOps(ChunkWork& work, bool is_write, u64 page_idx,
                          u32 start_off, u32 end_off, LONGLONG& file_off, PVOID& buffer);
 
+    // partial UNMAP_CHUNK becomes WRITE_CHUNK with nullptr buffer
     DWORD PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 chunk_idx,
                           u64 start_off, u64 end_off, PVOID& buffer);
 
@@ -198,19 +205,20 @@ private:
 
     DWORD PostReadChunk(ChunkOpState& state);
 
-    // FIXME comment unmap
+    // zero-fill if buffer is nullptr
     DWORD PostWriteChunk(ChunkOpState& state);
 
     void CompleteChunkOp(ChunkOpState& state, DWORD error, DWORD bytes_transmitted);
 
-    // FIXME comment partial
+    // used by READ_PAGE and WRITE_PAGE_PARTIAL
     DWORD PostReadPage(ChunkOpState& state);
 
     void CompleteReadPage(ChunkOpState& state, DWORD error, DWORD bytes_transmitted);
 
-    // FIXME comment unmap
+    // zero-fill if buffer is nullptr
     DWORD PostWritePage(ChunkOpState& state);
 
+    // OP_READY -> OP_READ_PAGE
     void CompleteWritePartialReadPage(ChunkOpState& state, DWORD error, DWORD bytes_transmitted);
 
     void CompleteWritePage(ChunkOpState& state, DWORD error, DWORD bytes_transmitted);

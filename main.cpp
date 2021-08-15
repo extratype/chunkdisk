@@ -24,10 +24,14 @@ namespace fs = std::filesystem;
 namespace chunkdisk
 {
 
-// FIXME constants
+// sector size, 512 or 4096
 static constexpr auto BLOCK_SIZE = u32(512);
+
+// align with the underlying hardware, 4096 will work
 static constexpr auto PAGE_SIZE = u32(4096);
-static constexpr auto MAX_TRANSFER_LENGTH = u32(64 * 1024);    // FIXME must be a multiple of PAGE_SIZE
+
+// must be a multiple of PAGE_SIZE, typically 64K
+static constexpr auto MAX_TRANSFER_LENGTH = u32(64 * 1024);
 
 struct ChunkDisk
 {
