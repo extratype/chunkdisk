@@ -80,6 +80,11 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
         if (working_.size() >= MAX_QD) return ERROR_BUSY;   // FIXME choose next worker?
     }
 
+    // expects something to do
+    // expects ChunkWork::ops not empty
+    // block_addr already checked by the WinSpd driver
+    if (count == 0) return ERROR_SUCCESS;
+
     // prepare work
     auto* ctx_buffer = context->DataBuffer;
     auto& params = service_.params;
@@ -174,7 +179,6 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
     if (work.num_completed == work.ops.size())
     {
         // all done immediately
-        // FIXME zero ops
         if (op_kind == READ_CHUNK) memcpy(ctx_buffer, work.ops[0].buffer, service_.MaxTransferLength());
         return ERROR_SUCCESS;
     }
