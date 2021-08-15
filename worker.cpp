@@ -881,27 +881,30 @@ DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
         auto err = OpenChunk(chunk_idx, false, h);
         if (err != ERROR_SUCCESS) return err;
         // file has been checked in PrepareChunkOps(), h should be valid
+        // ... except for WRITE_PARTIAL_PAGE
 
-        err = ReadFile(h, page.ptr, u32(params.PageBytes(1)), nullptr, &state.ovl) ? ERROR_SUCCESS : GetLastError();
-        if (err != ERROR_SUCCESS && err != ERROR_IO_PENDING)
+        if (h != INVALID_HANDLE_VALUE)
         {
-            CloseChunk(chunk_idx);
-            FreePageAsync(state, state.idx, true);
-            return err;
+            err = ReadFile(h, page.ptr, u32(params.PageBytes(1)), nullptr, &state.ovl) ? ERROR_SUCCESS : GetLastError();
+            if (err != ERROR_SUCCESS && err != ERROR_IO_PENDING)
+            {
+                CloseChunk(chunk_idx);
+                FreePageAsync(state, state.idx, true);
+                return err;
+            }
+            return ERROR_SUCCESS;
         }
     }
-    else
+    
+    // page.is_hit || h == INVALID_HANDLE_VALUE
+    // simulate ReadFile()
+    // set bytes_transmitted to -1 to indicate page hit
+    auto err = PostQueuedCompletionStatus(iocp_.get(), u32(-1), CK_IO, &state.ovl);
+    if (err != ERROR_SUCCESS)
     {
-        // simulate ReadFile()
-        // set bytes_transmitted to -1 to indicate page hit
-        auto err = PostQueuedCompletionStatus(iocp_.get(), u32(-1), CK_IO, &state.ovl);
-        if (err != ERROR_SUCCESS)
-        {
-            FreePageAsync(state, state.idx, true);
-            return err;
-        }
+        FreePageAsync(state, state.idx, true);
+        return err;
     }
-
     return ERROR_SUCCESS;
 }
 
