@@ -360,7 +360,7 @@ DWORD ChunkDiskWorker::IdleWork()
 
     // enter idle mode
     buffers_.clear();
-    chunk_handles_.clear();     // FIXME refs zero?
+    chunk_handles_.clear();
     return INFINITE;
 }
 
@@ -485,7 +485,11 @@ DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_ou
     auto h = FileHandle();
     auto err = service_.CreateChunk(chunk_idx, is_write, h);
     if (err != ERROR_SUCCESS) return err;
-    if (!h) return ERROR_SUCCESS;
+    if (!h)
+    {
+        handle_out = INVALID_HANDLE_VALUE;
+        return ERROR_SUCCESS;
+    }
 
     // NOTE: a completion packet will also be sent even though the I/O operation successfully completed synchronously.
     // See https://docs.microsoft.com/en-us/windows/win32/fileio/synchronous-and-asynchronous-i-o
