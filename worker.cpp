@@ -257,7 +257,7 @@ DWORD ChunkDiskWorker::DoWorks()
         }
 
         // CK_IO or CK_FAIL
-        auto& state = (ckey == CK_IO) ? *GetOverlappedOp(overlapped) : *recast<ChunkOpState*>(overlapped);
+        auto& state = *GetOverlappedOp(overlapped);
         if (ckey == CK_IO) CompleteOp(state, err, bytes_transmitted);
         CompleteWork(*state.owner);
     }
@@ -298,7 +298,7 @@ void ChunkDiskWorker::PostOp(ChunkOpState& state)
     ReportOpResult(state, err);
 
     // state will be reviewed after STANDBY_MS if this fails
-    PostQueuedCompletionStatus(iocp_.get(), 0, CK_FAIL, recast<OVERLAPPED*>(&state));
+    PostQueuedCompletionStatus(iocp_.get(), 0, CK_FAIL, &state.ovl);
 }
 
 void ChunkDiskWorker::CompleteOp(ChunkOpState& state, DWORD error, DWORD bytes_transmitted)
@@ -379,7 +379,7 @@ void ChunkDiskWorker::StopWorks()
             if (op.next != nullptr)
             {
                 ReportOpResult(*op.next, ERROR_OPERATION_ABORTED);
-                PostQueuedCompletionStatus(iocp_.get(), 0, CK_FAIL, recast<OVERLAPPED*>(op.next));
+                PostQueuedCompletionStatus(iocp_.get(), 0, CK_FAIL, &op.next->ovl);
             }
         }
     }
@@ -405,7 +405,7 @@ void ChunkDiskWorker::StopWorks()
         if (overlapped == nullptr && err != ERROR_SUCCESS) break;
 
         // CK_IO or CK_FAIL
-        auto& state = (ckey == CK_IO) ? *GetOverlappedOp(overlapped) : *recast<ChunkOpState*>(overlapped);
+        auto& state = *GetOverlappedOp(overlapped);
         if (ckey == CK_IO)
         {
             if (state.kind == WRITE_PAGE_PARTIAL && state.step == OP_READY)
