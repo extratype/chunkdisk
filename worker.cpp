@@ -461,6 +461,8 @@ DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_ou
     auto it = chunk_handles_.find(chunk_idx);
     if (it != chunk_handles_.end())
     {
+        chunk_handles_.reinsert_back(it);
+
         auto& cfh = (*it).second;
         if (!is_write && cfh.handle_ro)
         {
@@ -489,6 +491,26 @@ DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_ou
 
     if (it == chunk_handles_.end())
     {
+        // try to keep MAX_QD by closing old HANDLE's
+        if (chunk_handles_.size() >= MAX_QD)
+        {
+            for (auto it2 = chunk_handles_.begin(); it2 != chunk_handles_.end();)
+            {
+                auto& cfh = (*it2).second;
+                if (cfh.refs != 0)
+                {
+                    ++it2;
+                    continue;
+                }
+
+                auto it2_next = it2;
+                ++it2_next;
+                chunk_handles_.erase(it2);
+                it2 = it2_next;
+                if (chunk_handles_.size() < MAX_QD) break;
+            }
+        }
+
         try
         {
             it = chunk_handles_.try_emplace(chunk_idx).first;

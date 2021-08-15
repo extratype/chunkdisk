@@ -99,7 +99,7 @@ struct ChunkFileHandle
 {
     FileHandle handle_ro;   // read only, for !is_write
     FileHandle handle_rw;   // read and write, for is_write
-    u32 refs = 0;
+    u32 refs = 0;           // may be reused, close in OpenChunk() not CloseChunk()
 };
 
 // for SINGLE dispatcher thread
@@ -176,10 +176,8 @@ private:
     // zero-fill buffer and return it to pool
     DWORD ReturnBuffer(Pages buffer);
 
-    // FIXME: close old HANDLEs (keep <= MAX_QD, reinsert_back() if hit)
     DWORD OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_out);
 
-    // FIXME: close ALL when idle (don't close in eager, may be used later) (PageOps)
     DWORD CloseChunk(u64 chunk_idx);
 
     // ChunkDiskService::LockPage() with waiting list
@@ -240,7 +238,7 @@ private:
     SRWLOCK lock_working_ = SRWLOCK_INIT;   // with the dispatcher thread
 
     std::deque<Pages> buffers_;
-    Map<u64, ChunkFileHandle> chunk_handles_;
+    Map<u64, ChunkFileHandle> chunk_handles_;   // add to back, evict from front
 };
 
 }
