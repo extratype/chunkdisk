@@ -239,6 +239,7 @@ PageResult ChunkDiskService::PeekPage(u64 page_idx)
     if (entry.owner == GetCurrentThreadId()) return PageResult{ERROR_BUSY};
     return PageResult{
         ERROR_SUCCESS,
+        true,
         PageGuard(&entry, false),
         (*it).second.mem.get()};
 }
@@ -281,6 +282,7 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
         // will reinsert_back() if hit
         auto g = SRWLockGuard(&lock_pages_, true);
         auto it = cached_pages_.find(page_idx);
+        auto is_hit = false;
 
         if (it == cached_pages_.end())
         {
@@ -293,6 +295,7 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
         }
         else
         {
+            is_hit = true;
             cached_pages_.reinsert_back(it);
         }
 
@@ -302,6 +305,7 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
         entry.owner = GetCurrentThreadId();
         return PageResult{
             ERROR_SUCCESS,
+            is_hit,
             PageGuard(),
             entry.mem.get(),
             &entry.user};
@@ -319,7 +323,7 @@ PageResult ChunkDiskService::ClaimPage(u64 page_idx)
     if (it == cached_pages_.end()) return PageResult{ERROR_NOT_FOUND};
     auto& entry = (*it).second;
     if (entry.owner != GetCurrentThreadId()) return PageResult{ERROR_INVALID_STATE};
-    return PageResult{ERROR_SUCCESS, PageGuard(), entry.mem.get(), &entry.user};
+    return PageResult{ERROR_SUCCESS, true, PageGuard(), entry.mem.get(), &entry.user};
 }
 
 void ChunkDiskService::FreePage(u64 page_idx, bool remove)

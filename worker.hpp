@@ -32,7 +32,6 @@ enum ChunkOpStep : u32
 {
     OP_READY = 0,       // op created
     OP_DONE,            // completed, with or without error
-    OP_HIT_PAGE,        // for WRITE_PAGE_PARTIAL, page hit, will be written
     OP_READ_PAGE        // for WRITE_PAGE_PARTIAL, page is read, will be written
 };
 

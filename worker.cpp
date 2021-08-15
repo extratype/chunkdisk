@@ -270,6 +270,7 @@ void ChunkDiskWorker::CompleteOp(ChunkOpState& state, DWORD error, DWORD bytes_t
     }
     else if (state.kind == WRITE_PAGE_PARTIAL && state.step == OP_READY)
     {
+        // OP_READY -> OP_READ_PAGE
         CompleteWritePartialReadPage(state, error, bytes_transmitted);
     }
     else if (state.kind == WRITE_PAGE_PARTIAL || state.kind == WRITE_PAGE)
@@ -539,22 +540,15 @@ DWORD ChunkDiskWorker::PreparePageOps(ChunkWork& work, bool is_write, u64 page_i
         if (!(is_write && buffer == nullptr)) buffer = recast<u8*>(buffer) + params.BlockBytes(end_off - start_off);
 
         // try to complete immediately
-        if (kind == READ_PAGE || kind == WRITE_PAGE_PARTIAL)
+        // we can't lock or wait on a page here because work is not queued yet
+        if (kind == READ_PAGE)
         {
             auto page = service_.PeekPage(page_idx);
             if (page.error == ERROR_SUCCESS)
             {
                 auto size = params.BlockBytes(it->end_off - it->start_off);
                 memcpy(it->buffer, recast<u8*>(page.ptr) + params.BlockBytes(it->start_off), size);
-                if (kind == READ_PAGE)
-                {
-                    ReportOpResult(*it);
-                }
-                else
-                {
-                    // WRITE_PAGE_PARTIAL
-                    it->step = OP_HIT_PAGE;
-                }
+                ReportOpResult(*it);
                 return ERROR_SUCCESS;
             }
         }
@@ -760,21 +754,39 @@ void ChunkDiskWorker::CompleteChunkOp(ChunkOpState& state, DWORD error, DWORD by
 DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
 {
     auto& params = service_.params;
+    // we always lock because
+    // READ_PAGE: PeekPage() was called in PreparePageOps()
+    // WRITE_PAGE_PARTIAL: we need to lock first
     auto page = LockPageAsync(state, state.idx);
     if (page.error != ERROR_SUCCESS) return page.error;
 
-    auto h = HANDLE(INVALID_HANDLE_VALUE);
-    auto err = OpenChunk(state.idx, false, h);
-    if (err != ERROR_SUCCESS) return err;
-    // file has been checked in PrepareChunkOps(), h should be valid
-
-    err = ReadFile(h, page.ptr, u32(params.PageBytes(1)), nullptr, &state.ovl) ? ERROR_SUCCESS : GetLastError();
-    if (err != ERROR_SUCCESS && err != ERROR_IO_PENDING)
+    if (!page.is_hit)
     {
-        CloseChunk(state.idx);
-        FreePageAsync(state, state.idx, true);
-        return err;
+        auto h = HANDLE(INVALID_HANDLE_VALUE);
+        auto err = OpenChunk(state.idx, false, h);
+        if (err != ERROR_SUCCESS) return err;
+        // file has been checked in PrepareChunkOps(), h should be valid
+
+        err = ReadFile(h, page.ptr, u32(params.PageBytes(1)), nullptr, &state.ovl) ? ERROR_SUCCESS : GetLastError();
+        if (err != ERROR_SUCCESS && err != ERROR_IO_PENDING)
+        {
+            CloseChunk(state.idx);
+            FreePageAsync(state, state.idx, true);
+            return err;
+        }
     }
+    else
+    {
+        // simulate ReadFile()
+        auto err = PostQueuedCompletionStatus(iocp_.get(), u32(params.PageBytes(1)), CK_IO, &state.ovl);
+        if (err != ERROR_SUCCESS)
+        {
+            CloseChunk(state.idx);
+            FreePageAsync(state, state.idx, true);
+            return err;
+        }
+    }
+
     return ERROR_SUCCESS;
 }
 
@@ -795,12 +807,13 @@ void ChunkDiskWorker::CompleteReadPage(ChunkOpState& state, DWORD error, DWORD b
 
 DWORD ChunkDiskWorker::PostWritePage(ChunkOpState& state)
 {
+    // FIXME comment
+    // lock it first, can't skip to OP_READ_PAGE imm.
     if (state.kind == WRITE_PAGE_PARTIAL && state.step == OP_READY) return PostReadPage(state);
 
-    // OP_READ_PAGE: called LockPageAsync(), OP_HIT_PAGE: called PeekPage()
-    // WRITE_PAGE
-    auto page = (state.kind == WRITE_PAGE_PARTIAL && state.step == OP_READ_PAGE)
-        ? service_.ClaimPage(state.idx) : LockPageAsync(state, state.idx);
+    // Page was locked in PostReadPage() for WRITE_PAGE_PARTIAL
+    // start WRITE_PAGE
+    auto page = (state.kind == WRITE_PAGE_PARTIAL) ? service_.ClaimPage(state.idx) : LockPageAsync(state, state.idx);
     if (page.error != ERROR_SUCCESS) return page.error;
 
     auto h = HANDLE(INVALID_HANDLE_VALUE);
@@ -840,7 +853,8 @@ void ChunkDiskWorker::CompleteWritePartialReadPage(ChunkOpState& state, DWORD er
     }
     else
     {
-        // FIXME comment
+        // read complete, move on to writing
+        // page not freed, claim it later
         state.step = OP_READ_PAGE;
         PostOp(state);
     }

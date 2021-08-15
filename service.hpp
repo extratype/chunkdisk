@@ -65,6 +65,7 @@ private:
 struct PageResult
 {
     DWORD error;                    // page invalid if not ERROR_SUCCESS
+    bool is_hit = false;            // true if page hit and available
     PageGuard guard;                // hold while using ptr
     LPVOID ptr = nullptr;           // size: ChunkDiskParams::PageBytes(1)
     void** user = nullptr;          // &PageEntry::user
@@ -105,6 +106,7 @@ public:
     PageResult LockPage(u64 page_idx);
 
     // get LockPage() result for the thread that have called it
+    // is_hit is always true
     PageResult ClaimPage(u64 page_idx);
 
     // clear the lock and optionally remove the page
