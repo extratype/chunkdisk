@@ -122,16 +122,16 @@ public:
     /*
      * Perform an I/O operation for WinSpd.
      *
+     * op_kind: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK
+     * For UNMAP_CHUNK, context->DataBuffer is SPD_UNMAP_DESCRIPTOR[],
+     * block_addr is ignored and count is the array length.
+     *
      * Asynchronous file I/O is processed using IOCP.
      * An operation is processed either immediately, synchronously, asynchronously.
      *
      * Immediately: I/O is bypassed or done using synchronous HANDLE not associated with the IOCP.
      * Synchronously: Asynchronous I/O is requested but GetLastError() is not ERROR_IO_PENDING.
      * Asynchronously: Asynchronous I/O is requested and GetLastError() is ERROR_IO_PENDING.
-     *
-     * op_kind: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK
-     * For UNMAP_CHUNK, context->DataBuffer is SPD_UNMAP_DESCRIPTOR[],
-     * block_addr is ignored and count is the array length.
      *
      * Return ERROR_SUCCESS when the request is done immediately.
      * Return ERROR_IO_PENDING when some operations are processed synchronously or asynchronously.
@@ -170,10 +170,10 @@ private:
 
     void StopWorks();
 
-    // get buffer from pool
+    // get zero-filled buffer from pool
     DWORD GetBuffer(Pages& buffer);
 
-    // return buffer to pool
+    // zero-fill buffer and return it to pool
     DWORD ReturnBuffer(Pages buffer);
 
     // FIXME: close old HANDLEs (keep <= MAX_QD, reinsert_back() if hit)
@@ -191,17 +191,23 @@ private:
     // ChunkDiskService::RemovePages() and wait for a busy page
     DWORD RemovePagesAsync(ChunkOpState& state, const PageRange& r);
 
+    // start_off, end_off: block offset in page
+    // file_off: offset in chunk corresponding to page
+    // buffer: current address, to be updated
     DWORD PreparePageOps(ChunkWork& work, bool is_write, u64 page_idx,
                          u32 start_off, u32 end_off, LONGLONG& file_off, PVOID& buffer);
 
+    // start_off, end_off: block offset in chunk
+    // buffer: current address, to be updated
     // partial UNMAP_CHUNK becomes WRITE_CHUNK with nullptr buffer
     DWORD PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 chunk_idx,
                           u64 start_off, u64 end_off, PVOID& buffer);
 
     // add ops to work
     // kind: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK
+    // buffer: buffer address for ops, to be updated
     // try to complete some ops immediately (abort if one of them fails)
-    DWORD PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_addr, u32 count);
+    DWORD PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_addr, u32 count, PVOID& buffer);
 
     DWORD PostReadChunk(ChunkOpState& state);
 
