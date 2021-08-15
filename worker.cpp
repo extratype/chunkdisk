@@ -350,10 +350,13 @@ DWORD ChunkDiskWorker::IdleWork()
 {
     auto g = SRWLockGuard(&lock_working_, true);
 
-    for (auto& work : working_)
+    for (auto it = working_.begin(); it != working_.end();)
     {
+        auto it_next = it;
+        ++it_next;
         // in case where posting CK_FAIL was failed for some reason
-        CompleteWork(work, true);
+        CompleteWork(*it, true);
+        it = it_next;
     }
 
     if (!working_.empty()) return STANDBY_MS;
