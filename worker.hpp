@@ -155,11 +155,11 @@ private:
         CK_STOP         // cancel pending I/O ops and stop DoWorks()
     };
 
-    static DWORD ThreadProc(LPVOID param);
+    static void ThreadProc(LPVOID param);
 
     // for SINGLE worker and SINGLE dispatcher thread
     // Start() creates a thread starting at DoWorks()
-    DWORD DoWorks();
+    void DoWorks();
 
     // initiate async I/O
     // post CK_IO (I/O result may be an error)

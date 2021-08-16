@@ -245,12 +245,14 @@ DWORD ChunkDiskWorker::Wait(DWORD timeout_ms)
     g.reset();
     return WaitForSingleObject(wait_event_.get(), timeout_ms);
 }
+
+void ChunkDiskWorker::ThreadProc(LPVOID param)
 {
     auto* self = recast<ChunkDiskWorker*>(param);
-    return self->DoWorks();
+    self->DoWorks();
 }
 
-DWORD ChunkDiskWorker::DoWorks()
+void ChunkDiskWorker::DoWorks()
 {
     auto bytes_transmitted = DWORD();
     auto ckey = u64();
@@ -266,20 +268,16 @@ DWORD ChunkDiskWorker::DoWorks()
 
         if (overlapped == nullptr)
         {
-            if (err == ERROR_SUCCESS && ckey == CK_STOP)
-            {
-                // FIXME no working -> ERROR_SUCCESS, pending -> ERROR_CANCELLED?
-                StopWorks();
-                return ERROR_SUCCESS;
-            }
             if (err == WAIT_TIMEOUT)
             {
                 next_timeout = IdleWork();
                 continue;
             }
 
-            // FIXME restart worker?
-            continue;
+            // err == ERROR_SUCCESS && ckey == CK_STOP
+            // err != ERROR_SUCCESS
+            StopWorks();
+            return;
         }
 
         // do work...
@@ -298,7 +296,6 @@ DWORD ChunkDiskWorker::DoWorks()
         if (ckey == CK_IO) CompleteOp(state, err, bytes_transmitted);
         CompleteWork(*state.owner);
     }
-    // FIXME exit code
 }
 
 void ChunkDiskWorker::PostOp(ChunkOpState& state)
