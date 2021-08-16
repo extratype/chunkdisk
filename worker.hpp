@@ -243,9 +243,9 @@ private:
     OVERLAPPED spd_ovl_ = {};
 
     std::list<ChunkWork> working_;
-    SRWLOCK lock_working_ = SRWLOCK_INIT;   // with the dispatcher thread
-
     std::deque<Pages> buffers_;
+    SRWLOCK lock_working_ = SRWLOCK_INIT;       // with the dispatcher thread
+
     Map<u64, ChunkFileHandle> chunk_handles_;   // add to back, evict from front
 };
 

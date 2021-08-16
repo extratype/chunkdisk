@@ -117,7 +117,10 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
     {
         // prepare buffer
         // work.buffer zero-filled, write back to ctx_buffer if done immediately
-        err = GetBuffer(work.buffer);
+        {
+            auto g = SRWLockGuard(&lock_working_, true);
+            err = GetBuffer(work.buffer);
+        }
         if (err != ERROR_SUCCESS)
         {
             SetScsiError(&context->Response->Status, SCSI_SENSE_HARDWARE_ERROR, SCSI_ADSENSE_NO_SENSE);
@@ -367,14 +370,15 @@ void ChunkDiskWorker::CompleteWork(ChunkWork& work, bool locked_excl)
     SpdStorageUnitSendResponse(service_.storage_unit, &work.response, resp_buffer, &spd_ovl_);
     ResetEvent(spd_ovl_.hEvent);
 
-    if (work.buffer) ReturnBuffer(std::move(work.buffer));
     if (!locked_excl)
     {
         auto g = SRWLockGuard(&lock_working_, true);
+        if (work.buffer) ReturnBuffer(std::move(work.buffer));
         working_.erase(work.it);
     }
     else
     {
+        if (work.buffer) ReturnBuffer(std::move(work.buffer));
         working_.erase(work.it);
     }
     // work is now invalid
@@ -488,8 +492,11 @@ DWORD ChunkDiskWorker::GetBuffer(Pages& buffer)
 
 DWORD ChunkDiskWorker::ReturnBuffer(Pages buffer)
 {
+    if (!buffer) return ERROR_INVALID_PARAMETER;
+
     auto buffer_size = service_.MaxTransferLength() + u32(service_.params.PageBytes(1));
     memset(buffer.get(), 0, buffer_size);
+
     try
     {
         buffers_.emplace_front(std::move(buffer));
