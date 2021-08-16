@@ -553,10 +553,7 @@ DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_ou
                     continue;
                 }
 
-                auto it2_next = it2;
-                ++it2_next;
-                chunk_handles_.erase(it2);
-                it2 = it2_next;
+                it2 = chunk_handles_.erase(it2);
                 if (chunk_handles_.size() < MAX_QD) break;
             }
         }

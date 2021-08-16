@@ -266,10 +266,7 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
                     continue;
                 }
                 ReleaseSRWLockExclusive(&entry.lock);
-                auto it_next = it;
-                ++it_next;
-                cached_pages_.erase(it);
-                it = it_next;
+                it = cached_pages_.erase(it);
                 progress = true;
                 break;
             }
@@ -374,10 +371,7 @@ void ChunkDiskService::FlushPages()
         {
             auto gm = SRWLockGuard(&(*it).second.lock, true);
         }
-        auto it_next = it;
-        ++it_next;
-        cached_pages_.erase(it);
-        it = it_next;
+        it = cached_pages_.erase(it);
     }
 }
 

@@ -175,10 +175,13 @@ struct Map
         return 1;
     }
 
-    void erase(iterator pos)
+    auto erase(iterator pos)
     {
+        auto ret = pos;
+        ++ret;
         key_order_.erase(pos.it_->second.it);
         map_.erase(pos.it_);
+        return ret;
     }
 
     auto find(const KT& key)
