@@ -226,7 +226,7 @@ BOOLEAN Flush(SPD_STORAGE_UNIT* StorageUnit,
     if (BlockAddress == 0 && BlockCount == 0) StorageUnitChunkDisk(StorageUnit)->service.FlushPages();
 
     // unbuffered, pages write through, nothing to flush
-    return ERROR_SUCCESS;
+    return TRUE;
 }
 
 BOOLEAN Unmap(SPD_STORAGE_UNIT* StorageUnit,
@@ -278,7 +278,7 @@ BOOLEAN Unmap(SPD_STORAGE_UNIT* StorageUnit,
     Descriptors[new_count] = {prev_addr, prev_count, 0};
     ++new_count;
 
-    return PostWork(StorageUnit, UNMAP_CHUNK, 0, Count);
+    return PostWork(StorageUnit, UNMAP_CHUNK, 0, new_count);
 }
 
 static SPD_STORAGE_UNIT_INTERFACE CHUNK_DISK_INTERFACE =

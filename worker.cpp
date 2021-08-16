@@ -218,8 +218,10 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
         if (!PostQueuedCompletionStatus(iocp_.get(), 0,
                                         CK_POST, recast<OVERLAPPED*>(&*work_it)))
         {
+            err = GetLastError();
             working_.erase(work_it);
-            return GetLastError();
+            SetScsiError(&context->Response->Status, SCSI_SENSE_HARDWARE_ERROR, SCSI_ADSENSE_NO_SENSE);
+            return err;
         }
     }
     catch (const bad_alloc&)
@@ -230,7 +232,6 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
     return ERROR_IO_PENDING;
 }
 
-DWORD ChunkDiskWorker::ThreadProc(LPVOID param)
 DWORD ChunkDiskWorker::Wait(DWORD timeout_ms)
 {
     // check queue depth
@@ -366,7 +367,7 @@ void ChunkDiskWorker::CompleteWork(ChunkWork& work, bool locked_excl)
     SpdStorageUnitSendResponse(service_.storage_unit, &work.response, resp_buffer, &spd_ovl_);
     ResetEvent(spd_ovl_.hEvent);
 
-    ReturnBuffer(std::move(work.buffer));
+    if (work.buffer) ReturnBuffer(std::move(work.buffer));
     if (!locked_excl)
     {
         auto g = SRWLockGuard(&lock_working_, true);
@@ -434,6 +435,8 @@ void ChunkDiskWorker::StopWorks()
 
     while (true)
     {
+        if (working_.empty()) break;
+
         auto err = GetQueuedCompletionStatus(
             iocp_.get(), &bytes_transmitted, &ckey, &overlapped, STOP_TIMEOUT_MS)
             ? ERROR_SUCCESS : GetLastError();
@@ -452,8 +455,6 @@ void ChunkDiskWorker::StopWorks()
             CompleteOp(state, err, bytes_transmitted);
         }
         CompleteWork(*state.owner, true);
-
-        if (working_.empty()) break;
     }
 
     working_.clear();
