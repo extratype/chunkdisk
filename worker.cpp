@@ -13,22 +13,29 @@ namespace chunkdisk
 
 static constexpr auto STANDBY_MS = u32(60000);
 static constexpr auto MAX_QD = u32(32);    // QD32
+static constexpr auto STOP_TIMEOUT_MS = u32(5000);
 
 DWORD ChunkDiskWorker::Start()
 {
     if (IsRunning()) return ERROR_INVALID_STATE;
 
+    wait_event_.reset(CreateEventW(nullptr, TRUE, TRUE, nullptr));
+    if (!wait_event_) return GetLastError();
+
+    spd_ovl_event_.reset(CreateEventW(nullptr, TRUE, TRUE, nullptr));
+    if (!spd_ovl_event_) return GetLastError();
+
     iocp_.reset(CreateIoCompletionPort(
         INVALID_HANDLE_VALUE, nullptr, 0, 1));
-    if (!iocp_) return GetLastError();
-
-    spd_ovl_ = OVERLAPPED{};
-    spd_ovl_.hEvent = CreateEventW(nullptr, TRUE, TRUE, nullptr);
-    if (spd_ovl_.hEvent == nullptr)
+    if (!iocp_)
     {
-        iocp_.reset();
+        spd_ovl_event_.reset();
+        wait_event_.reset();
         return GetLastError();
     }
+
+    spd_ovl_ = OVERLAPPED{};
+    spd_ovl_.hEvent = spd_ovl_event_.get();
 
     try
     {
@@ -44,29 +51,44 @@ DWORD ChunkDiskWorker::Start()
     return ERROR_SUCCESS;
 }
 
-DWORD ChunkDiskWorker::Stop()
+DWORD ChunkDiskWorker::StopAsync(HANDLE& handle_out)
 {
     if (!IsRunning()) return ERROR_INVALID_STATE;
 
     if (!PostQueuedCompletionStatus(iocp_.get(), 0, CK_STOP, nullptr)) return GetLastError();
 
+    // native_handle() closed after detach()
+    auto h = HANDLE(nullptr);
+    if (!DuplicateHandle(GetCurrentProcess(), thread_.native_handle(),
+                         GetCurrentProcess(), &h, 0, FALSE, DUPLICATE_SAME_ACCESS))
+    {
+        return GetLastError();
+    }
+
     try
     {
-        thread_.join();
+        thread_.detach();
     }
     catch (const std::system_error& e)
     {
+        CloseHandle(h);
         return e.code().value();
     }
 
-    CloseHandle(spd_ovl_.hEvent);
+    handle_out = h;
+    return ERROR_SUCCESS;
+}
 
-    // FIXME no exit code?
-    auto exit_code = DWORD(ERROR_SUCCESS);
-    GetExitCodeThread(thread_.native_handle(), &exit_code);
+DWORD ChunkDiskWorker::Stop(DWORD timeout_ms)
+{
+    if (!IsRunning()) return ERROR_INVALID_STATE;
 
-    thread_ = std::thread();
-    return exit_code;
+    auto h = HANDLE(nullptr);
+    auto err = StopAsync(h);
+    if (err != ERROR_SUCCESS) return err;
+
+    // join thread
+    return WaitForSingleObject(h, timeout_ms);
 }
 
 DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, ChunkOpKind op_kind, u64 block_addr, u32 count)
@@ -77,7 +99,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
     // single dispatcher, no more works to be queued
     {
         auto g = SRWLockGuard(&lock_working_, false);
-        if (working_.size() >= MAX_QD) return ERROR_BUSY;   // FIXME choose next worker?
+        if (working_.size() >= MAX_QD) return ERROR_BUSY;
     }
 
     // expects something to do
@@ -209,6 +231,16 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
 }
 
 DWORD ChunkDiskWorker::ThreadProc(LPVOID param)
+DWORD ChunkDiskWorker::Wait(DWORD timeout_ms)
+{
+    // check queue depth
+    auto g = SRWLockGuard(&lock_working_, false);
+    if (working_.size() < MAX_QD) return ERROR_SUCCESS;
+
+    if (!ResetEvent(wait_event_.get())) return GetLastError();
+    g.reset();
+    return WaitForSingleObject(wait_event_.get(), timeout_ms);
+}
 {
     auto* self = recast<ChunkDiskWorker*>(param);
     return self->DoWorks();
@@ -328,8 +360,9 @@ void ChunkDiskWorker::CompleteWork(ChunkWork& work, bool locked_excl)
 
     auto resp_buffer = (work.ops[0].kind == READ_CHUNK || work.ops[0].kind == READ_PAGE)
         ? work.ops[0].buffer : nullptr;
-    // FIXME unit shuts down if fails
     // DataBuffer: byte alignment, MAX_TRANSFER_LENGTH bytes
+    // NOTE: storage unit shuts down if this fails
+    // The dispatcher will shut down, so will the workers
     SpdStorageUnitSendResponse(service_.storage_unit, &work.response, resp_buffer, &spd_ovl_);
     ResetEvent(spd_ovl_.hEvent);
 
@@ -343,8 +376,9 @@ void ChunkDiskWorker::CompleteWork(ChunkWork& work, bool locked_excl)
     {
         working_.erase(work.it);
     }
-
     // work is now invalid
+
+    SetEvent(wait_event_.get());
 }
 
 DWORD ChunkDiskWorker::IdleWork()
@@ -363,8 +397,8 @@ DWORD ChunkDiskWorker::IdleWork()
     if (!working_.empty()) return STANDBY_MS;
 
     // enter idle mode
-    buffers_.clear();
     chunk_handles_.clear();
+    buffers_.clear();
     return INFINITE;
 }
 
@@ -401,7 +435,7 @@ void ChunkDiskWorker::StopWorks()
     while (true)
     {
         auto err = GetQueuedCompletionStatus(
-            iocp_.get(), &bytes_transmitted, &ckey, &overlapped, 5000)
+            iocp_.get(), &bytes_transmitted, &ckey, &overlapped, STOP_TIMEOUT_MS)
             ? ERROR_SUCCESS : GetLastError();
         if (overlapped == nullptr && err != ERROR_SUCCESS) break;
 
@@ -424,6 +458,9 @@ void ChunkDiskWorker::StopWorks()
 
     working_.clear();
     chunk_handles_.clear();
+    buffers_.clear();
+    spd_ovl_event_.reset();
+    wait_event_.reset();
     iocp_.reset();
 }
 

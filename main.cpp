@@ -33,10 +33,14 @@ static constexpr auto PAGE_SIZE = u32(4096);
 // must be a multiple of PAGE_SIZE, typically 64K
 static constexpr auto MAX_TRANSFER_LENGTH = u32(64 * 1024);
 
+// expected operating bytes per worker
+static constexpr auto WORKER_CAPACITY = u32(1024 * 1024);
+
+static constexpr auto MAX_WORKERS = u32(MAXIMUM_WAIT_OBJECTS);
+
 struct ChunkDisk
 {
     ChunkDiskService service;
-    // FIXME workers are not stopping concurrently
     vector<unique_ptr<ChunkDiskWorker>> workers;
 
     explicit ChunkDisk(ChunkDiskParams params, SPD_STORAGE_UNIT* storage_unit = nullptr)
@@ -150,33 +154,45 @@ ChunkDisk* StorageUnitChunkDisk(SPD_STORAGE_UNIT* StorageUnit)
 BOOLEAN PostWork(SPD_STORAGE_UNIT* StorageUnit, ChunkOpKind op_kind, u64 block_addr, u32 count)
 {
     auto context = SpdStorageUnitGetOperationContext();
-    // not necessary to align buffer
 
-    auto* cdisk = StorageUnitChunkDisk(StorageUnit);
-    auto& workers = cdisk->workers;
-
-    // FIXME root
-    auto start = (block_addr / cdisk->service.params.ByteBlock(1048576).first) % (workers.size());
-    auto err = DWORD(ERROR_BUSY);
-
-    for (auto i = start; i < workers.size(); ++i)
+    if (op_kind == UNMAP_CHUNK)
     {
-        // FIXME err
-        err = workers[i]->PostWork(context, op_kind, block_addr, count);
-        if (err != ERROR_BUSY) break;
-    }
-    for (auto i = 0; i < start; ++i)
-    {
-        // FIXME err
-        err = workers[i]->PostWork(context, op_kind, block_addr, count);
-        if (err != ERROR_BUSY) break;
+        // for UNMAP_CHUNK use the first address to choose a worker
+        // ChunkDiskWorker::PostWork() ignores block_addr
+        auto* descs = recast<SPD_UNMAP_DESCRIPTOR*>(context->DataBuffer);
+        if (count) block_addr = descs[0].BlockAddress;
     }
 
-    // FIXME if all ERROR_BUSY then wait
+    // FIXME comment (parallelism)
+    auto err = [StorageUnit, op_kind, block_addr, count, context]() -> DWORD
+    {
+        auto* cdisk = StorageUnitChunkDisk(StorageUnit);
+        auto& workers = cdisk->workers;
+        // choose worker based on address
+        auto start = (block_addr / cdisk->service.params.ByteBlock(WORKER_CAPACITY).first) % (workers.size());
 
-    if (err == ERROR_IO_PENDING) return FALSE;
+        for (auto i = start; i < workers.size(); ++i)
+        {
+            auto err = workers[i]->PostWork(context, op_kind, block_addr, count);
+            if (err != ERROR_BUSY) return err;
+        }
+        for (auto i = 0; i < start; ++i)
+        {
+            auto err = workers[i]->PostWork(context, op_kind, block_addr, count);
+            if (err != ERROR_BUSY) return err;
+        }
 
-    return TRUE;
+        // all busy, wait for start
+        workers[start]->Wait();
+        return workers[start]->PostWork(context, op_kind, block_addr, count);
+    }();
+
+    if (err == ERROR_INVALID_STATE || err == ERROR_BUSY)
+    {
+        // FIXME shutdown
+        SetScsiError(&context->Response->Status, SCSI_SENSE_HARDWARE_ERROR, SCSI_ADSENSE_NO_SENSE);
+    }
+    return (err == ERROR_IO_PENDING) ? FALSE : TRUE;
 }
 
 BOOLEAN Read(SPD_STORAGE_UNIT* StorageUnit,
@@ -220,8 +236,6 @@ BOOLEAN Unmap(SPD_STORAGE_UNIT* StorageUnit,
     SpdWarnOnce(!StorageUnit->StorageUnitParams.WriteProtected);
     SpdWarnOnce(StorageUnit->StorageUnitParams.UnmapSupported);
 
-    auto* cdisk = StorageUnitChunkDisk(StorageUnit);
-
     // Descriptors is just Buffer, writable
     // merge ranges
     if (Count == 0) return TRUE;
@@ -264,7 +278,6 @@ BOOLEAN Unmap(SPD_STORAGE_UNIT* StorageUnit,
     Descriptors[new_count] = {prev_addr, prev_count, 0};
     ++new_count;
 
-    // FIXME comment
     return PostWork(StorageUnit, UNMAP_CHUNK, 0, Count);
 }
 
@@ -360,34 +373,54 @@ DWORD CreateStorageUnit(PWSTR chunkdisk_file, BOOLEAN write_protected, PWSTR pip
     return ERROR_SUCCESS;
 }
 
-// num_workers: must be positive
+DWORD StopWorkers(ChunkDisk& cdisk, DWORD timeout_ms = INFINITE)
+{
+    try
+    {
+        // FIXME handles may leak
+        vector<HANDLE> handles;
+        handles.reserve(cdisk.workers.size());
+
+        for (auto& worker : cdisk.workers)
+        {
+            HANDLE h;
+            auto err = worker->StopAsync(h);
+            if (err != ERROR_SUCCESS) return err;
+            handles.push_back(h);
+        }
+
+        if (handles.empty()) return ERROR_SUCCESS;
+        return WaitForMultipleObjects(handles.size(), &handles.front(), TRUE, timeout_ms);
+    }
+    catch (const bad_alloc&)
+    {
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+}
+
+// num_workers: should be positive
 DWORD StartWorkers(ChunkDisk& cdisk, u32 num_workers)
 {
     auto& workers = cdisk.workers;
+    auto err = DWORD(ERROR_SUCCESS);
 
-    workers.reserve(num_workers);
-    for (u32 i = 0; i < num_workers; ++i) workers.emplace_back(new ChunkDiskWorker(cdisk.service));
-    // FIXME bad_alloc
-
-    auto result = DWORD(ERROR_SUCCESS);
-
-    for (auto& worker : cdisk.workers)
+    try
     {
-        auto err = worker->Start();
-        if (err != ERROR_SUCCESS)
+        workers.reserve(num_workers);
+        for (u32 i = 0; i < num_workers; ++i)
         {
-            result = err;
-            break;
+            auto it = workers.emplace(workers.end(), new ChunkDiskWorker(cdisk.service));
+            err = (*it)->Start();
+            if (err != ERROR_SUCCESS) break;
         }
     }
-
-    if (result != ERROR_SUCCESS)
+    catch (const bad_alloc&)
     {
-        // FIXME err?
-        for (auto& worker : workers) worker->Stop();
+        err = ERROR_NOT_ENOUGH_MEMORY;
     }
 
-    return result;
+    if (err != ERROR_SUCCESS) StopWorkers(cdisk);
+    return err;
 }
 
 }   // namespace chunkdisk
@@ -497,6 +530,11 @@ int wmain(int argc, wchar_t** argv)
             return err;
         }
     }
+    if (NumThreads > chunkdisk::MAX_WORKERS)
+    {
+        SpdLogWarn(L"warning: number of threads capped to %u", chunkdisk::MAX_WORKERS);
+        NumThreads = chunkdisk::MAX_WORKERS;
+    }
 
     HANDLE DebugLogHandle;
     if (DebugLogFile != nullptr)
@@ -548,6 +586,7 @@ int wmain(int argc, wchar_t** argv)
     SpdStorageUnitWaitDispatcher(storage_unit);
     SpdGuardSet(&ConsoleCtrlGuard, nullptr);
 
+    chunkdisk::StopWorkers(*cdisk);
     cdisk.reset();
     return ERROR_SUCCESS;
 }

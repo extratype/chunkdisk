@@ -115,9 +115,11 @@ public:
     // stop and start to restart
     DWORD Start();
 
+    DWORD StopAsync(HANDLE& handle_out);
+
     // try to cancel all pending IO operations
     // then stop the worker thread gracefully
-    DWORD Stop();
+    DWORD Stop(DWORD timeout_ms = INFINITE);
 
     /*
      * Perform an I/O operation for WinSpd.
@@ -133,12 +135,16 @@ public:
      * Synchronously: Asynchronous I/O is requested but GetLastError() is not ERROR_IO_PENDING.
      * Asynchronously: Asynchronous I/O is requested and GetLastError() is ERROR_IO_PENDING.
      *
+     * Return ERROR_BUSY if the queue is full (Response not set).
      * Return ERROR_SUCCESS when the request is done immediately.
      * Return ERROR_IO_PENDING when some operations are processed synchronously or asynchronously.
      * Return an error with Response->Status set when an error occurred while doing immediately or starting operations.
      * Response is sent when all operations are finished for ERROR_IO_PENDING.
      */
     DWORD PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, ChunkOpKind op_kind, u64 block_addr, u32 count);
+
+    // wait for the operation queue
+    DWORD Wait(DWORD timeout_ms = INFINITE);
 
 private:
     enum IOCPKey
@@ -232,6 +238,8 @@ private:
     ChunkDiskService& service_;
     std::thread thread_;
     GenericHandle iocp_;
+    GenericHandle wait_event_;
+    GenericHandle spd_ovl_event_;
     OVERLAPPED spd_ovl_ = {};
 
     std::list<ChunkWork> working_;
