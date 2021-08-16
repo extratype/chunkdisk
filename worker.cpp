@@ -130,8 +130,9 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
                 }
 
                 // aligned to page
+                // [start_idx, end_idx] -> [soff, eoff)
                 auto soff = params.PageBlocks(r.start_idx) + ((r.start_off != 0) ? params.page_length : 0);
-                auto eoff = params.PageBlocks(r.end_idx) - ((r.end_off != params.page_length) ? params.page_length : 0);
+                auto eoff = params.PageBlocks(r.end_idx) + ((r.end_off != params.page_length) ? 0 : params.page_length);
                 if (soff != eoff)
                 {
                     err = PrepareOps(work, op_kind, soff, eoff - soff, ops_buffer);
@@ -651,7 +652,8 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
         {
             try
             {
-                auto it = ops.emplace(ops.end(), &work, kind, chunk_idx, start_off, end_off, 0, nullptr);
+                auto it = ops.emplace(ops.end(), &work, kind, chunk_idx, start_off, end_off, 0, buffer);
+                // buffer is nullptr
                 auto err = service_.UnmapChunk(chunk_idx);
                 ReportOpResult(*it, err);
                 return err;
@@ -673,6 +675,7 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
                 // nothing to zero-fill if UNMAP_CHUNK
                 auto it = ops.emplace(ops.end(), &work, kind, chunk_idx, start_off, end_off,
                                       LONGLONG(params.BlockBytes(start_off)), buffer);
+                if (buffer != nullptr) buffer = recast<u8*>(buffer) + params.BlockBytes(end_off - start_off);
                 ReportOpResult(*it);
                 return ERROR_SUCCESS;
             }
@@ -727,8 +730,9 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
         // aligned to page
         try
         {
+            // [start_idx, end_idx] -> [soff, eoff)
             auto soff = params.PageBlocks(r.start_idx) + ((r.start_off != 0) ? params.page_length : 0);
-            auto eoff = params.PageBlocks(r.end_idx) - ((r.end_off != params.page_length) ? params.page_length : 0);
+            auto eoff = params.PageBlocks(r.end_idx) + ((r.end_off != params.page_length) ? 0 : params.page_length);
             if (soff != eoff)
             {
                 ops.emplace_back(&work, kind, chunk_idx, soff, eoff, file_off, buffer);
