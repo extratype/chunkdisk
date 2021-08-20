@@ -110,6 +110,8 @@ public:
 
     ~ChunkDiskWorker() { if (IsRunning()) Stop(); }
 
+    ChunkDiskWorker(ChunkDiskWorker&&) = default;
+
     bool IsRunning() { return iocp_ != nullptr; }
 
     // stop and start to restart
@@ -244,7 +246,7 @@ private:
 
     std::list<ChunkWork> working_;
     std::deque<Pages> buffers_;
-    SRWLOCK lock_working_ = SRWLOCK_INIT;       // with the dispatcher thread
+    std::unique_ptr<SRWLOCK> lock_working_;     // with the dispatcher thread
 
     Map<u64, ChunkFileHandle> chunk_handles_;   // add to back, evict from front
 };

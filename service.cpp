@@ -16,95 +16,120 @@ using std::unordered_map;
 namespace chunkdisk
 {
 
-DWORD ChunkDiskService::LockParts()
+DWORD ChunkDiskService::Start()
 {
-    auto num_parts = params.part_dirname.size();
-
     try
     {
-        for (size_t i = 0; i < num_parts; ++i)
-        {
-            auto path = params.part_dirname[i] + L"\\.lock";
-            auto h = FileHandle(CreateFileW(
-                path.data(),
-                GENERIC_READ | GENERIC_WRITE,
-                0, nullptr,
-                CREATE_NEW,
-                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, nullptr));
-            if (!h) return GetLastError();
-
-            part_lock_.emplace_back(std::move(h));
-        }
+        // allocate locks dynamically to make class movable
+        lock_parts_ = std::make_unique<SRWLOCK>();
+        lock_pages_ = std::make_unique<SRWLOCK>();
     }
     catch (const bad_alloc&)
     {
         return ERROR_NOT_ENOUGH_MEMORY;
     }
 
-    return ERROR_SUCCESS;
-}
+    InitializeSRWLock(lock_parts_.get());
+    InitializeSRWLock(lock_pages_.get());
 
-DWORD ChunkDiskService::ReadParts()
-{
-    // from params.part_max, params.part_dirname...
-    auto num_parts = params.part_dirname.size();
+    auto err = DWORD(ERROR_SUCCESS);
 
-    try
+    // put a lock file to prevent accidental double use
+    err = [this]() -> DWORD
     {
-        // make sure parts exist, no dups
-        auto part_ids = std::unordered_set<std::pair<u32, u64>, pair_hash>();
-        for (size_t i = 0; i < num_parts; ++i)
+        auto num_parts = params.part_dirname.size();
+
+        try
         {
-            auto h = FileHandle(CreateFileW(
-                (params.part_dirname[i] + L'\\').data(),
-                FILE_READ_ATTRIBUTES, 0, nullptr,
-                OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS, nullptr));
-            if (!h) return GetLastError();
-
-            auto file_info = BY_HANDLE_FILE_INFORMATION();
-            if (!GetFileInformationByHandle(h.get(), &file_info)) return GetLastError();
-
-            if (!part_ids.emplace(std::make_pair(
-                    file_info.dwVolumeSerialNumber,
-                    file_info.nFileIndexLow + (u64(file_info.nFileIndexHigh) << 32))).second)
+            for (size_t i = 0; i < num_parts; ++i)
             {
-                return ERROR_INVALID_PARAMETER; // dup found
+                auto path = params.part_dirname[i] + L"\\.lock";
+                auto h = FileHandle(CreateFileW(
+                    path.data(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    0, nullptr,
+                    CREATE_NEW,
+                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_DELETE_ON_CLOSE, nullptr));
+                if (!h) return GetLastError();
+
+                part_lock_.emplace_back(std::move(h));
             }
         }
-        part_ids.clear();
-
-        // read parts
-        auto part_current = std::vector<u64>(num_parts, 0);
-        auto chunk_parts = unordered_map<u64, size_t>();
-        for (size_t i = 0; i < num_parts; ++i)
+        catch (const bad_alloc&)
         {
-            for (auto& p : fs::directory_iterator(params.part_dirname[i] + L'\\'))
-            {
-                auto fname = p.path().filename().wstring();
-                if (_wcsnicmp(fname.data(), L"chunk", 5) != 0) continue;
-
-                auto* endp = PWSTR();
-                auto idx = wcstoull(fname.data() + 5, &endp, 10);
-                if (fname.data() + 5 == endp || *endp != L'\0' || errno == ERANGE || idx >= params.chunk_count) continue;
-
-                if (!chunk_parts.emplace(idx, i).second) return ERROR_FILE_EXISTS;
-                if (++part_current[i] > params.part_max[i]) return ERROR_PARAMETER_QUOTA_EXCEEDED;
-            }
+            return ERROR_NOT_ENOUGH_MEMORY;
         }
 
-        // done
-        part_current_ = std::move(part_current);
-        chunk_parts_ = std::move(chunk_parts);
-    }
-    catch (const std::system_error& e)
+        return ERROR_SUCCESS;
+    }();
+    if (err != ERROR_SUCCESS) return err;
+
+    // read parts and chunks, check consistency
+    err = [this]() -> DWORD
     {
-        return e.code().value();
-    }
-    catch (const bad_alloc&)
-    {
-        return ERROR_NOT_ENOUGH_MEMORY;
-    }
+        // from params.part_max, params.part_dirname...
+        auto num_parts = params.part_dirname.size();
+
+        try
+        {
+            // make sure parts exist, no dups
+            auto part_ids = std::unordered_set<std::pair<u32, u64>, pair_hash>();
+            for (size_t i = 0; i < num_parts; ++i)
+            {
+                auto h = FileHandle(CreateFileW(
+                    (params.part_dirname[i] + L'\\').data(),
+                    FILE_READ_ATTRIBUTES, 0, nullptr,
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+                if (!h) return GetLastError();
+
+                auto file_info = BY_HANDLE_FILE_INFORMATION();
+                if (!GetFileInformationByHandle(h.get(), &file_info)) return GetLastError();
+
+                if (!part_ids.emplace(std::make_pair(
+                        file_info.dwVolumeSerialNumber,
+                        file_info.nFileIndexLow + (u64(file_info.nFileIndexHigh) << 32))).second)
+                {
+                    return ERROR_INVALID_PARAMETER; // dup found
+                }
+            }
+            part_ids.clear();
+
+            // read parts
+            auto part_current = std::vector<u64>(num_parts, 0);
+            auto chunk_parts = unordered_map<u64, size_t>();
+            for (size_t i = 0; i < num_parts; ++i)
+            {
+                for (auto& p : fs::directory_iterator(params.part_dirname[i] + L'\\'))
+                {
+                    auto fname = p.path().filename().wstring();
+                    if (_wcsnicmp(fname.data(), L"chunk", 5) != 0) continue;
+
+                    auto* endp = PWSTR();
+                    auto idx = wcstoull(fname.data() + 5, &endp, 10);
+                    if (fname.data() + 5 == endp || *endp != L'\0' || errno == ERANGE || idx >= params.chunk_count) continue;
+
+                    if (!chunk_parts.emplace(idx, i).second) return ERROR_FILE_EXISTS;
+                    if (++part_current[i] > params.part_max[i]) return ERROR_PARAMETER_QUOTA_EXCEEDED;
+                }
+            }
+
+            // done
+            part_current_ = std::move(part_current);
+            chunk_parts_ = std::move(chunk_parts);
+        }
+        catch (const std::system_error& e)
+        {
+            return e.code().value();
+        }
+        catch (const bad_alloc&)
+        {
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+
+        return ERROR_SUCCESS;
+    }();
+    if (err != ERROR_SUCCESS) return err;
 
     return ERROR_SUCCESS;
 }
@@ -114,7 +139,7 @@ DWORD ChunkDiskService::CreateChunk(u64 chunk_idx, bool is_write, FileHandle& ha
     try
     {
         // check existence
-        auto g = SRWLockGuard(&lock_parts_, true);
+        auto g = SRWLockGuard(lock_parts_.get(), true);
 
         auto part_it = chunk_parts_.find(chunk_idx);
         auto part_found = part_it != chunk_parts_.end();
@@ -206,7 +231,7 @@ DWORD ChunkDiskService::CreateChunk(u64 chunk_idx, bool is_write, FileHandle& ha
 
 DWORD ChunkDiskService::UnmapChunk(u64 chunk_idx)
 {
-    auto gp = SRWLockGuard(&lock_parts_, false);
+    auto gp = SRWLockGuard(lock_parts_.get(), false);
 
     auto part_it = chunk_parts_.find(chunk_idx);
     if (part_it == chunk_parts_.end()) return ERROR_SUCCESS;
@@ -231,7 +256,7 @@ DWORD ChunkDiskService::UnmapChunk(u64 chunk_idx)
 
 PageResult ChunkDiskService::PeekPage(u64 page_idx)
 {
-    auto g = SRWLockGuard(&lock_pages_, false);
+    auto g = SRWLockGuard(lock_pages_.get(), false);
     auto it = cached_pages_.find(page_idx);
     if (it == cached_pages_.end()) return PageResult{ERROR_NOT_FOUND};
 
@@ -277,7 +302,7 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
     try
     {
         // will reinsert_back() if hit
-        auto g = SRWLockGuard(&lock_pages_, true);
+        auto g = SRWLockGuard(lock_pages_.get(), true);
         auto it = cached_pages_.find(page_idx);
         auto is_hit = false;
 
@@ -315,7 +340,7 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
 
 PageResult ChunkDiskService::ClaimPage(u64 page_idx)
 {
-    auto g = SRWLockGuard(&lock_pages_, false);
+    auto g = SRWLockGuard(lock_pages_.get(), false);
     auto it = cached_pages_.find(page_idx);
     if (it == cached_pages_.end()) return PageResult{ERROR_NOT_FOUND};
     auto& entry = (*it).second;
@@ -325,7 +350,7 @@ PageResult ChunkDiskService::ClaimPage(u64 page_idx)
 
 void ChunkDiskService::FreePage(u64 page_idx, bool remove)
 {
-    auto g = SRWLockGuard(&lock_pages_, remove);
+    auto g = SRWLockGuard(lock_pages_.get(), remove);
     auto it = cached_pages_.find(page_idx);
     if (it == cached_pages_.end()) return;
     auto& entry = (*it).second;
@@ -336,7 +361,7 @@ void ChunkDiskService::FreePage(u64 page_idx, bool remove)
 
 DWORD ChunkDiskService::RemovePages(const PageRange& r, void*** user)
 {
-    auto gp = SRWLockGuard(&lock_pages_, true);
+    auto gp = SRWLockGuard(lock_pages_.get(), true);
 
     if (cached_pages_.empty()) return ERROR_SUCCESS;
 
@@ -363,7 +388,7 @@ DWORD ChunkDiskService::RemovePages(const PageRange& r, void*** user)
 
 void ChunkDiskService::FlushPages()
 {
-    auto gp = SRWLockGuard(&lock_pages_, true);
+    auto gp = SRWLockGuard(lock_pages_.get(), true);
 
     for (auto it = cached_pages_.begin(); it != cached_pages_.end();)
     {

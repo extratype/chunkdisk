@@ -33,7 +33,10 @@ static constexpr auto PAGE_SIZE = u32(4096);
 // must be a multiple of PAGE_SIZE, typically 64K
 static constexpr auto MAX_TRANSFER_LENGTH = u32(64 * 1024);
 
-// expected operating bytes per worker
+// maximum number of cached pages (write through)
+static constexpr auto MAX_PAGES = u32(1024);
+
+// maximum operating bytes expected per worker
 static constexpr auto WORKER_CAPACITY = u32(1024 * 1024);
 
 static constexpr auto MAX_WORKERS = u32(MAXIMUM_WAIT_OBJECTS);
@@ -43,8 +46,8 @@ struct ChunkDisk
     ChunkDiskService service;
     vector<unique_ptr<ChunkDiskWorker>> workers;
 
-    explicit ChunkDisk(ChunkDiskParams params, SPD_STORAGE_UNIT* storage_unit = nullptr)
-        : service(std::move(params), storage_unit) {}
+    explicit ChunkDisk(ChunkDiskParams params, SPD_STORAGE_UNIT* storage_unit)
+        : service(std::move(params), storage_unit, MAX_PAGES) {}
 };
 
 /*
@@ -356,13 +359,7 @@ DWORD CreateStorageUnit(PWSTR chunkdisk_file, BOOLEAN write_protected, PWSTR pip
         SpdLogErr(L"error: not enough memory to start");
         return ERROR_NOT_ENOUGH_MEMORY;
     }
-    err = cdisk->service.LockParts();
-    if (err != ERROR_SUCCESS)
-    {
-        SpdLogErr(L"error: cannot lock parts: error %lu", err);
-        return err;
-    }
-    err = cdisk->service.ReadParts();
+    err = cdisk->service.Start();
     if (err != ERROR_SUCCESS)
     {
         SpdLogErr(L"error: cannot initialize ChunkDisk: error %lu", err);

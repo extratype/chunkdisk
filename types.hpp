@@ -45,8 +45,9 @@ struct pair_hash
 // keep the insertion order
 // the iterator refers to a temporary value of type pair<const KT&, VT&>
 template <class KT, class VT>
-struct Map
+class Map
 {
+public:
     struct VIt
     {
         VT val;

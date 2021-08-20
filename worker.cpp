@@ -19,6 +19,17 @@ DWORD ChunkDiskWorker::Start()
 {
     if (IsRunning()) return ERROR_INVALID_STATE;
 
+    try
+    {
+        // allocate locks dynamically to make class movable
+        lock_working_ = std::make_unique<SRWLOCK>();
+    }
+    catch (const bad_alloc&)
+    {
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+    InitializeSRWLock(lock_working_.get());
+
     wait_event_.reset(CreateEventW(nullptr, TRUE, TRUE, nullptr));
     if (!wait_event_) return GetLastError();
 
@@ -98,7 +109,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
     // check queue depth
     // single dispatcher, no more works to be queued
     {
-        auto g = SRWLockGuard(&lock_working_, false);
+        auto g = SRWLockGuard(lock_working_.get(), false);
         if (working_.size() >= MAX_QD) return ERROR_BUSY;
     }
 
@@ -118,7 +129,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
         // prepare buffer
         // work.buffer zero-filled, write back to ctx_buffer if done immediately
         {
-            auto g = SRWLockGuard(&lock_working_, true);
+            auto g = SRWLockGuard(lock_working_.get(), true);
             err = GetBuffer(work.buffer);
         }
         if (err != ERROR_SUCCESS)
@@ -213,7 +224,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
     work.SetContext(context->Response->Hint, context->Response->Kind);
     try
     {
-        auto g = SRWLockGuard(&lock_working_, true);
+        auto g = SRWLockGuard(lock_working_.get(), true);
         auto work_it = working_.emplace(working_.end(), std::move(work));   // invalidates ChunkOpState::owner
         work_it->it = work_it;
         for (auto& op : work_it->ops) op.owner = &*work_it;
@@ -238,7 +249,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
 DWORD ChunkDiskWorker::Wait(DWORD timeout_ms)
 {
     // check queue depth
-    auto g = SRWLockGuard(&lock_working_, false);
+    auto g = SRWLockGuard(lock_working_.get(), false);
     if (working_.size() < MAX_QD) return ERROR_SUCCESS;
 
     if (!ResetEvent(wait_event_.get())) return GetLastError();
@@ -369,7 +380,7 @@ void ChunkDiskWorker::CompleteWork(ChunkWork& work, bool locked_excl)
 
     if (!locked_excl)
     {
-        auto g = SRWLockGuard(&lock_working_, true);
+        auto g = SRWLockGuard(lock_working_.get(), true);
         if (work.buffer) ReturnBuffer(std::move(work.buffer));
         working_.erase(work.it);
     }
@@ -385,7 +396,7 @@ void ChunkDiskWorker::CompleteWork(ChunkWork& work, bool locked_excl)
 
 DWORD ChunkDiskWorker::IdleWork()
 {
-    auto g = SRWLockGuard(&lock_working_, true);
+    auto g = SRWLockGuard(lock_working_.get(), true);
 
     for (auto it = working_.begin(); it != working_.end();)
     {
@@ -406,7 +417,7 @@ DWORD ChunkDiskWorker::IdleWork()
 
 void ChunkDiskWorker::StopWorks()
 {
-    auto g = SRWLockGuard(&lock_working_, true);
+    auto g = SRWLockGuard(lock_working_.get(), true);
 
     // cancel ops waiting for a page
     for (auto& work : working_)

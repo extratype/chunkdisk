@@ -75,16 +75,14 @@ class ChunkDiskService
 {
 public:
     // delete the storage unit when deleted
-    explicit ChunkDiskService(ChunkDiskParams params, SPD_STORAGE_UNIT* storage_unit = nullptr)
-        : params(std::move(params)), storage_unit(storage_unit), max_pages(1024) {}
+    ChunkDiskService(ChunkDiskParams params, SPD_STORAGE_UNIT* storage_unit, u32 max_pages)
+        : params(std::move(params)), storage_unit(storage_unit), max_pages(max_pages) {}
 
     ~ChunkDiskService() { if (storage_unit != nullptr) SpdStorageUnitDelete(storage_unit); }
 
-    // put a lock file to prevent accidental double use
-    DWORD LockParts();
+    ChunkDiskService(ChunkDiskService&&) = default;
 
-    // read parts and chunks, check consistency
-    DWORD ReadParts();
+    DWORD Start();
 
     // open chunk file HANDLE for unbuffered asynchronous I/O
     // no handle returned if chunk file is empty or does not exist if !is_write with ERROR_SUCCESS
@@ -133,12 +131,12 @@ public:
 private:
     std::vector<FileHandle> part_lock_;             // part index -> .lock
 
-    SRWLOCK lock_parts_ = SRWLOCK_INIT;
+    std::unique_ptr<SRWLOCK> lock_parts_;
     std::vector<u64> part_current_;                 // part index -> # of chunks
     size_t part_current_new_ = 0;                   // part index for new chunks
     std::unordered_map<u64, size_t> chunk_parts_;   // chunk index -> part index
 
-    SRWLOCK lock_pages_ = SRWLOCK_INIT;
+    std::unique_ptr<SRWLOCK> lock_pages_;
     // BLOCK_SIZE -> PAGE_SIZE access
     // read cache, write through
     // add to back, evict from front
