@@ -21,7 +21,7 @@ DWORD ChunkDiskWorker::Start()
 
     try
     {
-        // allocate locks dynamically to make class movable
+        // to make class movable
         lock_working_ = std::make_unique<SRWLOCK>();
     }
     catch (const bad_alloc&)

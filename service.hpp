@@ -21,7 +21,8 @@ struct PageEntry
 {
     Pages mem;
     // acquire it while using mem
-    SRWLOCK lock = SRWLOCK_INIT;
+    // to make struct movable
+    std::unique_ptr<SRWLOCK> lock;
     // thread ID owning lock exclusively
     // ID 0 is in use by Windows kernel
     // not safe if compared to other threads
@@ -34,12 +35,12 @@ struct PageEntry
 class PageGuard : public SRWLockGuard
 {
 public:
-    PageGuard() : SRWLockGuard() {}
+    PageGuard() : SRWLockGuard(), entry_(nullptr) {}
 
     explicit PageGuard(PageEntry* entry, bool is_exclusive)
-        : SRWLockGuard(&entry->lock, is_exclusive)
+        : SRWLockGuard(entry->lock.get(), is_exclusive), entry_(entry)
     {
-        if (is_exclusive) entry->owner = GetCurrentThreadId();
+        if (is_exclusive) entry_->owner = GetCurrentThreadId();
     }
 
     ~PageGuard() { reset(); }
@@ -49,7 +50,7 @@ public:
     void reset()
     {
         if (!*this) return;
-        if (is_exclusive()) page_entry()->owner = 0;
+        if (is_exclusive()) entry_->owner = 0;
         SRWLockGuard::reset();
     }
 
@@ -57,7 +58,7 @@ public:
     void reset(PageGuard&& other) { swap(*this, other); }
 
 private:
-    PageEntry* page_entry() { return CONTAINING_RECORD(lock_, PageEntry, lock); }
+    PageEntry* entry_;
 };
 
 // current thread only

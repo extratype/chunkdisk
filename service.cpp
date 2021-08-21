@@ -20,7 +20,7 @@ DWORD ChunkDiskService::Start()
 {
     try
     {
-        // allocate locks dynamically to make class movable
+        // to make class movable
         lock_parts_ = std::make_unique<SRWLOCK>();
         lock_pages_ = std::make_unique<SRWLOCK>();
     }
@@ -285,12 +285,12 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
                     ++it;
                     continue;
                 }
-                if (!TryAcquireSRWLockExclusive(&entry.lock))
+                if (!TryAcquireSRWLockExclusive(entry.lock.get()))
                 {
                     ++it;
                     continue;
                 }
-                ReleaseSRWLockExclusive(&entry.lock);
+                ReleaseSRWLockExclusive(entry.lock.get());
                 it = cached_pages_.erase(it);
                 progress = true;
                 break;
@@ -310,7 +310,11 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
         {
             trim_pages();
 
+            auto lock = std::make_unique<SRWLOCK>();
+            InitializeSRWLock(lock.get());
             it = cached_pages_.try_emplace(page_idx).first;
+            (*it).second.lock = std::move(lock);
+
             auto* mem = VirtualAlloc(nullptr, params.PageBytes(1), MEM_COMMIT, PAGE_READWRITE);
             if (mem == nullptr) return PageResult{ERROR_NOT_ENOUGH_MEMORY};
             (*it).second.mem.reset(mem);
@@ -323,7 +327,7 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
 
         auto& entry = (*it).second;
         if (entry.owner == GetCurrentThreadId()) return PageResult{.error = ERROR_BUSY, .user = &entry.user};
-        AcquireSRWLockExclusive(&entry.lock);
+        AcquireSRWLockExclusive(entry.lock.get());
         entry.owner = GetCurrentThreadId();
         return PageResult{
             ERROR_SUCCESS,
@@ -355,7 +359,7 @@ void ChunkDiskService::FreePage(u64 page_idx, bool remove)
     if (it == cached_pages_.end()) return;
     auto& entry = (*it).second;
     entry.owner = 0;
-    ReleaseSRWLockExclusive(&entry.lock);
+    ReleaseSRWLockExclusive(entry.lock.get());
     if (remove) cached_pages_.erase(it);
 }
 
@@ -394,7 +398,7 @@ void ChunkDiskService::FlushPages()
     {
         // wait for I/O to complete
         {
-            auto gm = SRWLockGuard(&(*it).second.lock, true);
+            auto gm = SRWLockGuard((*it).second.lock.get(), true);
         }
         it = cached_pages_.erase(it);
     }
