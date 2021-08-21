@@ -274,6 +274,7 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
     // try to keep < max_pages
     auto trim_pages = [this]()
     {
+        // locked exclusively
         while (cached_pages_.size() >= max_pages)
         {
             auto progress = false;
@@ -310,14 +311,14 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
         {
             trim_pages();
 
+            auto mem = Pages(VirtualAlloc(nullptr, params.PageBytes(1), MEM_COMMIT, PAGE_READWRITE));
+            if (mem == nullptr) return PageResult{ERROR_NOT_ENOUGH_MEMORY};
             auto lock = std::make_unique<SRWLOCK>();
             InitializeSRWLock(lock.get());
-            it = cached_pages_.try_emplace(page_idx).first;
-            (*it).second.lock = std::move(lock);
 
-            auto* mem = VirtualAlloc(nullptr, params.PageBytes(1), MEM_COMMIT, PAGE_READWRITE);
-            if (mem == nullptr) return PageResult{ERROR_NOT_ENOUGH_MEMORY};
-            (*it).second.mem.reset(mem);
+            it = cached_pages_.try_emplace(page_idx).first;
+            (*it).second.mem = std::move(mem);
+            (*it).second.lock = std::move(lock);
         }
         else
         {
