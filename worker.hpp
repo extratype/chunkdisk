@@ -171,8 +171,9 @@ private:
     // requested async I/O (it may have been done synchronously)
     void CompleteOp(ChunkOpState& state, DWORD error, DWORD bytes_transmitted);
 
-    // send response and close work if it's done
-    void CompleteWork(ChunkWork& work, bool locked_excl = false);
+    // send response and close work
+    // lock required
+    void CompleteWork(ChunkWork& work);
 
     DWORD IdleWork();
 
@@ -244,9 +245,11 @@ private:
     GenericHandle spd_ovl_event_;
     OVERLAPPED spd_ovl_ = {};
 
+    std::unique_ptr<SRWLOCK> lock_working_;
     std::list<ChunkWork> working_;
+
+    std::unique_ptr<SRWLOCK> lock_buffers_;
     std::deque<Pages> buffers_;
-    std::unique_ptr<SRWLOCK> lock_working_;     // with the dispatcher thread
 
     Map<u64, ChunkFileHandle> chunk_handles_;   // add to back, evict from front
 };

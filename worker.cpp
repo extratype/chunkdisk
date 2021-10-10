@@ -23,18 +23,24 @@ DWORD ChunkDiskWorker::Start()
     {
         // to make class movable
         lock_working_ = std::make_unique<SRWLOCK>();
+        lock_buffers_ = std::make_unique<SRWLOCK>();
     }
     catch (const bad_alloc&)
     {
         return ERROR_NOT_ENOUGH_MEMORY;
     }
     InitializeSRWLock(lock_working_.get());
+    InitializeSRWLock(lock_buffers_.get());
 
     wait_event_.reset(CreateEventW(nullptr, TRUE, TRUE, nullptr));
     if (!wait_event_) return GetLastError();
 
     spd_ovl_event_.reset(CreateEventW(nullptr, TRUE, TRUE, nullptr));
-    if (!spd_ovl_event_) return GetLastError();
+    if (!spd_ovl_event_)
+    {
+        wait_event_.reset();
+        return GetLastError();
+    }
 
     iocp_.reset(CreateIoCompletionPort(
         INVALID_HANDLE_VALUE, nullptr, 0, 1));
@@ -54,7 +60,8 @@ DWORD ChunkDiskWorker::Start()
     }
     catch (const std::system_error& e)
     {
-        CloseHandle(spd_ovl_.hEvent);
+        spd_ovl_event_.reset();
+        wait_event_.reset();
         iocp_.reset();
         return e.code().value();
     }
@@ -128,10 +135,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
     {
         // prepare buffer
         // work.buffer zero-filled, write back to ctx_buffer if done immediately
-        {
-            auto g = SRWLockGuard(lock_working_.get(), true);
-            err = GetBuffer(work.buffer);
-        }
+        err = GetBuffer(work.buffer);
         if (err != ERROR_SUCCESS)
         {
             SetScsiError(&context->Response->Status, SCSI_SENSE_HARDWARE_ERROR, SCSI_ADSENSE_NO_SENSE);
@@ -284,28 +288,31 @@ void ChunkDiskWorker::DoWorks()
                 next_timeout = IdleWork();
                 continue;
             }
-
-            // err == ERROR_SUCCESS && ckey == CK_STOP
-            // err != ERROR_SUCCESS
-            StopWorks();
-            return;
-        }
-
-        // do work...
-        if (ckey == CK_POST)
-        {
-            auto& work = *recast<ChunkWork*>(overlapped);
-            for (auto& op : work.ops)
+            else
             {
-                PostOp(op);
+                // err == ERROR_SUCCESS && ckey == CK_STOP
+                // err != ERROR_SUCCESS
+                StopWorks();
+                return;
             }
-            continue;
         }
+        else if (ckey == CK_POST)
+        {
+            // do work...
+            for (auto& op : recast<ChunkWork*>(overlapped)->ops) PostOp(op);
+        }
+        else
+        {
+            // ckey == CK_IO || ckey == CK_FAIL
+            auto& state = *GetOverlappedOp(overlapped);
+            if (ckey == CK_IO) CompleteOp(state, err, bytes_transmitted);
 
-        // CK_IO or CK_FAIL
-        auto& state = *GetOverlappedOp(overlapped);
-        if (ckey == CK_IO) CompleteOp(state, err, bytes_transmitted);
-        CompleteWork(*state.owner);
+            if (state.owner->num_completed == state.owner->ops.size())
+            {
+                auto g = SRWLockGuard(lock_working_.get(), true);
+                CompleteWork(*state.owner);
+            }
+        }
     }
 }
 
@@ -366,29 +373,18 @@ void ChunkDiskWorker::CompleteOp(ChunkOpState& state, DWORD error, DWORD bytes_t
     }
 }
 
-void ChunkDiskWorker::CompleteWork(ChunkWork& work, bool locked_excl)
+void ChunkDiskWorker::CompleteWork(ChunkWork& work)
 {
-    if (work.num_completed != work.ops.size()) return;
-
     auto resp_buffer = (work.ops[0].kind == READ_CHUNK || work.ops[0].kind == READ_PAGE)
         ? work.ops[0].buffer : nullptr;
     // DataBuffer: byte alignment, MAX_TRANSFER_LENGTH bytes
     // NOTE: storage unit shuts down if this fails
     // The dispatcher will shut down, so will the workers
-    SpdStorageUnitSendResponse(service_.storage_unit, &work.response, resp_buffer, &spd_ovl_);
     ResetEvent(spd_ovl_.hEvent);
+    SpdStorageUnitSendResponse(service_.storage_unit, &work.response, resp_buffer, &spd_ovl_);
 
-    if (!locked_excl)
-    {
-        auto g = SRWLockGuard(lock_working_.get(), true);
-        if (work.buffer) ReturnBuffer(std::move(work.buffer));
-        working_.erase(work.it);
-    }
-    else
-    {
-        if (work.buffer) ReturnBuffer(std::move(work.buffer));
-        working_.erase(work.it);
-    }
+    ReturnBuffer(std::move(work.buffer));
+    working_.erase(work.it);
     // work is now invalid
 
     SetEvent(wait_event_.get());
@@ -400,13 +396,19 @@ DWORD ChunkDiskWorker::IdleWork()
 
     for (auto it = working_.begin(); it != working_.end();)
     {
-        auto it_next = it;
-        ++it_next;
         // in case where posting CK_FAIL was failed for some reason
-        CompleteWork(*it, true);
-        it = it_next;
+        if (it->num_completed != it->ops.size())
+        {
+            ++it;
+        }
+        else
+        {
+            auto it_next = it;
+            ++it_next;
+            CompleteWork(*it);
+            it = it_next;
+        }
     }
-
     if (!working_.empty()) return STANDBY_MS;
 
     // enter idle mode
@@ -454,19 +456,24 @@ void ChunkDiskWorker::StopWorks()
             ? ERROR_SUCCESS : GetLastError();
         if (overlapped == nullptr && err != ERROR_SUCCESS) break;
 
-        // CK_IO or CK_FAIL
-        auto& state = *GetOverlappedOp(overlapped);
-        if (ckey == CK_IO)
+        // FIXME CK_POST, CK_STOP
+
+        if (ckey == CK_IO || ckey == CK_FAIL)
         {
-            if (state.kind == WRITE_PAGE_PARTIAL && state.step == OP_READY)
+            auto& state = *GetOverlappedOp(overlapped);
+            if (ckey == CK_IO)
             {
-                // forcefully abort PostOp()
-                state.kind = WRITE_PAGE;
-                bytes_transmitted = 0;
+                if (state.kind == WRITE_PAGE_PARTIAL && state.step == OP_READY)
+                {
+                    // forcefully abort PostOp()
+                    state.kind = WRITE_PAGE;
+                    bytes_transmitted = 0;
+                }
+                CompleteOp(state, err, bytes_transmitted);
             }
-            CompleteOp(state, err, bytes_transmitted);
+
+            if (state.owner->num_completed == state.owner->ops.size()) CompleteWork(*state.owner);
         }
-        CompleteWork(*state.owner, true);
     }
 
     working_.clear();
@@ -479,8 +486,12 @@ void ChunkDiskWorker::StopWorks()
 
 DWORD ChunkDiskWorker::GetBuffer(Pages& buffer)
 {
+    auto g = SRWLockGuard(lock_buffers_.get(), true);
+
     if (buffers_.empty())
     {
+        g.reset();
+
         // align buffer to pages
         // additional page for unaligned requests
         auto buffer_size = service_.MaxTransferLength() + u32(service_.params.PageBytes(1));
@@ -507,6 +518,7 @@ DWORD ChunkDiskWorker::ReturnBuffer(Pages buffer)
 
     try
     {
+        auto g = SRWLockGuard(lock_buffers_.get(), true);
         buffers_.emplace_front(std::move(buffer));
     }
     catch (const bad_alloc&)
