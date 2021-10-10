@@ -79,8 +79,6 @@ public:
     ChunkDiskService(ChunkDiskParams params, SPD_STORAGE_UNIT* storage_unit, u32 max_pages)
         : params(std::move(params)), storage_unit(storage_unit), max_pages(max_pages) {}
 
-    ~ChunkDiskService() { if (storage_unit != nullptr) SpdStorageUnitDelete(storage_unit); }
-
     ChunkDiskService(ChunkDiskService&&) = default;
 
     DWORD Start();

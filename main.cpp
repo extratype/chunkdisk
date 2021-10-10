@@ -48,6 +48,8 @@ struct ChunkDisk
 
     explicit ChunkDisk(ChunkDiskParams params, SPD_STORAGE_UNIT* storage_unit)
         : service(std::move(params), storage_unit, MAX_PAGES) {}
+
+    ~ChunkDisk() { SpdStorageUnitDelete(service.storage_unit); }
 };
 
 /*
