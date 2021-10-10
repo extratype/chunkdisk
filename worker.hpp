@@ -251,6 +251,7 @@ private:
     std::unique_ptr<SRWLOCK> lock_buffers_;
     std::deque<Pages> buffers_;
 
+    std::unique_ptr<SRWLOCK> lock_handles_;
     Map<u64, ChunkFileHandle> chunk_handles_;   // add to back, evict from front
 };
 

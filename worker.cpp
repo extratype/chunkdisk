@@ -24,6 +24,7 @@ DWORD ChunkDiskWorker::Start()
         // to make class movable
         lock_working_ = std::make_unique<SRWLOCK>();
         lock_buffers_ = std::make_unique<SRWLOCK>();
+        lock_handles_ = std::make_unique<SRWLOCK>();
     }
     catch (const bad_alloc&)
     {
@@ -31,6 +32,7 @@ DWORD ChunkDiskWorker::Start()
     }
     InitializeSRWLock(lock_working_.get());
     InitializeSRWLock(lock_buffers_.get());
+    InitializeSRWLock(lock_handles_.get());
 
     wait_event_.reset(CreateEventW(nullptr, TRUE, TRUE, nullptr));
     if (!wait_event_) return GetLastError();
@@ -392,8 +394,7 @@ void ChunkDiskWorker::CompleteWork(ChunkWork& work)
 
 DWORD ChunkDiskWorker::IdleWork()
 {
-    auto g = SRWLockGuard(lock_working_.get(), true);
-
+    auto gw = SRWLockGuard(lock_working_.get(), true);
     for (auto it = working_.begin(); it != working_.end();)
     {
         // in case where posting CK_FAIL was failed for some reason
@@ -412,14 +413,17 @@ DWORD ChunkDiskWorker::IdleWork()
     if (!working_.empty()) return STANDBY_MS;
 
     // enter idle mode
-    chunk_handles_.clear();
+    auto gb = SRWLockGuard(lock_buffers_.get(), true);
+    auto gh = SRWLockGuard(lock_handles_.get(), true);
     buffers_.clear();
+    chunk_handles_.clear();
+
     return INFINITE;
 }
 
 void ChunkDiskWorker::StopWorks()
 {
-    auto g = SRWLockGuard(lock_working_.get(), true);
+    auto gw = SRWLockGuard(lock_working_.get(), true);
 
     // cancel ops waiting for a page
     for (auto& work : working_)
@@ -476,9 +480,12 @@ void ChunkDiskWorker::StopWorks()
         }
     }
 
+    auto gb = SRWLockGuard(lock_buffers_.get(), true);
+    auto gh = SRWLockGuard(lock_handles_.get(), true);
     working_.clear();
-    chunk_handles_.clear();
     buffers_.clear();
+    chunk_handles_.clear();
+
     spd_ovl_event_.reset();
     wait_event_.reset();
     iocp_.reset();
@@ -530,6 +537,8 @@ DWORD ChunkDiskWorker::ReturnBuffer(Pages buffer)
 
 DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_out)
 {
+    auto g = SRWLockGuard(lock_handles_.get(), true);
+
     // check HANDLE pool
     auto it = chunk_handles_.find(chunk_idx);
     if (it != chunk_handles_.end())
@@ -611,6 +620,8 @@ DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_ou
 
 DWORD ChunkDiskWorker::CloseChunk(u64 chunk_idx)
 {
+    auto g = SRWLockGuard(lock_handles_.get(), true);
+
     auto it = chunk_handles_.find(chunk_idx);
     if (it == chunk_handles_.end()) return ERROR_NOT_FOUND;
 
