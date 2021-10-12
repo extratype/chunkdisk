@@ -134,18 +134,19 @@ DWORD ChunkDiskService::Start()
     return ERROR_SUCCESS;
 }
 
-DWORD ChunkDiskService::CreateChunk(u64 chunk_idx, bool is_write, FileHandle& handle_out)
+DWORD ChunkDiskService::CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool is_write, bool fix_size)
 {
     try
     {
         // check existence
         auto g = SRWLockGuard(lock_parts_.get(), true);
 
+        // assign part if not found
         auto part_it = chunk_parts_.find(chunk_idx);
         auto part_found = part_it != chunk_parts_.end();
-        // chunks are not deleted (truncated when unmapped) so remember the last result
         auto part_idx = part_found ? part_it->second : ([this]() -> size_t
             {
+                // chunks are not deleted (truncated when unmapped) so remember the last result
                 auto num_parts = params.part_dirname.size();
                 for (auto new_part = part_current_new_; new_part < num_parts; ++new_part)
                 {
@@ -163,16 +164,24 @@ DWORD ChunkDiskService::CreateChunk(u64 chunk_idx, bool is_write, FileHandle& ha
                         return new_part;
                     }
                 }
-                // not found (should not happen)
-                return num_parts;
+                // this code is unreachable by ReadChunkDiskParams()
+                return num_parts - 1;
             })();
 
         auto path = params.part_dirname[part_idx] + L"\\chunk" + std::to_wstring(chunk_idx);
-        const auto desired_access = GENERIC_READ | (is_write ? GENERIC_WRITE : 0);
-        // multiple threads may use the same file
+        // GENERIC_READ  means FILE_GENERIC_READ
+        // GENERIC_WRITE means FILE_GENERIC_WRITE | FILE_READ_ATTRIBUTES
+        // Note that a file can still be extended with FILE_APPEND_DATA flag unset
+        // https://docs.microsoft.com/en-us/windows/win32/fileio/file-security-and-access-rights
+        const auto desired_access = GENERIC_READ | ((is_write || fix_size) ? GENERIC_WRITE : 0);
+        // the file may be used (shared) by multiple threads
+        const auto shared_mode = FILE_SHARE_READ | FILE_SHARE_WRITE;
+        // unbuffered asynchronous I/O
+        const auto flags_attrs = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED;
+
         auto h = FileHandle(CreateFileW(
-            path.data(), desired_access,FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED, nullptr));
+            path.data(), desired_access,shared_mode, nullptr,
+            OPEN_EXISTING, flags_attrs, nullptr));
         if (part_found != bool(h))
         {
             // inconsistent
@@ -182,16 +191,17 @@ DWORD ChunkDiskService::CreateChunk(u64 chunk_idx, bool is_write, FileHandle& ha
         }
         if (!part_found && is_write)
         {
+            // create a new chunk file
             h.reset(CreateFileW(
-                path.data(), desired_access, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED, nullptr));
+                path.data(), desired_access, shared_mode, nullptr,
+                CREATE_NEW, flags_attrs, nullptr));
             if (!h) return GetLastError();
 
             ++part_current_[part_idx];
             chunk_parts_[chunk_idx] = part_idx;
         }
 
-        // check size, extend if necessary
+        // check size and extend it if necessary
         if (h)
         {
             auto chunk_bytes = LONGLONG(params.BlockBytes(params.ChunkBlocks(1)));
@@ -199,15 +209,17 @@ DWORD ChunkDiskService::CreateChunk(u64 chunk_idx, bool is_write, FileHandle& ha
 
             auto file_size = LARGE_INTEGER();
             if (!GetFileSizeEx(h.get(), &file_size)) return GetLastError();
-            if (file_size.QuadPart != 0 && file_size.QuadPart != chunk_bytes) return ERROR_INCORRECT_SIZE;
-
-            if (file_size.QuadPart == 0)
+            if (!is_write && file_size.QuadPart == 0)
             {
-                if (!is_write)
-                {
-                    h.reset();
-                }
-                else
+                h.reset();
+            }
+            else
+            {
+                if (file_size.QuadPart > chunk_bytes) return ERROR_INCORRECT_SIZE;
+                if (!fix_size && file_size.QuadPart != 0 && file_size.QuadPart != chunk_bytes) return ERROR_INCORRECT_SIZE;
+
+                if ((is_write && file_size.QuadPart == 0) ||
+                    (fix_size && file_size.QuadPart != 0 && file_size.QuadPart != chunk_bytes))
                 {
                     // This just reserves disk space and sets file length on NTFS.
                     // Writing to the file actually extends the physical data, but synchronously.
@@ -234,21 +246,16 @@ DWORD ChunkDiskService::UnmapChunk(u64 chunk_idx)
     auto gp = SRWLockGuard(lock_parts_.get(), false);
 
     auto part_it = chunk_parts_.find(chunk_idx);
-    if (part_it == chunk_parts_.end()) return ERROR_SUCCESS;
+    if (part_it == chunk_parts_.end()) return ERROR_FILE_NOT_FOUND;
 
     auto part_idx = part_it->second;
     auto path = params.part_dirname[part_idx] + L"\\chunk" + std::to_wstring(chunk_idx);
-    auto h = FileHandle(CreateFileW(path.data(),
-        GENERIC_READ | GENERIC_WRITE,
-        0, nullptr,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING, nullptr));
-    if (!h)
-    {
-        auto err = GetLastError();
-        if (err == ERROR_FILE_NOT_FOUND) return ERROR_SUCCESS;
-        return err;
-    }
+
+    auto h = FileHandle(CreateFileW(
+        path.data(),
+        GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING, nullptr));
+    if (!h) return GetLastError();
     if (!SetEndOfFile(h.get())) return GetLastError();
 
     return ERROR_SUCCESS;

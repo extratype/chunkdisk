@@ -87,7 +87,7 @@ public:
     // no handle returned if chunk file is empty or does not exist if !is_write with ERROR_SUCCESS
     // create chunk file if is_write
     // error if the file is inconsistent with internal state: existence, file size
-    DWORD CreateChunk(u64 chunk_idx, bool is_write, FileHandle& handle_out);
+    DWORD CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool is_write, bool fix_size = false);
 
     // empty chunk (via new synchronous HANDLE)
     // ERROR_SUCCESS if chunk does not exist

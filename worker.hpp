@@ -25,7 +25,9 @@ enum ChunkOpKind : u32
     READ_PAGE,              // not aligned, read in pages
     WRITE_PAGE,             // not aligned, write in pages
     WRITE_PAGE_PARTIAL,     // not page aligned, read then write in pages
-    UNMAP_CHUNK
+    UNMAP_CHUNK,
+
+    REFRESH_CHUNK           // replace HANDLE for an unmapped chunk FIXME comment
 };
 
 enum ChunkOpStep : u32
@@ -100,6 +102,7 @@ struct ChunkFileHandle
     FileHandle handle_ro;   // read only, for !is_write
     FileHandle handle_rw;   // read and write, for is_write
     u32 refs = 0;           // may be reused, close in OpenChunk() not CloseChunk()
+    bool pending = false;   // pending to be refreshed
 };
 
 // for SINGLE dispatcher thread
@@ -149,6 +152,9 @@ public:
     DWORD Wait(DWORD timeout_ms = INFINITE);
 
 private:
+    // FIXME comment
+    DWORD PostMsg(ChunkWork work);
+
     enum IOCPKey
     {
         CK_IO = 0,      // completed file I/O
@@ -189,6 +195,10 @@ private:
 
     DWORD CloseChunk(u64 chunk_idx);
 
+    DWORD RefreshChunk(u64 chunk_idx);
+
+    DWORD PostRefreshChunk(u64 chunk_idx);
+
     // ChunkDiskService::LockPage() with waiting list
     PageResult LockPageAsync(ChunkOpState& state, u64 page_idx);
 
@@ -211,7 +221,7 @@ private:
                           u64 start_off, u64 end_off, PVOID& buffer);
 
     // add ops to work
-    // kind: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK
+    // kind: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK, REFRESH_CHUNK
     // buffer: buffer address for ops, to be updated
     // try to complete some ops immediately (abort if one of them fails)
     DWORD PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_addr, u32 count, PVOID& buffer);

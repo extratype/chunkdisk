@@ -422,6 +422,11 @@ DWORD StartWorkers(ChunkDisk& cdisk, u32 num_workers)
     return err;
 }
 
+vector<unique_ptr<ChunkDiskWorker>>& GetWorkers(SPD_STORAGE_UNIT* StorageUnit)
+{
+    return StorageUnitChunkDisk(StorageUnit)->workers;
+}
+
 }   // namespace chunkdisk
 
 namespace
