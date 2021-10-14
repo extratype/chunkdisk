@@ -175,7 +175,7 @@ private:
     void PostOp(ChunkOpState& state);
 
     // requested async I/O (it may have been done synchronously)
-    void CompleteOp(ChunkOpState& state, DWORD error, DWORD bytes_transmitted);
+    void CompleteOp(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
 
     // send response and close work
     // lock required
@@ -231,20 +231,20 @@ private:
     // zero-fill if buffer is nullptr
     DWORD PostWriteChunk(ChunkOpState& state);
 
-    void CompleteChunkOp(ChunkOpState& state, DWORD error, DWORD bytes_transmitted);
+    void CompleteChunkOp(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
 
     // used by READ_PAGE and WRITE_PAGE_PARTIAL
     DWORD PostReadPage(ChunkOpState& state);
 
-    void CompleteReadPage(ChunkOpState& state, DWORD error, DWORD bytes_transmitted);
+    void CompleteReadPage(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
 
     // zero-fill if buffer is nullptr
     DWORD PostWritePage(ChunkOpState& state);
 
     // OP_READY -> OP_READ_PAGE
-    void CompleteWritePartialReadPage(ChunkOpState& state, DWORD error, DWORD bytes_transmitted);
+    void CompleteWritePartialReadPage(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
 
-    void CompleteWritePage(ChunkOpState& state, DWORD error, DWORD bytes_transmitted);
+    void CompleteWritePage(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
 
     void ReportOpResult(ChunkOpState& state, DWORD error = ERROR_SUCCESS);
 
