@@ -152,8 +152,22 @@ public:
     DWORD Wait(DWORD timeout_ms = INFINITE);
 
 private:
+    // get zero-filled buffer from pool
+    DWORD GetBuffer(Pages& buffer);
+
+    // zero-fill buffer and return it to pool
+    DWORD ReturnBuffer(Pages buffer);
+
+    DWORD OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_out);
+
+    DWORD CloseChunk(u64 chunk_idx);
+
+    DWORD RefreshChunk(u64 chunk_idx);
+
     // FIXME comment
     DWORD PostMsg(ChunkWork work);
+
+    DWORD PostRefreshChunk(u64 chunk_idx);
 
     enum IOCPKey
     {
@@ -184,20 +198,6 @@ private:
     DWORD IdleWork();
 
     void StopWorks();
-
-    // get zero-filled buffer from pool
-    DWORD GetBuffer(Pages& buffer);
-
-    // zero-fill buffer and return it to pool
-    DWORD ReturnBuffer(Pages buffer);
-
-    DWORD OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_out);
-
-    DWORD CloseChunk(u64 chunk_idx);
-
-    DWORD RefreshChunk(u64 chunk_idx);
-
-    DWORD PostRefreshChunk(u64 chunk_idx);
 
     // ChunkDiskService::LockPage() with waiting list
     PageResult LockPageAsync(ChunkOpState& state, u64 page_idx);

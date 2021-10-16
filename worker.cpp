@@ -269,6 +269,188 @@ DWORD ChunkDiskWorker::Wait(DWORD timeout_ms)
     return WaitForSingleObject(wait_event_.get(), timeout_ms);
 }
 
+DWORD ChunkDiskWorker::GetBuffer(Pages& buffer)
+{
+    auto g = SRWLockGuard(lock_buffers_.get(), true);
+
+    if (buffers_.empty())
+    {
+        g.reset();
+
+        // align buffer to pages
+        // additional page for unaligned requests
+        auto buffer_size = service_.MaxTransferLength() + u32(service_.params.PageBytes(1));
+        auto new_buffer = Pages(VirtualAlloc(nullptr, buffer_size, MEM_COMMIT, PAGE_READWRITE));
+        if (!new_buffer) return GetLastError();
+        buffer = std::move(new_buffer);
+        return ERROR_SUCCESS;
+    }
+    else
+    {
+        buffer = std::move(buffers_.front());
+        buffers_.pop_front();
+        // buf was zero-filled in ReturnBuffer()
+        return ERROR_SUCCESS;
+    }
+}
+
+DWORD ChunkDiskWorker::ReturnBuffer(Pages buffer)
+{
+    if (!buffer) return ERROR_INVALID_PARAMETER;
+
+    auto buffer_size = service_.MaxTransferLength() + u32(service_.params.PageBytes(1));
+    memset(buffer.get(), 0, buffer_size);
+
+    try
+    {
+        auto g = SRWLockGuard(lock_buffers_.get(), true);
+        buffers_.emplace_front(std::move(buffer));
+    }
+    catch (const bad_alloc&)
+    {
+        // ignore error, will retry in GetBuffer()
+    }
+    return ERROR_SUCCESS;
+}
+
+DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_out)
+{
+    auto g = SRWLockGuard(lock_handles_.get(), true);
+
+    // check HANDLE pool
+    auto it = chunk_handles_.find(chunk_idx);
+    if (it != chunk_handles_.end())
+    {
+        chunk_handles_.reinsert_back(it);
+
+        auto& cfh = (*it).second;
+
+        if (cfh.pending)
+        {
+            auto h = FileHandle();
+            auto err = service_.CreateChunk(chunk_idx, h, is_write, true);
+            if (err != ERROR_SUCCESS) return err;
+            if (!h)
+            {
+                handle_out = INVALID_HANDLE_VALUE;
+                return ERROR_SUCCESS;
+            }
+            else
+            {
+                cfh.pending = false;
+            }
+        }
+
+        if (!is_write && cfh.handle_ro)
+        {
+            handle_out = cfh.handle_ro.get();
+            ++cfh.refs;
+            return ERROR_SUCCESS;
+        }
+        if (is_write && cfh.handle_rw)
+        {
+            handle_out = cfh.handle_rw.get();
+            ++cfh.refs;
+            return ERROR_SUCCESS;
+        }
+    }
+
+    auto h = FileHandle();
+    auto err = service_.CreateChunk(chunk_idx, h, is_write);
+    if (err != ERROR_SUCCESS) return err;
+    if (!h)
+    {
+        handle_out = INVALID_HANDLE_VALUE;
+        return ERROR_SUCCESS;
+    }
+
+    // NOTE: a completion packet will also be sent even though the I/O operation successfully completed synchronously.
+    // See https://docs.microsoft.com/en-us/windows/win32/fileio/synchronous-and-asynchronous-i-o
+    // Related: https://docs.microsoft.com/en-us/troubleshoot/windows/win32/asynchronous-disk-io-synchronous
+    // Related: https://docs.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-setfilecompletionnotificationmodes
+    if (CreateIoCompletionPort(h.get(), iocp_.get(), CK_IO, 1) == nullptr) return GetLastError();
+
+    if (it == chunk_handles_.end())
+    {
+        // try to keep MAX_QD by closing old HANDLE's
+        if (chunk_handles_.size() >= MAX_QD)
+        {
+            for (auto it2 = chunk_handles_.begin(); it2 != chunk_handles_.end();)
+            {
+                auto& cfh = (*it2).second;
+                if (cfh.refs != 0)
+                {
+                    ++it2;
+                    continue;
+                }
+
+                it2 = chunk_handles_.erase(it2);
+                if (chunk_handles_.size() < MAX_QD) break;
+            }
+        }
+
+        try
+        {
+            it = chunk_handles_.try_emplace(chunk_idx).first;
+        }
+        catch (const bad_alloc&)
+        {
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+    }
+
+    handle_out = h.get();
+    auto& cfh = (*it).second;
+    if (!is_write)
+    {
+        cfh.handle_ro = std::move(h);
+    }
+    else
+    {
+        cfh.handle_rw = std::move(h);
+    }
+    ++cfh.refs;
+    return ERROR_SUCCESS;
+}
+
+DWORD ChunkDiskWorker::CloseChunk(u64 chunk_idx)
+{
+    auto g = SRWLockGuard(lock_handles_.get(), true);
+
+    auto it = chunk_handles_.find(chunk_idx);
+    if (it == chunk_handles_.end()) return ERROR_NOT_FOUND;
+
+    auto& cfh = (*it).second;
+    --cfh.refs;
+
+    if (cfh.pending && cfh.refs == 0)
+    {
+        if (cfh.handle_rw)
+        {
+            auto h = FileHandle();
+            service_.CreateChunk(chunk_idx, h, false, true);
+        }
+        chunk_handles_.erase(it);
+    }
+
+    return ERROR_SUCCESS;
+}
+
+DWORD ChunkDiskWorker::RefreshChunk(u64 chunk_idx)
+{
+    auto g = SRWLockGuard(lock_handles_.get(), true);
+
+    auto it = chunk_handles_.find(chunk_idx);
+    if (it == chunk_handles_.end()) return ERROR_NOT_FOUND;
+
+    auto& cfh = (*it).second;
+    if (cfh.handle_ro) CancelIo(cfh.handle_ro.get());
+    if (cfh.handle_rw) CancelIo(cfh.handle_rw.get());
+    cfh.pending = true;
+
+    return ERROR_SUCCESS;
+}
+
 DWORD ChunkDiskWorker::PostMsg(ChunkWork work)
 {
     if (!IsRunning()) return ERROR_INVALID_STATE;
@@ -297,6 +479,28 @@ DWORD ChunkDiskWorker::PostMsg(ChunkWork work)
 
     // means ERROR_SUCCESS
     return ERROR_IO_PENDING;
+}
+
+DWORD ChunkDiskWorker::PostRefreshChunk(u64 chunk_idx)
+{
+    auto err = DWORD(ERROR_SUCCESS);
+
+    for (auto& worker : GetWorkers(service_.storage_unit))
+    {
+        auto msg = ChunkWork();
+        auto msg_buf = PVOID(nullptr);
+        auto err1 = PrepareOps(msg, REFRESH_CHUNK, service_.params.ChunkBlocks(chunk_idx), 0, msg_buf);
+        if (err1 != ERROR_SUCCESS)
+        {
+            err = err1;
+            continue;
+        }
+
+        err1 = worker->PostMsg(std::move(msg));
+        if (err1 != ERROR_SUCCESS) err = err1;
+    }
+
+    return err;
 }
 
 void ChunkDiskWorker::ThreadProc(LPVOID param)
@@ -540,210 +744,6 @@ void ChunkDiskWorker::StopWorks()
     spd_ovl_event_.reset();
     wait_event_.reset();
     iocp_.reset();
-}
-
-DWORD ChunkDiskWorker::GetBuffer(Pages& buffer)
-{
-    auto g = SRWLockGuard(lock_buffers_.get(), true);
-
-    if (buffers_.empty())
-    {
-        g.reset();
-
-        // align buffer to pages
-        // additional page for unaligned requests
-        auto buffer_size = service_.MaxTransferLength() + u32(service_.params.PageBytes(1));
-        auto new_buffer = Pages(VirtualAlloc(nullptr, buffer_size, MEM_COMMIT, PAGE_READWRITE));
-        if (!new_buffer) return GetLastError();
-        buffer = std::move(new_buffer);
-        return ERROR_SUCCESS;
-    }
-    else
-    {
-        buffer = std::move(buffers_.front());
-        buffers_.pop_front();
-        // buf was zero-filled in ReturnBuffer()
-        return ERROR_SUCCESS;
-    }
-}
-
-DWORD ChunkDiskWorker::ReturnBuffer(Pages buffer)
-{
-    if (!buffer) return ERROR_INVALID_PARAMETER;
-
-    auto buffer_size = service_.MaxTransferLength() + u32(service_.params.PageBytes(1));
-    memset(buffer.get(), 0, buffer_size);
-
-    try
-    {
-        auto g = SRWLockGuard(lock_buffers_.get(), true);
-        buffers_.emplace_front(std::move(buffer));
-    }
-    catch (const bad_alloc&)
-    {
-        // ignore error, will retry in GetBuffer()
-    }
-    return ERROR_SUCCESS;
-}
-
-DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_out)
-{
-    auto g = SRWLockGuard(lock_handles_.get(), true);
-
-    // check HANDLE pool
-    auto it = chunk_handles_.find(chunk_idx);
-    if (it != chunk_handles_.end())
-    {
-        chunk_handles_.reinsert_back(it);
-
-        auto& cfh = (*it).second;
-
-        if (cfh.pending)
-        {
-            auto h = FileHandle();
-            auto err = service_.CreateChunk(chunk_idx, h, is_write, true);
-            if (err != ERROR_SUCCESS) return err;
-            if (!h)
-            {
-                handle_out = INVALID_HANDLE_VALUE;
-                return ERROR_SUCCESS;
-            }
-            else
-            {
-                cfh.pending = false;
-            }
-        }
-
-        if (!is_write && cfh.handle_ro)
-        {
-            handle_out = cfh.handle_ro.get();
-            ++cfh.refs;
-            return ERROR_SUCCESS;
-        }
-        if (is_write && cfh.handle_rw)
-        {
-            handle_out = cfh.handle_rw.get();
-            ++cfh.refs;
-            return ERROR_SUCCESS;
-        }
-    }
-
-    auto h = FileHandle();
-    auto err = service_.CreateChunk(chunk_idx, h, is_write);
-    if (err != ERROR_SUCCESS) return err;
-    if (!h)
-    {
-        handle_out = INVALID_HANDLE_VALUE;
-        return ERROR_SUCCESS;
-    }
-
-    // NOTE: a completion packet will also be sent even though the I/O operation successfully completed synchronously.
-    // See https://docs.microsoft.com/en-us/windows/win32/fileio/synchronous-and-asynchronous-i-o
-    // Related: https://docs.microsoft.com/en-us/troubleshoot/windows/win32/asynchronous-disk-io-synchronous
-    // Related: https://docs.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-setfilecompletionnotificationmodes
-    if (CreateIoCompletionPort(h.get(), iocp_.get(), CK_IO, 1) == nullptr) return GetLastError();
-
-    if (it == chunk_handles_.end())
-    {
-        // try to keep MAX_QD by closing old HANDLE's
-        if (chunk_handles_.size() >= MAX_QD)
-        {
-            for (auto it2 = chunk_handles_.begin(); it2 != chunk_handles_.end();)
-            {
-                auto& cfh = (*it2).second;
-                if (cfh.refs != 0)
-                {
-                    ++it2;
-                    continue;
-                }
-
-                it2 = chunk_handles_.erase(it2);
-                if (chunk_handles_.size() < MAX_QD) break;
-            }
-        }
-
-        try
-        {
-            it = chunk_handles_.try_emplace(chunk_idx).first;
-        }
-        catch (const bad_alloc&)
-        {
-            return ERROR_NOT_ENOUGH_MEMORY;
-        }
-    }
-
-    handle_out = h.get();
-    auto& cfh = (*it).second;
-    if (!is_write)
-    {
-        cfh.handle_ro = std::move(h);
-    }
-    else
-    {
-        cfh.handle_rw = std::move(h);
-    }
-    ++cfh.refs;
-    return ERROR_SUCCESS;
-}
-
-DWORD ChunkDiskWorker::CloseChunk(u64 chunk_idx)
-{
-    auto g = SRWLockGuard(lock_handles_.get(), true);
-
-    auto it = chunk_handles_.find(chunk_idx);
-    if (it == chunk_handles_.end()) return ERROR_NOT_FOUND;
-
-    auto& cfh = (*it).second;
-    --cfh.refs;
-
-    if (cfh.pending && cfh.refs == 0)
-    {
-        if (cfh.handle_rw)
-        {
-            auto h = FileHandle();
-            service_.CreateChunk(chunk_idx, h, false, true);
-        }
-        chunk_handles_.erase(it);
-    }
-
-    return ERROR_SUCCESS;
-}
-
-DWORD ChunkDiskWorker::RefreshChunk(u64 chunk_idx)
-{
-    auto g = SRWLockGuard(lock_handles_.get(), true);
-
-    auto it = chunk_handles_.find(chunk_idx);
-    if (it == chunk_handles_.end()) return ERROR_NOT_FOUND;
-
-    auto& cfh = (*it).second;
-    if (cfh.handle_ro) CancelIo(cfh.handle_ro.get());
-    if (cfh.handle_rw) CancelIo(cfh.handle_rw.get());
-    cfh.pending = true;
-
-    return ERROR_SUCCESS;
-}
-
-DWORD ChunkDiskWorker::PostRefreshChunk(u64 chunk_idx)
-{
-    auto err = DWORD(ERROR_SUCCESS);
-
-    for (auto& worker : GetWorkers(service_.storage_unit))
-    {
-        auto msg = ChunkWork();
-        auto msg_buf = PVOID(nullptr);
-        auto err1 = PrepareOps(msg, REFRESH_CHUNK, service_.params.ChunkBlocks(chunk_idx), 0, msg_buf);
-        if (err1 != ERROR_SUCCESS)
-        {
-            err = err1;
-            continue;
-        }
-        
-        err1 = worker->PostMsg(std::move(msg));
-        if (err1 != ERROR_SUCCESS) err = err1;
-    }
-
-    return err;
 }
 
 PageResult ChunkDiskWorker::LockPageAsync(ChunkOpState& state, u64 page_idx)
