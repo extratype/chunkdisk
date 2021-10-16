@@ -1,88 +1,144 @@
-file HANDLE
+Problems with naive synchronous implementation
+    Sequential access requests get scattered over multiple dispatcher threads
+        Access pattern randomized
+        Bad sequential performance with HDDs
 
-Block I/O -> Page I/O
+    Cached twice
+        Data in virtual disk, Data in real disk
+        Inconsistent virtual disk performance
+        Windows may hang if the cache is full
 
-multiple outstanding I/O's in single thread
+    No queueing
 
-Request -> Multiple Operations
+Unbuffered, asynchronous I/O
+    Best performance with cache enabled for virtual disk
 
+    No memory used for caching data for real disk
+        No need to flush cache
+
+    Requests can be queued
+        Queue sequential requests in a worker thread for better performance
+        No scattered requests with single dispatcher and multiple worker threads
+
+Performance experiements with DiskSpd
+    DRAM: > 1M IOPS, so single dispatcher
+    SSD: parallel accesses > outstanding (queued) accesses
+    HDD: better sequential performance with queue, tune total request size
+
+Scheduling requests in dispatcher:
+    worker = (address / 1048576) % (# of workers)
+    choose next worker if QD >= 32, wait if all full
+
+    characteristic
+        requests parallelized if depth > 32
+        requests serialized if size < 1048576 bytes
+
+Worker:
+    resource pool:
+        file HANDLE: may be shared among ops
+        aligned buffer: 65536 bytes
+        LRU policy, <= QD 32
+
+    std::list<Work> working
+        max. size: 32
+
+        std::vector<State> ops
+            operations in range: start off, end off, buffer ptr
+
+            ReadChunk: aligned read (to buffer)
+            WriteChunk: aligned write (from buffer)
+
+            ReadPage: acquire, read then release
+            WritePage: acquire, write whole page then release
+            WritePagePartial: read page then write partially
+
+            UnmapChunk
+
+        # of completed operations
+        # of all operations: ops.size()
+
+    event loop using IOCP:
+        request:
+            create Work
+            add it to working
+
+        I/O complete:
+            all ops complete?
+                copy to DataBuffer
+                send response
+                done, remove from working
+
+        idle timer:
+            IOCP timeout: 1 min.
+            reset pool
+            wait indefinitely
 
 Read:
     Read chunks...:
-        OpenChunk(read-only)
+        OpenChunk()
         empty or not exist?
             zero-fill buffer
-            will be done
-        exist?
-            continue
+            done for this chunk
         CloseChunk()
 
-        aligned access?
-            open file HANDLE for read access
+        aligned request?
+            OpenChunk()
             RemovePages()...
-            ReadFile()...
-            close HANDLE
+            ReadFile()... to buffer
+            CloseChunk()
 
-        unaligned access?
+        unaligned request?
             Read pages...:
-                PeekPage() succeeded? copy to buffer, done
+                PeekPage() succeeded?
+                    copy to buffer
+                    done for this page
+
                 PeekPage() failed?
                     LockPage()...
-                    open file HANDLE for read access
+                    OpenChunk()
                     ReadFile()... to page
+                    CloseChunk()
                     copy to buffer
                     FreePage()
 
 Write:
     Write chunks...:
-        aligned access?
-            open file HANDLE for read/write access
+        aligned request?
+            OpenChunk(read-write)
             RemovePages()...
             is buffer not null?
                 WriteFile()...
             is buffer null?
-                DeviceIoControl(FSCTL_SET_ZERO_DATA...)...
+                DeviceIoControl(FSCTL_SET_ZERO_DATA)...
+            CloseChunk()
 
-        unaligned access?
+        unaligned request?
             Write pages...:
                 not whole page?
                     Read page...
 
                 LockPage()/ClaimPage()...
-                open file HANDLE for read/write access
+                OpenChunk(read-write)
                 copy/zero-fill page
                 WriteFile()... from page
+                CloseChunk()
                 FreePage()
 
 Unmap:
     Unmap chunks...:
+        partial?
+            write chunk...
+                set buffer to nullptr to zero-fill
+
         whole chunk?
             if empty or not exist? done
-            truncate chunk to make it empty, done
-        partial?
-            write chunk, null buffer to zero-fill
+            truncate chunk to make it empty
+                FIXME document
 
+Page is already in use?
+    check whether owner is the current thread
+    append State to a singly-linked list
+    retry operation after FreePage()
 
-FIXME comment
-    loop:
-        1. prepare work
-            acquired page
-            or blocked by page -> add wait (also to working)
-        2. complete I/O
-            wait async I/O while handling requests (may recurse acquire!)
-            page cached (remove page if failed)
-        3. complete work
-            check wait: if passed -> post I/O
+FIXME Flush(0): flush pages, HANDLEs?
 
-cancel OP_WAIT_PAGE in working_
-    traverse table, abort it
-
-stop worker
-    1. CancelIo HANDLE
-    2. handle CK_IO's
-    ...
-
-only part of ops in work may be aborted!!
-... CancelIo() does NOT cancel IO atomically either
-
-Flush(0) at exit

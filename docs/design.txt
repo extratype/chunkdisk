@@ -6,23 +6,48 @@ name.chunkdisk
     chunksize
     NUM path/to/dir/prefix...
 
-create chunk:
+Create chunk:
     directory: use part from first...last
     file name: chunk###
     chunk size: 0 or chunksize; empty or full, no deletion
 
-read, write:
+Read, Write:
     chunk not found or empty: zero-fill buffer for read
-    unbuffered file I/O: ReadFile, WriteFile
-        last modified timestamp update delayed up to 1 hour if not closed
+    ReadFile, WriteFile
 
-flush:
-    let Windows do it
-
-    FlushFileBuffers?
-        flush ALL data, not HANDLE specific
-        flush metadata
-
-unmap (a.k.a. TRIM):
-    unmap range >= chunk: Set size to 0
+Unmap (a.k.a. TRIM):
+    unmap range >= chunk: Truncate (Set size to 0)
     unmap range <  chunk: FSCTL_SET_ZERO_DATA
+
+
+File I/O:
+    simple ReadFile, WriteFile:
+        buffered, synchronous
+        easy to implement
+        inconsistent performance
+
+    memory mapping:
+        buffered, synchronous
+        best performance
+        not memory efficient
+        flushing required
+
+    asynchronous I/O? See asyncio.txt
+
+
+File HANDLE:
+    FILE_FLAG_NO_BUFFERING
+    FILE_FLAG_OVERLAPPED
+    ... for best asynchronous performance
+
+    last modified timestamp update delayed up to 1 hour if not closed
+        FlushFileBuffers?
+                flush ALL data, not HANDLE specific
+                flush metadata
+
+        close HANDLE if idle
+
+    sector alignment?
+        always align to 4096 bytes
+        convert unaligned block I/O to page I/O
+            write-through

@@ -1,6 +1,38 @@
-* merge ranges across (consecutive) calls?
-    - naive impl.: only check consecutive calls (no multitasking)
-    - zero-fill, cache unmap range (clear if written), check if whole chunk
-* check partition -> TRIM -> shrink -> delete orphan empty chunks
+* merge ranges across (consecutive) calls
+    Service:
+        unmap ranges for each chunk
+            update ranges: merge ranges
+            check ranges: (ranges + requests) is whole chunk?
+            invalidate all ranges
+        (when to invalidate ranges for ALL chunks?)
+
+    Worker:
+        On successful partial unmap:
+            for each chunk:
+                update ranges
+                check ranges?
+
+    Dispatcher:
+        Unmap:
+            calc chunk range
+            check unmap ranges
+                if whole chunk:
+                    invalidate
+                    request unmap whole chunk
+
+        Write:
+            calc chunk range
+            for each chunk:
+                invalidate unmap ranges
+
+    Last idle worker?
+        last request time for each worker
+        if last request time == my last request time
+
+
 * sparse chunk?
-* differential (take snapshots and merge later) disk (xor or copy?)
+
+* differential (take snapshots and merge later) disk
+    - parent disk path at first line (maybe nested)
+    - smaller chunk size: chunk###-###
+    - copy chunk at write

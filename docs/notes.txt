@@ -1,1 +1,5 @@
 Trigger unmap: defrag X: /L
+
+TODO check partition -> TRIM -> shrink -> delete orphan empty chunks
+
+TODO consolidate $MFT, $INDEX
