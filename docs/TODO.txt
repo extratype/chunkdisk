@@ -26,9 +26,9 @@
                 invalidate unmap ranges
 
     Last idle worker?
-        last request time for each worker
-        if last request time == my last request time
-
+        last request time in service and each worker
+            set same timestamp
+        if my last request time == last request time
 
 * sparse chunk?
 

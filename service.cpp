@@ -180,7 +180,7 @@ DWORD ChunkDiskService::CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool 
         const auto flags_attrs = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED;
 
         auto h = FileHandle(CreateFileW(
-            path.data(), desired_access,shared_mode, nullptr,
+            path.data(), desired_access, shared_mode, nullptr,
             OPEN_EXISTING, flags_attrs, nullptr));
         if (part_found != bool(h))
         {
