@@ -20,7 +20,7 @@ DWORD ChunkDiskService::Start()
 {
     try
     {
-        // to make class movable
+        // make class movable
         lock_parts_ = std::make_unique<SRWLOCK>();
         lock_pages_ = std::make_unique<SRWLOCK>();
     }
@@ -273,7 +273,7 @@ PageResult ChunkDiskService::PeekPage(u64 page_idx)
         ERROR_SUCCESS,
         true,
         PageGuard(&entry, false),
-        (*it).second.mem.get()};
+        (*it).second.ptr.get()};
 }
 
 PageResult ChunkDiskService::LockPage(u64 page_idx)
@@ -318,13 +318,13 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
         {
             trim_pages();
 
-            auto mem = Pages(VirtualAlloc(nullptr, params.PageBytes(1), MEM_COMMIT, PAGE_READWRITE));
-            if (mem == nullptr) return PageResult{ERROR_NOT_ENOUGH_MEMORY};
+            auto ptr = Pages(VirtualAlloc(nullptr, params.PageBytes(1), MEM_COMMIT, PAGE_READWRITE));
+            if (ptr == nullptr) return PageResult{ERROR_NOT_ENOUGH_MEMORY};
             auto lock = std::make_unique<SRWLOCK>();
             InitializeSRWLock(lock.get());
 
             it = cached_pages_.try_emplace(page_idx).first;
-            (*it).second.mem = std::move(mem);
+            (*it).second.ptr = std::move(ptr);
             (*it).second.lock = std::move(lock);
         }
         else
@@ -341,7 +341,7 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
             ERROR_SUCCESS,
             is_hit,
             PageGuard(),
-            entry.mem.get(),
+            entry.ptr.get(),
             &entry.user};
     }
     catch (const bad_alloc&)
@@ -357,7 +357,7 @@ PageResult ChunkDiskService::ClaimPage(u64 page_idx)
     if (it == cached_pages_.end()) return PageResult{ERROR_NOT_FOUND};
     auto& entry = (*it).second;
     if (entry.owner != GetCurrentThreadId()) return PageResult{ERROR_INVALID_STATE};
-    return PageResult{ERROR_SUCCESS, true, PageGuard(), entry.mem.get(), &entry.user};
+    return PageResult{ERROR_SUCCESS, true, PageGuard(), entry.ptr.get(), &entry.user};
 }
 
 void ChunkDiskService::FreePage(u64 page_idx, bool remove)
@@ -406,7 +406,7 @@ void ChunkDiskService::FlushPages()
     {
         // wait for I/O to complete
         {
-            auto gm = SRWLockGuard((*it).second.lock.get(), true);
+            auto gp = SRWLockGuard((*it).second.lock.get(), true);
         }
         it = cached_pages_.erase(it);
     }

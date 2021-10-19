@@ -19,10 +19,10 @@ namespace chunkdisk
 
 struct PageEntry
 {
-    Pages mem;
     // acquire it while using mem
     // to make struct movable
     std::unique_ptr<SRWLOCK> lock;
+    Pages ptr;
     // thread ID owning lock exclusively
     // ID 0 is in use by Windows kernel
     // not safe if compared to other threads
@@ -66,7 +66,7 @@ private:
 struct PageResult
 {
     DWORD error;                    // page invalid if not ERROR_SUCCESS
-    bool is_hit = false;            // true if page hit and available
+    bool is_hit = false;            // true if page hit
     PageGuard guard;                // hold while using ptr
     LPVOID ptr = nullptr;           // size: ChunkDiskParams::PageBytes(1)
     void** user = nullptr;          // &PageEntry::user
