@@ -59,6 +59,14 @@ public:
 
 private:
     PageEntry* entry_;
+
+    friend void swap(PageGuard& a, PageGuard& b) noexcept
+    {
+        using std::swap;
+        swap(a.lock_, b.lock_);
+        swap(a.is_exclusive_, b.is_exclusive_);
+        swap(a.entry_, b.entry_);
+    }
 };
 
 // current thread only
