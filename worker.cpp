@@ -23,7 +23,7 @@ DWORD ChunkDiskWorker::Start()
 
     try
     {
-        // to make class movable
+        // make class movable
         lock_working_ = std::make_unique<SRWLOCK>();
         lock_buffers_ = std::make_unique<SRWLOCK>();
         lock_handles_ = std::make_unique<SRWLOCK>();

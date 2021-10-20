@@ -19,14 +19,17 @@ namespace chunkdisk
 
 struct PageEntry
 {
-    // acquire it while using mem
-    // to make struct movable
+    // make struct movable
+    // lock for *this and this->ptr
     std::unique_ptr<SRWLOCK> lock;
+
     Pages ptr;
+
     // thread ID owning lock exclusively
     // ID 0 is in use by Windows kernel
-    // not safe if compared to other threads
+    // safe to compare to the current thread without lock
     DWORD owner = 0;
+
     // custom pointer for owning thread
     void* user = nullptr;
 };
@@ -102,16 +105,15 @@ public:
      */
     DWORD CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool is_write, bool fix_size = false);
 
-    // empty chunk (via new synchronous HANDLE)
-    // ERROR_SUCCESS if chunk does not exist
+    // empty chunk
     DWORD UnmapChunk(u64 chunk_idx);
 
     // acquire shared lock for reading an existing page
-    // local (with guard), no PageResult::user
+    // local use, no PageResult::user
     PageResult PeekPage(u64 page_idx);
 
     // set exclusive lock for updating a page
-    // persistent (without guard), the calling thread must FreePage() later
+    // persistent use, empty PageResult::guard, the calling thread must FreePage() later
     // PageResult::user valid for ERROR_SUCCESS and ERROR_BUSY
     PageResult LockPage(u64 page_idx);
 

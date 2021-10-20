@@ -141,14 +141,12 @@ public:
         return std::make_pair(iterator(&map_, it, key_order_.end()), emplaced);
     }
 
-    // invalidates only key_order_ iterator
     void reinsert_front(iterator it)
     {
         key_order_.splice(key_order_.begin(), key_order_, it.it_->second.it);
         it.it_->second.it = key_order_.begin();
     }
 
-    // invalidates only key_order_ iterator
     void reinsert_back(iterator it)
     {
         key_order_.splice(key_order_.end(), key_order_, it.it_->second.it);
