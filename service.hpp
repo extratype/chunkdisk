@@ -17,21 +17,22 @@
 namespace chunkdisk
 {
 
+// may be moved in a container
 struct PageEntry
 {
-    // make struct movable
-    // lock for *this and this->ptr
+    // lock for members
     std::unique_ptr<SRWLOCK> lock;
-
-    Pages ptr;
 
     // thread ID owning lock exclusively
     // ID 0 is in use by Windows kernel
     // safe to compare to the current thread without lock
     DWORD owner = 0;
 
-    // custom pointer for owning thread
-    void* user = nullptr;
+    // ChunkDiskParams::PageBytes(1)
+    Pages ptr;
+
+    // custom value for the owner thread
+    std::unique_ptr<size_t> user;
 };
 
 // Don't upcast a pointer to SRWLockGuard
@@ -79,8 +80,8 @@ struct PageResult
     DWORD error;                    // page invalid if not ERROR_SUCCESS
     bool is_hit = false;            // true if page hit
     PageGuard guard;                // hold while using ptr
-    LPVOID ptr = nullptr;           // size: ChunkDiskParams::PageBytes(1)
-    void** user = nullptr;          // &PageEntry::user
+    LPVOID ptr = nullptr;           // PageEntry::ptr
+    void** user = nullptr;          // PageEntry::user
 };
 
 class ChunkDiskService
@@ -122,15 +123,17 @@ public:
     PageResult ClaimPage(u64 page_idx);
 
     // clear the lock and optionally remove the page
-    // the calling thread must have successfully called LockPage()
-    void FreePage(u64 page_idx, bool remove = false);
+    // ERROR_SUCCESS if the calling thread have successfully called LockPage()
+    DWORD FreePage(u64 page_idx, bool remove = false);
 
-    // ERROR_BUSY and PageResult::user returned if a page is locked by the current thread
-    DWORD RemovePages(const PageRange& r, void*** user = nullptr);
+    // remove cached pages in range
+    // ERROR_BUSY and PageResult::user returned if one of them is locked by the current thread
+    PageResult FlushPages(const PageRange& r);
 
-    // wait for I/O's to complete and release all cached pages
-    // don't call this in a thread using any pages
-    void FlushPages();
+    // try to remove all cached pages
+    // skip pages locked by the current thread
+    // return ERROR_BUSY if there's one
+    DWORD FlushPages();
 
     const ChunkDiskParams params;
 
@@ -143,6 +146,12 @@ public:
     const u32 max_pages;
 
 private:
+    // g: lock_pages_, shared
+    // it: from cached_pages_ while holding g
+    // ERROR_BUSY if it is locked by the current thread
+    // g temporaily reset otherwise, iterators may be invalidated
+    DWORD RemovePageEntry(SRWLockGuard& g, Map<u64, PageEntry>::iterator it);
+
     std::vector<FileHandle> part_lock_;             // part index -> .lock
 
     std::unique_ptr<SRWLOCK> lock_parts_;
@@ -150,6 +159,8 @@ private:
     size_t part_current_new_ = 0;                   // part index for new chunks
     std::unordered_map<u64, size_t> chunk_parts_;   // chunk index -> part index
 
+    // lock cached_pages_
+    // don't acquire PageEntry::lock while exclusively holding this to avoid a deadlock
     std::unique_ptr<SRWLOCK> lock_pages_;
     // BLOCK_SIZE -> PAGE_SIZE access
     // read cache, write through

@@ -764,31 +764,32 @@ PageResult ChunkDiskWorker::LockPageAsync(ChunkOpState& state, u64 page_idx)
     return page;
 }
 
-void ChunkDiskWorker::FreePageAsync(ChunkOpState& state, u64 page_idx, bool remove)
+DWORD ChunkDiskWorker::FreePageAsync(ChunkOpState& state, u64 page_idx, bool remove)
 {
     auto page = service_.ClaimPage(page_idx);
-    if (page.error != ERROR_SUCCESS) return;
-    if (*page.user != &state) return;
+    if (page.error != ERROR_SUCCESS) return page.error;
+    if (*page.user != &state) return ERROR_INVALID_STATE;
 
     *page.user = nullptr;
     auto* next = state.next;
     state.next = nullptr;
 
-    service_.FreePage(page_idx, remove);
+    auto err = service_.FreePage(page_idx, remove);
+    if (err != ERROR_SUCCESS) return err;
     if (next != nullptr) PostOp(*next); // will retry LockPageAsync()
+    return ERROR_SUCCESS;
 }
 
-DWORD ChunkDiskWorker::RemovePagesAsync(ChunkOpState& state, const PageRange& r)
+DWORD ChunkDiskWorker::FlushPagesAsync(ChunkOpState& state, const PageRange& r)
 {
-    auto* user = (void**)(nullptr);
-    auto err = service_.RemovePages(r, &user);
-    if (err == ERROR_SUCCESS) return err;
-    if (err != ERROR_BUSY) return err;
+    auto page = service_.FlushPages(r);
+    if (page.error == ERROR_SUCCESS) return ERROR_SUCCESS;
+    if (page.error != ERROR_BUSY) return page.error;
 
-    auto* cur = recast<ChunkOpState*>(*user);
+    auto* cur = recast<ChunkOpState*>(*page.user);
     for (; cur->next != nullptr; cur = cur->next) {}
     cur->next = &state;
-    return err;
+    return ERROR_BUSY;
 }
 
 DWORD ChunkDiskWorker::PreparePageOps(ChunkWork& work, bool is_write, u64 page_idx,
@@ -1013,7 +1014,7 @@ DWORD ChunkDiskWorker::PostReadChunk(ChunkOpState& state)
     // aligned to page
     // Windows caches disk
     auto& params = service_.params;
-    auto err = RemovePagesAsync(state, params.BlockPageRange(state.idx, state.start_off, state.end_off));
+    auto err = FlushPagesAsync(state, params.BlockPageRange(state.idx, state.start_off, state.end_off));
     if (err != ERROR_SUCCESS) return err;
 
     auto h = HANDLE(INVALID_HANDLE_VALUE);
@@ -1036,7 +1037,7 @@ DWORD ChunkDiskWorker::PostWriteChunk(ChunkOpState& state)
     // aligned to page
     // Windows caches disk
     auto& params = service_.params;
-    auto err = RemovePagesAsync(state, params.BlockPageRange(state.idx, state.start_off, state.end_off));
+    auto err = FlushPagesAsync(state, params.BlockPageRange(state.idx, state.start_off, state.end_off));
     if (err != ERROR_SUCCESS) return err;
 
     auto h = HANDLE(INVALID_HANDLE_VALUE);

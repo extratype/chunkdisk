@@ -203,10 +203,10 @@ private:
     PageResult LockPageAsync(ChunkOpState& state, u64 page_idx);
 
     // ChunkDiskService::FreePage() and resume the waiting HEAD
-    void FreePageAsync(ChunkOpState& state, u64 page_idx, bool remove = false);
+    DWORD FreePageAsync(ChunkOpState& state, u64 page_idx, bool remove = false);
 
-    // ChunkDiskService::RemovePages() and wait for a busy page
-    DWORD RemovePagesAsync(ChunkOpState& state, const PageRange& r);
+    // ChunkDiskService::FlushPages() and wait for a busy page
+    DWORD FlushPagesAsync(ChunkOpState& state, const PageRange& r);
 
     // start_off, end_off: block offset in page
     // file_off: offset in chunk corresponding to page
