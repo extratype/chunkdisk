@@ -281,7 +281,7 @@ DWORD ChunkDiskWorker::GetBuffer(Pages& buffer)
         // additional page for unaligned requests
         auto buffer_size = service_.MaxTransferLength() + u32(service_.params.PageBytes(1));
         auto new_buffer = Pages(VirtualAlloc(nullptr, buffer_size, MEM_COMMIT, PAGE_READWRITE));
-        if (!new_buffer) return GetLastError();
+        if (!new_buffer) return ERROR_NOT_ENOUGH_MEMORY;
         buffer = std::move(new_buffer);
         return ERROR_SUCCESS;
     }

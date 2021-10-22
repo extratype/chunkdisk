@@ -363,7 +363,7 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
                     auto user = std::make_unique<u64>();
                     auto ptr = Pages(VirtualAlloc(nullptr, params.PageBytes(1),
                                                   MEM_COMMIT, PAGE_READWRITE));
-                    if (ptr == nullptr) return PageResult{GetLastError()};
+                    if (ptr == nullptr) return PageResult{ERROR_NOT_ENOUGH_MEMORY};
 
                     auto lock = std::make_unique<SRWLOCK>();
                     InitializeSRWLock(lock.get());
