@@ -152,6 +152,14 @@ public:
     DWORD Wait(DWORD timeout_ms = INFINITE);
 
 private:
+    enum IOCPKey
+    {
+        CK_IO = 0,      // completed file I/O
+        CK_FAIL,        // failed to initiate file I/O
+        CK_POST,        // disk I/O request from PostWork()
+        CK_STOP         // cancel pending I/O ops and stop DoWorks()
+    };
+
     // get zero-filled buffer from pool
     DWORD GetBuffer(Pages& buffer);
 
@@ -164,18 +172,29 @@ private:
 
     DWORD RefreshChunk(u64 chunk_idx);
 
-    // FIXME comment
+    // start_off, end_off: block offset in page
+    // file_off: offset in chunk corresponding to page
+    // buffer: current address, to be updated
+    DWORD PreparePageOps(ChunkWork& work, bool is_write, u64 page_idx,
+                         u32 start_off, u32 end_off, LONGLONG& file_off, PVOID& buffer);
+
+    // start_off, end_off: block offset in chunk
+    // buffer: current address, to be updated
+    // partial UNMAP_CHUNK becomes WRITE_CHUNK with nullptr buffer
+    DWORD PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 chunk_idx,
+                          u64 start_off, u64 end_off, PVOID& buffer);
+
+    // add ops to work
+    // kind: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK, REFRESH_CHUNK
+    // buffer: buffer address for ops, to be updated
+    // try to complete some ops immediately (abort if one of them fails)
+    DWORD PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_addr, u32 count, PVOID& buffer);
+
+    // Post a message directly.
+    // Ignore queue depth.
     DWORD PostMsg(ChunkWork work);
 
     DWORD PostRefreshChunk(u64 chunk_idx);
-
-    enum IOCPKey
-    {
-        CK_IO = 0,      // completed file I/O
-        CK_FAIL,        // failed to initiate file I/O
-        CK_POST,        // disk I/O request from PostWork()
-        CK_STOP         // cancel pending I/O ops and stop DoWorks()
-    };
 
     static void ThreadProc(LPVOID param);
 
@@ -207,24 +226,6 @@ private:
 
     // ChunkDiskService::FlushPages() and wait for a busy page
     DWORD FlushPagesAsync(ChunkOpState& state, const PageRange& r);
-
-    // start_off, end_off: block offset in page
-    // file_off: offset in chunk corresponding to page
-    // buffer: current address, to be updated
-    DWORD PreparePageOps(ChunkWork& work, bool is_write, u64 page_idx,
-                         u32 start_off, u32 end_off, LONGLONG& file_off, PVOID& buffer);
-
-    // start_off, end_off: block offset in chunk
-    // buffer: current address, to be updated
-    // partial UNMAP_CHUNK becomes WRITE_CHUNK with nullptr buffer
-    DWORD PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 chunk_idx,
-                          u64 start_off, u64 end_off, PVOID& buffer);
-
-    // add ops to work
-    // kind: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK, REFRESH_CHUNK
-    // buffer: buffer address for ops, to be updated
-    // try to complete some ops immediately (abort if one of them fails)
-    DWORD PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_addr, u32 count, PVOID& buffer);
 
     DWORD PostReadChunk(ChunkOpState& state);
 

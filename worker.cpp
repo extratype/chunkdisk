@@ -451,6 +451,223 @@ DWORD ChunkDiskWorker::RefreshChunk(u64 chunk_idx)
     return ERROR_SUCCESS;
 }
 
+DWORD ChunkDiskWorker::PreparePageOps(ChunkWork& work, bool is_write, u64 page_idx,
+                                      u32 start_off, u32 end_off, LONGLONG& file_off, PVOID& buffer)
+{
+    auto& params = service_.params;
+    auto& ops = work.ops;
+    auto kind = is_write ? WRITE_PAGE : READ_PAGE;
+    if (is_write && !params.IsWholePages(start_off, end_off)) kind = WRITE_PAGE_PARTIAL;
+
+    try
+    {
+        auto it = ops.emplace(ops.end(), &work, kind, page_idx, start_off, end_off, file_off, buffer);
+        file_off += LONGLONG(params.PageBytes(1));
+        if (!(is_write && buffer == nullptr)) buffer = recast<u8*>(buffer) + params.BlockBytes(end_off - start_off);
+
+        // try to complete immediately
+        // we can't lock or wait for a page here because work is not queued yet
+        if (kind == READ_PAGE)
+        {
+            auto page = service_.PeekPage(page_idx);
+            if (page.error == ERROR_SUCCESS)
+            {
+                auto size = params.BlockBytes(it->end_off - it->start_off);
+                memcpy(it->buffer, recast<u8*>(page.ptr) + params.BlockBytes(it->start_off), size);
+                ReportOpResult(*it);
+                return ERROR_SUCCESS;
+            }
+        }
+    }
+    catch (const bad_alloc&)
+    {
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+
+    return ERROR_SUCCESS;
+}
+
+DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 chunk_idx,
+                                       u64 start_off, u64 end_off, PVOID& buffer)
+{
+    auto& params = service_.params;
+    auto& ops = work.ops;
+
+    // try to complete immediately
+    if (kind == READ_CHUNK || kind == UNMAP_CHUNK)
+    {
+        if (kind == UNMAP_CHUNK && params.IsWholeChunk(start_off, end_off))
+        {
+            try
+            {
+                auto it = ops.emplace(ops.end(), &work, kind, chunk_idx, start_off, end_off, 0, buffer);
+                // buffer is nullptr
+                auto err = service_.UnmapChunk(chunk_idx);
+                auto need_refresh = err == ERROR_SUCCESS;
+                if (err == ERROR_FILE_NOT_FOUND) err = ERROR_SUCCESS;
+
+                ReportOpResult(*it, err);
+                // FIXME comment
+                // Unmap + Read/Write race
+                // broadcast REFRESH_CHUNK
+                if (need_refresh) PostRefreshChunk(chunk_idx);
+                return err;
+            }
+            catch (const bad_alloc&)
+            {
+                return ERROR_NOT_ENOUGH_MEMORY;
+            }
+        }
+
+        auto h = HANDLE(INVALID_HANDLE_VALUE);
+        auto err = OpenChunk(chunk_idx, false, h);
+        if (err != ERROR_SUCCESS) return err;
+        if (h == INVALID_HANDLE_VALUE)
+        {
+            try
+            {
+                // buffer was zero-filled, nothing to do if READ_CHUNK
+                // nothing to zero-fill if UNMAP_CHUNK
+                auto it = ops.emplace(ops.end(), &work, kind, chunk_idx, start_off, end_off,
+                                      LONGLONG(params.BlockBytes(start_off)), buffer);
+                if (buffer != nullptr) buffer = recast<u8*>(buffer) + params.BlockBytes(end_off - start_off);
+                ReportOpResult(*it);
+                return ERROR_SUCCESS;
+            }
+            catch (const bad_alloc&)
+            {
+                return ERROR_NOT_ENOUGH_MEMORY;
+            }
+        }
+        else
+        {
+            CloseChunk(chunk_idx);
+        }
+
+        if (kind == UNMAP_CHUNK)
+        {
+            // Unmap chunk partially, zero-fill it
+            // buffer is nullptr for UNMAP_CHUNK (ReportOpResult() depends on this)
+            kind = WRITE_CHUNK;
+        }
+    }
+    else if (kind == REFRESH_CHUNK)
+    {
+        try
+        {
+            ops.emplace(ops.end(), &work, kind, chunk_idx, start_off, end_off, 0, buffer);
+            return ERROR_SUCCESS;
+        }
+        catch (const bad_alloc&)
+        {
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+    }
+    else if (kind != WRITE_CHUNK)
+    {
+        return ERROR_INVALID_FUNCTION;
+    }
+
+    // prepare asynchronous I/O
+    auto is_write = (kind == WRITE_CHUNK);
+    const auto r = params.BlockPageRange(chunk_idx, start_off, end_off);
+
+    if (params.IsWholePages(r.start_off, r.end_off, buffer))
+    {
+        // aligned to page
+        try
+        {
+            ops.emplace_back(&work, kind, chunk_idx, start_off, end_off, LONGLONG(params.BlockBytes(start_off)), buffer);
+            if (!(is_write && buffer == nullptr)) buffer = recast<u8*>(buffer) + params.BlockBytes(end_off - start_off);
+        }
+        catch (const bad_alloc&)
+        {
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+    }
+    else if (buffer == nullptr && r.start_idx != r.end_idx)
+    {
+        auto file_off = LONGLONG(params.PageBytes(r.start_idx));
+        auto err = DWORD(ERROR_SUCCESS);
+
+        // head
+        if (r.start_off != 0)
+        {
+            err = PreparePageOps(work, is_write, r.base_idx + r.start_idx,
+                                 r.start_off, params.page_length, file_off, buffer);
+            if (err != ERROR_SUCCESS) return err;
+        }
+
+        // aligned to page
+        try
+        {
+            // [start_idx, end_idx] -> [soff, eoff)
+            auto soff = params.PageBlocks(r.start_idx) + ((r.start_off != 0) ? params.page_length : 0);
+            auto eoff = params.PageBlocks(r.end_idx) + ((r.end_off != params.page_length) ? 0 : params.page_length);
+            if (soff != eoff)
+            {
+                ops.emplace_back(&work, kind, chunk_idx, soff, eoff, file_off, buffer);
+                // buffer is nullptr
+            }
+        }
+        catch (const bad_alloc&)
+        {
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+
+        // tail
+        if (r.end_off != params.page_length)
+        {
+            file_off = LONGLONG(params.PageBytes(r.end_idx));
+            err = PreparePageOps(work, is_write, r.base_idx + r.end_idx, 0, r.end_off, file_off, buffer);
+            if (err != ERROR_SUCCESS) return err;
+        }
+    }
+    else
+    {
+        // not aligned to page
+        auto file_off = LONGLONG(params.PageBytes(r.start_idx));
+
+        auto err = PreparePageOps(work, is_write, r.base_idx + r.start_idx, r.start_off,
+                                  r.start_idx == r.end_idx ? r.end_off : params.page_length, file_off, buffer);
+        if (err != ERROR_SUCCESS) return err;
+        if (r.start_idx != r.end_idx)
+        {
+            for (auto i = r.start_idx + 1; i < r.end_idx; ++i)
+            {
+                err = PreparePageOps(work, is_write, r.base_idx + i, 0, params.page_length, file_off, buffer);
+                if (err != ERROR_SUCCESS) return err;
+            }
+            err = PreparePageOps(work, is_write, r.base_idx + r.end_idx, 0, r.end_off, file_off, buffer);
+            if (err != ERROR_SUCCESS) return err;
+        }
+    }
+
+    return ERROR_SUCCESS;
+}
+
+DWORD ChunkDiskWorker::PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_addr, u32 count, PVOID& buffer)
+{
+    auto& params = service_.params;
+    const auto r = params.BlockChunkRange(block_addr, count);
+
+    auto err = PrepareChunkOps(work, kind, r.start_idx, r.start_off,
+                               r.start_idx == r.end_idx ? r.end_off : params.chunk_length, buffer);
+    if (err != ERROR_SUCCESS) return err;
+    if (r.start_idx != r.end_idx)
+    {
+        for (auto i = r.start_idx + 1; i < r.end_idx; ++i)
+        {
+            err = PrepareChunkOps(work, kind, i, 0, params.chunk_length, buffer);
+            if (err != ERROR_SUCCESS) return err;
+        }
+        err = PrepareChunkOps(work, kind, r.end_idx, 0, r.end_off, buffer);
+        if (err != ERROR_SUCCESS) return err;
+    }
+
+    return ERROR_SUCCESS;
+}
+
 DWORD ChunkDiskWorker::PostMsg(ChunkWork work)
 {
     if (!IsRunning()) return ERROR_INVALID_STATE;
@@ -790,223 +1007,6 @@ DWORD ChunkDiskWorker::FlushPagesAsync(ChunkOpState& state, const PageRange& r)
     for (; cur->next != nullptr; cur = cur->next) {}
     cur->next = &state;
     return ERROR_BUSY;
-}
-
-DWORD ChunkDiskWorker::PreparePageOps(ChunkWork& work, bool is_write, u64 page_idx,
-                                      u32 start_off, u32 end_off, LONGLONG& file_off, PVOID& buffer)
-{
-    auto& params = service_.params;
-    auto& ops = work.ops;
-    auto kind = is_write ? WRITE_PAGE : READ_PAGE;
-    if (is_write && !params.IsWholePages(start_off, end_off)) kind = WRITE_PAGE_PARTIAL;
-
-    try
-    {
-        auto it = ops.emplace(ops.end(), &work, kind, page_idx, start_off, end_off, file_off, buffer);
-        file_off += LONGLONG(params.PageBytes(1));
-        if (!(is_write && buffer == nullptr)) buffer = recast<u8*>(buffer) + params.BlockBytes(end_off - start_off);
-
-        // try to complete immediately
-        // we can't lock or wait for a page here because work is not queued yet
-        if (kind == READ_PAGE)
-        {
-            auto page = service_.PeekPage(page_idx);
-            if (page.error == ERROR_SUCCESS)
-            {
-                auto size = params.BlockBytes(it->end_off - it->start_off);
-                memcpy(it->buffer, recast<u8*>(page.ptr) + params.BlockBytes(it->start_off), size);
-                ReportOpResult(*it);
-                return ERROR_SUCCESS;
-            }
-        }
-    }
-    catch (const bad_alloc&)
-    {
-        return ERROR_NOT_ENOUGH_MEMORY;
-    }
-
-    return ERROR_SUCCESS;
-}
-
-DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 chunk_idx,
-                                       u64 start_off, u64 end_off, PVOID& buffer)
-{
-    auto& params = service_.params;
-    auto& ops = work.ops;
-
-    // try to complete immediately
-    if (kind == READ_CHUNK || kind == UNMAP_CHUNK)
-    {
-        if (kind == UNMAP_CHUNK && params.IsWholeChunk(start_off, end_off))
-        {
-            try
-            {
-                auto it = ops.emplace(ops.end(), &work, kind, chunk_idx, start_off, end_off, 0, buffer);
-                // buffer is nullptr
-                auto err = service_.UnmapChunk(chunk_idx);
-                auto need_refresh = err == ERROR_SUCCESS;
-                if (err == ERROR_FILE_NOT_FOUND) err = ERROR_SUCCESS;
-
-                ReportOpResult(*it, err);
-                // FIXME comment
-                // Unmap + Read/Write race
-                // broadcast REFRESH_CHUNK
-                if (need_refresh) PostRefreshChunk(chunk_idx);
-                return err;
-            }
-            catch (const bad_alloc&)
-            {
-                return ERROR_NOT_ENOUGH_MEMORY;
-            }
-        }
-
-        auto h = HANDLE(INVALID_HANDLE_VALUE);
-        auto err = OpenChunk(chunk_idx, false, h);
-        if (err != ERROR_SUCCESS) return err;
-        if (h == INVALID_HANDLE_VALUE)
-        {
-            try
-            {
-                // buffer was zero-filled, nothing to do if READ_CHUNK
-                // nothing to zero-fill if UNMAP_CHUNK
-                auto it = ops.emplace(ops.end(), &work, kind, chunk_idx, start_off, end_off,
-                                      LONGLONG(params.BlockBytes(start_off)), buffer);
-                if (buffer != nullptr) buffer = recast<u8*>(buffer) + params.BlockBytes(end_off - start_off);
-                ReportOpResult(*it);
-                return ERROR_SUCCESS;
-            }
-            catch (const bad_alloc&)
-            {
-                return ERROR_NOT_ENOUGH_MEMORY;
-            }
-        }
-        else
-        {
-            CloseChunk(chunk_idx);
-        }
-
-        if (kind == UNMAP_CHUNK)
-        {
-            // Unmap chunk partially, zero-fill it
-            // buffer is nullptr for UNMAP_CHUNK (ReportOpResult() depends on this)
-            kind = WRITE_CHUNK;
-        }
-    }
-    else if (kind == REFRESH_CHUNK)
-    {
-        try
-        {
-            ops.emplace(ops.end(), &work, kind, chunk_idx, start_off, end_off, 0, buffer);
-            return ERROR_SUCCESS;
-        }
-        catch (const bad_alloc&)
-        {
-            return ERROR_NOT_ENOUGH_MEMORY;
-        }
-    }
-    else if (kind != WRITE_CHUNK)
-    {
-        return ERROR_INVALID_FUNCTION;
-    }
-
-    // prepare asynchronous I/O
-    auto is_write = (kind == WRITE_CHUNK);
-    const auto r = params.BlockPageRange(chunk_idx, start_off, end_off);
-
-    if (params.IsWholePages(r.start_off, r.end_off, buffer))
-    {
-        // aligned to page
-        try
-        {
-            ops.emplace_back(&work, kind, chunk_idx, start_off, end_off, LONGLONG(params.BlockBytes(start_off)), buffer);
-            if (!(is_write && buffer == nullptr)) buffer = recast<u8*>(buffer) + params.BlockBytes(end_off - start_off);
-        }
-        catch (const bad_alloc&)
-        {
-            return ERROR_NOT_ENOUGH_MEMORY;
-        }
-    }
-    else if (buffer == nullptr && r.start_idx != r.end_idx)
-    {
-        auto file_off = LONGLONG(params.PageBytes(r.start_idx));
-        auto err = DWORD(ERROR_SUCCESS);
-
-        // head
-        if (r.start_off != 0)
-        {
-            err = PreparePageOps(work, is_write, r.base_idx + r.start_idx,
-                                 r.start_off, params.page_length, file_off, buffer);
-            if (err != ERROR_SUCCESS) return err;
-        }
-
-        // aligned to page
-        try
-        {
-            // [start_idx, end_idx] -> [soff, eoff)
-            auto soff = params.PageBlocks(r.start_idx) + ((r.start_off != 0) ? params.page_length : 0);
-            auto eoff = params.PageBlocks(r.end_idx) + ((r.end_off != params.page_length) ? 0 : params.page_length);
-            if (soff != eoff)
-            {
-                ops.emplace_back(&work, kind, chunk_idx, soff, eoff, file_off, buffer);
-                // buffer is nullptr
-            }
-        }
-        catch (const bad_alloc&)
-        {
-            return ERROR_NOT_ENOUGH_MEMORY;
-        }
-
-        // tail
-        if (r.end_off != params.page_length)
-        {
-            file_off = LONGLONG(params.PageBytes(r.end_idx));
-            err = PreparePageOps(work, is_write, r.base_idx + r.end_idx, 0, r.end_off, file_off, buffer);
-            if (err != ERROR_SUCCESS) return err;
-        }
-    }
-    else
-    {
-        // not aligned to page
-        auto file_off = LONGLONG(params.PageBytes(r.start_idx));
-
-        auto err = PreparePageOps(work, is_write, r.base_idx + r.start_idx, r.start_off,
-                                  r.start_idx == r.end_idx ? r.end_off : params.page_length, file_off, buffer);
-        if (err != ERROR_SUCCESS) return err;
-        if (r.start_idx != r.end_idx)
-        {
-            for (auto i = r.start_idx + 1; i < r.end_idx; ++i)
-            {
-                err = PreparePageOps(work, is_write, r.base_idx + i, 0, params.page_length, file_off, buffer);
-                if (err != ERROR_SUCCESS) return err;
-            }
-            err = PreparePageOps(work, is_write, r.base_idx + r.end_idx, 0, r.end_off, file_off, buffer);
-            if (err != ERROR_SUCCESS) return err;
-        }
-    }
-
-    return ERROR_SUCCESS;
-}
-
-DWORD ChunkDiskWorker::PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_addr, u32 count, PVOID& buffer)
-{
-    auto& params = service_.params;
-    const auto r = params.BlockChunkRange(block_addr, count);
-
-    auto err = PrepareChunkOps(work, kind, r.start_idx, r.start_off,
-                               r.start_idx == r.end_idx ? r.end_off : params.chunk_length, buffer);
-    if (err != ERROR_SUCCESS) return err;
-    if (r.start_idx != r.end_idx)
-    {
-        for (auto i = r.start_idx + 1; i < r.end_idx; ++i)
-        {
-            err = PrepareChunkOps(work, kind, i, 0, params.chunk_length, buffer);
-            if (err != ERROR_SUCCESS) return err;
-        }
-        err = PrepareChunkOps(work, kind, r.end_idx, 0, r.end_off, buffer);
-        if (err != ERROR_SUCCESS) return err;
-    }
-
-    return ERROR_SUCCESS;
 }
 
 DWORD ChunkDiskWorker::PostReadChunk(ChunkOpState& state)
