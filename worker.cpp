@@ -1053,15 +1053,44 @@ DWORD ChunkDiskWorker::PostReadChunk(ChunkOpState& state)
     auto h = HANDLE(INVALID_HANDLE_VALUE);
     err = OpenChunk(state.idx, false, h);
     if (err != ERROR_SUCCESS) return err;
-    // file has been checked in PrepareChunkOps(), h should be valid
 
-    auto length_bytes = params.BlockBytes(state.end_off - state.start_off);
-    err = ReadFile(h, state.buffer, DWORD(length_bytes), nullptr, &state.ovl) ? ERROR_SUCCESS : GetLastError();
-    if (err != ERROR_SUCCESS && err != ERROR_IO_PENDING)
+    if (h != INVALID_HANDLE_VALUE)
     {
-        CloseChunk(state.idx);
-        return err;
+        auto length_bytes = params.BlockBytes(state.end_off - state.start_off);
+        auto bytes_read = DWORD();
+        err = ReadFile(h, state.buffer, DWORD(length_bytes), &bytes_read, &state.ovl)
+            ? ERROR_SUCCESS : GetLastError();
+        if (err != ERROR_SUCCESS && err != ERROR_IO_PENDING)
+        {
+            auto file_size = LARGE_INTEGER();
+            if (err == ERROR_HANDLE_EOF && bytes_read == 0
+                && GetFileSizeEx(h, &file_size) && file_size.QuadPart == 0)
+            {
+                // simulate ReadFile()
+                err = PostQueuedCompletionStatus(iocp_.get(), length_bytes, CK_IO, &state.ovl)
+                    ? ERROR_SUCCESS : GetLastError();
+                if (err != ERROR_SUCCESS)
+                {
+                    CloseChunk(state.idx);
+                    return err;
+                }
+            }
+            else
+            {
+                CloseChunk(state.idx);
+                return err;
+            }
+        }
     }
+    else
+    {
+        // simulate ReadFile()
+        // set bytes_transferred to -1 to indicate
+        err = PostQueuedCompletionStatus(iocp_.get(), u32(-1), CK_IO, &state.ovl)
+            ? ERROR_SUCCESS : GetLastError();
+        if (err != ERROR_SUCCESS) return err;
+    }
+
     return ERROR_SUCCESS;
 }
 
@@ -1106,11 +1135,29 @@ void ChunkDiskWorker::CompleteChunkOp(ChunkOpState& state, DWORD error, DWORD by
     // ignore bytes_transferred for DeviceIoControl() in partial UNMAP_CHUNK
     if (error == ERROR_SUCCESS &&
         !(state.kind == WRITE_CHUNK && state.buffer == nullptr) &&
+        !(state.kind == READ_CHUNK && bytes_transferred == u32(-1)) &&
         bytes_transferred != length_bytes)
     {
         error = ERROR_INVALID_DATA;
     }
-    CloseChunk(state.idx);
+    if (error == ERROR_HANDLE_EOF && state.kind == READ_CHUNK && bytes_transferred == 0)
+    {
+        auto err = [this, &state]() -> DWORD
+        {
+            auto h = HANDLE(INVALID_HANDLE_VALUE);
+            auto err = OpenChunk(state.idx, false, h);
+            if (err != ERROR_SUCCESS) return err;
+            if (h == INVALID_HANDLE_VALUE) return ERROR_SUCCESS;
+
+            err = ERROR_HANDLE_EOF;
+            auto file_size = LARGE_INTEGER();
+            if (GetFileSizeEx(h, &file_size) && file_size.QuadPart == 0) err = ERROR_SUCCESS;
+            CloseChunk(state.idx);
+            return err;
+        }();
+        if (err == ERROR_SUCCESS) error = ERROR_SUCCESS;
+    }
+    if (state.kind != READ_CHUNK || bytes_transferred != u32(-1)) CloseChunk(state.idx);
     ReportOpResult(state, error);
 }
 
@@ -1129,17 +1176,33 @@ DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
         auto h = HANDLE(INVALID_HANDLE_VALUE);
         auto err = OpenChunk(chunk_idx, false, h);
         if (err != ERROR_SUCCESS) return err;
-        // file has been checked in PrepareChunkOps(), h should be valid
-        // ... except for WRITE_PARTIAL_PAGE
 
         if (h != INVALID_HANDLE_VALUE)
         {
-            err = ReadFile(h, page.ptr, u32(params.PageBytes(1)), nullptr, &state.ovl) ? ERROR_SUCCESS : GetLastError();
+            auto bytes_read = DWORD();
+            err = ReadFile(h, page.ptr, u32(params.PageBytes(1)), &bytes_read, &state.ovl) ? ERROR_SUCCESS : GetLastError();
             if (err != ERROR_SUCCESS && err != ERROR_IO_PENDING)
             {
-                CloseChunk(chunk_idx);
-                FreePageAsync(state, state.idx, true);
-                return err;
+                auto file_size = LARGE_INTEGER();
+                if (err == ERROR_HANDLE_EOF && bytes_read == 0
+                    && GetFileSizeEx(h, &file_size) && file_size.QuadPart == 0)
+                {
+                    // simulate ReadFile()
+                    err = PostQueuedCompletionStatus(iocp_.get(), u32(params.PageBytes(1)), CK_IO, &state.ovl)
+                        ? ERROR_SUCCESS : GetLastError();
+                    if (err != ERROR_SUCCESS)
+                    {
+                        CloseChunk(chunk_idx);
+                        FreePageAsync(state, state.idx, true);
+                        return err;
+                    }
+                }
+                else
+                {
+                    CloseChunk(chunk_idx);
+                    FreePageAsync(state, state.idx, true);
+                    return err;
+                }
             }
             return ERROR_SUCCESS;
         }
@@ -1165,6 +1228,24 @@ void ChunkDiskWorker::CompleteReadPage(ChunkOpState& state, DWORD error, DWORD b
     if (error == ERROR_SUCCESS && bytes_transferred != params.PageBytes(1) && bytes_transferred != u32(-1))
     {
         error = ERROR_INVALID_DATA;
+    }
+    if (error == ERROR_HANDLE_EOF && bytes_transferred == 0)
+    {
+        auto err = [this, &state, &params]() -> DWORD
+        {
+            auto chunk_idx = params.BlockChunkRange(params.PageBlocks(state.idx), 0).start_idx;
+            auto h = HANDLE(INVALID_HANDLE_VALUE);
+            auto err = OpenChunk(chunk_idx, false, h);
+            if (err != ERROR_SUCCESS) return err;
+            if (h == INVALID_HANDLE_VALUE) return ERROR_SUCCESS;
+
+            err = ERROR_HANDLE_EOF;
+            auto file_size = LARGE_INTEGER();
+            if (GetFileSizeEx(h, &file_size) && file_size.QuadPart == 0) err = ERROR_SUCCESS;
+            CloseChunk(chunk_idx);
+            return err;
+        }();
+        if (err == ERROR_SUCCESS) error = ERROR_SUCCESS;
     }
     // OpenChunk() not called if page hit
     if (bytes_transferred != u32(-1))
@@ -1224,6 +1305,24 @@ void ChunkDiskWorker::CompleteWritePartialReadPage(ChunkOpState& state, DWORD er
     if (error == ERROR_SUCCESS && bytes_transferred != params.PageBytes(1) && bytes_transferred != u32(-1))
     {
         error = ERROR_INVALID_DATA;
+    }
+    if (error == ERROR_HANDLE_EOF && bytes_transferred == 0)
+    {
+        auto err = [this, &state, &params]() -> DWORD
+        {
+            auto chunk_idx = params.BlockChunkRange(params.PageBlocks(state.idx), 0).start_idx;
+            auto h = HANDLE(INVALID_HANDLE_VALUE);
+            auto err = OpenChunk(chunk_idx, false, h);
+            if (err != ERROR_SUCCESS) return err;
+            if (h == INVALID_HANDLE_VALUE) return ERROR_SUCCESS;
+
+            err = ERROR_HANDLE_EOF;
+            auto file_size = LARGE_INTEGER();
+            if (GetFileSizeEx(h, &file_size) && file_size.QuadPart == 0) err = ERROR_SUCCESS;
+            CloseChunk(chunk_idx);
+            return err;
+        }();
+        if (err == ERROR_SUCCESS) error = ERROR_SUCCESS;
     }
     // OpenChunk() not called if page hit
     if (bytes_transferred != u32(-1))
