@@ -285,7 +285,7 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
     auto find_entry = [this, page_idx, &entry]() -> bool
     {
         auto it = cached_pages_.find(page_idx);
-        entry = it != cached_pages_.end() ? &((*it).second) : nullptr;
+        entry = (it != cached_pages_.end()) ? &((*it).second) : nullptr;
         return entry != nullptr;
     };
 
@@ -493,7 +493,7 @@ DWORD ChunkDiskService::RemovePageEntry(SRWLockGuard& g, Map<u64, PageEntry>::it
     auto find_entry = [this, page_idx, &it, &entry]() -> bool
     {
         it = cached_pages_.find(page_idx);
-        entry = it != cached_pages_.end() ? &((*it).second) : nullptr;
+        entry = (it != cached_pages_.end()) ? &((*it).second) : nullptr;
         return entry != nullptr;
     };
 

@@ -199,7 +199,7 @@ private:
     // try to complete some ops immediately (abort if one of them fails)
     DWORD PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_addr, u32 count, PVOID& buffer);
 
-    // post an internal message
+    // post an internal message to this worker
     // ignore queue depth, no response
     // currently for REFRESH_CHUNK only
     DWORD PostMsg(ChunkWork work);
@@ -209,8 +209,7 @@ private:
 
     static void ThreadProc(LPVOID param);
 
-    // for SINGLE worker and SINGLE dispatcher thread
-    // Start() creates a thread starting at DoWorks()
+    // event loop of the worker thread
     void DoWorks();
 
     // initiate async I/O

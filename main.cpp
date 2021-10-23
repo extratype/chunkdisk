@@ -459,7 +459,7 @@ ULONG argtol(wchar_t** argp, ULONG deflt)
 
     PWSTR endp;
     ULONG ul = wcstol(argp[0], &endp, 10);
-    return argp[0][0] != L'\0' && *endp == L'\0' ? ul : deflt;
+    return (argp[0][0] != L'\0' && *endp == L'\0') ? ul : deflt;
 }
 
 PWSTR argtos(wchar_t** argp)
@@ -582,8 +582,8 @@ int wmain(int argc, wchar_t** argv)
         ChunkDiskFile,
         !!WriteAllowed,
         NumThreads,
-        nullptr != PipeName ? L" -p " : L"",
-        nullptr != PipeName ? PipeName : L"");
+        (nullptr != PipeName) ? L" -p " : L"",
+        (nullptr != PipeName) ? PipeName : L"");
 
     SpdGuardSet(&ConsoleCtrlGuard, storage_unit);
     SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);

@@ -77,7 +77,11 @@ DWORD ChunkDiskWorker::StopAsync(HANDLE& handle_out)
 {
     if (!IsRunning()) return ERROR_INVALID_STATE;
 
-    if (!PostQueuedCompletionStatus(iocp_.get(), 0, CK_STOP, nullptr)) return GetLastError();
+    if (!PostQueuedCompletionStatus(iocp_.get(), 0,
+                                    CK_STOP, nullptr))
+    {
+        return GetLastError();
+    }
 
     // native_handle() closed after detach()
     auto h = HANDLE(nullptr);
@@ -375,23 +379,23 @@ DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_ou
         // try to keep MAX_QD by closing old handles
         if (chunk_handles_.size() >= MAX_QD)
         {
-            for (auto it2 = chunk_handles_.begin(); it2 != chunk_handles_.end();)
+            for (auto it1 = chunk_handles_.begin(); it1 != chunk_handles_.end();)
             {
-                auto& cfh = (*it2).second;
+                auto& cfh = (*it1).second;
                 if (cfh.refs != 0)
                 {
-                    ++it2;
+                    ++it1;
                     continue;
                 }
 
-                it2 = chunk_handles_.erase(it2);
+                it1 = chunk_handles_.erase(it1);
                 if (chunk_handles_.size() < MAX_QD) break;
             }
         }
 
         try
         {
-            it = chunk_handles_.try_emplace(chunk_idx).first;
+            it = chunk_handles_.emplace(chunk_idx).first;
         }
         catch (const bad_alloc&)
         {
@@ -631,7 +635,7 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
         auto file_off = LONGLONG(params.PageBytes(r.start_idx));
 
         auto err = PreparePageOps(work, is_write, r.base_idx + r.start_idx, r.start_off,
-                                  r.start_idx == r.end_idx ? r.end_off : params.page_length, file_off, buffer);
+                                  (r.start_idx == r.end_idx) ? r.end_off : params.page_length, file_off, buffer);
         if (err != ERROR_SUCCESS) return err;
         if (r.start_idx != r.end_idx)
         {
@@ -654,7 +658,7 @@ DWORD ChunkDiskWorker::PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_a
     const auto r = params.BlockChunkRange(block_addr, count);
 
     auto err = PrepareChunkOps(work, kind, r.start_idx, r.start_off,
-                               r.start_idx == r.end_idx ? r.end_off : params.chunk_length, buffer);
+                               (r.start_idx == r.end_idx) ? r.end_off : params.chunk_length, buffer);
     if (err != ERROR_SUCCESS) return err;
     if (r.start_idx != r.end_idx)
     {
@@ -959,9 +963,9 @@ void ChunkDiskWorker::StopWorks()
 
     auto gb = SRWLockGuard(lock_buffers_.get(), true);
     auto gh = SRWLockGuard(lock_handles_.get(), true);
-    working_.clear();
-    buffers_.clear();
     chunk_handles_.clear();
+    buffers_.clear();
+    working_.clear();
 
     spd_ovl_event_.reset();
     wait_event_.reset();
