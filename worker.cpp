@@ -879,6 +879,8 @@ void ChunkDiskWorker::CompleteWork(ChunkWork& work)
         // NOTE: storage unit shuts down if this fails
         // The dispatcher will shut down, so will the workers
         SpdStorageUnitSendResponse(service_.storage_unit, &work.response, resp_buffer, &spd_ovl_);
+        spd_ovl_ = OVERLAPPED{};
+        spd_ovl_.hEvent = spd_ovl_event_.get();
     }
 
     ReturnBuffer(std::move(work.buffer));
