@@ -43,8 +43,8 @@ Service:
         LockPage()
         ClaimPage()
         FreePage()
-        RemovePages()
-        FlushPages()
+        FlushPages(range)
+        FlushPages(all)
 
 Worker:
     resource pool:
@@ -52,10 +52,10 @@ Worker:
         aligned buffer: 65536 bytes
         LRU policy, <= QD 32
 
-    std::list<Work> working
+    std::list<ChunkWork> working
         max. size: 32
 
-        std::vector<State> ops
+        std::vector<ChunkOpState> ops
             operations in range: start off, end off, buffer ptr
 
             ReadChunk: aligned read (to buffer)
@@ -96,7 +96,7 @@ Read():
 
         aligned request?
             OpenChunk()
-            RemovePages()...
+            FlushPages(range)...
             ReadFile()... to buffer
             CloseChunk()
 
@@ -118,7 +118,7 @@ Write():
     Write chunks...:
         aligned request?
             OpenChunk(read-write)
-            FlushPages()...
+            FlushPages(range)...
             is buffer not null?
                 WriteFile()...
             is buffer null?
@@ -147,6 +147,23 @@ Unmap():
             if empty or not exist? done
             truncate chunk to make it empty
 
+Worker:
+    1. Prepare
+        Create ChunkWork, ChunkOpState
+        Try to complete immediately
+            * Read empty chunk
+            * Read cached page
+            * Unmap whole chunk
+        Post ChunkWork
+
+    2. Post asynchronous request
+        ReadFile(), WriteFile()
+
+    3. Complete operation
+        Check result
+        Complete ChunkWork if done
+            Send response
+
 Page is already in use?
     check whether owner is the current thread
     append State to a singly-linked list
@@ -158,7 +175,7 @@ Truncate chunk while it's being used?
 
     Cancel I/O
 
-    Refresh chunk handles for all workers
+    Refresh chunk state for all workers
         mark as pending
 
         CloseChunk():

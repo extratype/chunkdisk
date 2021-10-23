@@ -25,7 +25,7 @@ struct PageEntry
 
     // thread ID owning lock exclusively
     // ID 0 is in use by Windows kernel
-    // safe to compare to the current thread without lock
+    // safe to compare to the current thread without lock in x86-64
     DWORD owner = 0;
 
     // ChunkDiskParams::PageBytes(1)

@@ -20,21 +20,23 @@ namespace chunkdisk
 
 enum ChunkOpKind : u32
 {
-    READ_CHUNK,
-    WRITE_CHUNK,
+    // for PostWork()
+    READ_CHUNK,             // aligned read, flush pages
+    WRITE_CHUNK,            // aligned write, flush pages
     READ_PAGE,              // not aligned, read in pages
     WRITE_PAGE,             // not aligned, write in pages
     WRITE_PAGE_PARTIAL,     // not page aligned, read then write in pages
-    UNMAP_CHUNK,
+    UNMAP_CHUNK,            // become WRITE_CHUNK if partial
 
-    REFRESH_CHUNK           // replace HANDLE for an unmapped chunk FIXME comment
+    // for PostMsg()
+    REFRESH_CHUNK           // refresh chunk state for an unmapped chunk
 };
 
 enum ChunkOpStep : u32
 {
     OP_READY = 0,       // op created
     OP_DONE,            // completed, with or without error
-    OP_READ_PAGE        // for WRITE_PAGE_PARTIAL, page is read, will be written
+    OP_READ_PAGE        // for WRITE_PAGE_PARTIAL, page has been read and will be written
 };
 
 struct ChunkOpState;
@@ -117,14 +119,20 @@ public:
 
     bool IsRunning() { return iocp_ != nullptr; }
 
-    // stop and start to restart
+    // start a worker thread to perform I/O operations
+    // Stop() then Start() to restart
     DWORD Start();
 
+    // try to cancel all pending I/O operations
+    // then stop the worker thread gracefully
+    // make sure to wait for handle_out
     DWORD StopAsync(HANDLE& handle_out);
 
-    // try to cancel all pending IO operations
-    // then stop the worker thread gracefully
+    // StopAsync() and wait for the handle
     DWORD Stop(DWORD timeout_ms = INFINITE);
+
+    // wait for the operation queue
+    DWORD Wait(DWORD timeout_ms = INFINITE);
 
     /*
      * Perform an I/O operation for WinSpd.
@@ -136,7 +144,7 @@ public:
      * Asynchronous file I/O is processed using IOCP.
      * An operation is processed either immediately, synchronously, asynchronously.
      *
-     * Immediately: I/O is bypassed or done using synchronous HANDLE not associated with the IOCP.
+     * Immediately: I/O is bypassed or done with a synchronous handle not associated with the IOCP.
      * Synchronously: Asynchronous I/O is requested but GetLastError() is not ERROR_IO_PENDING.
      * Asynchronously: Asynchronous I/O is requested and GetLastError() is ERROR_IO_PENDING.
      *
@@ -147,9 +155,6 @@ public:
      * Response is sent when all operations are finished for ERROR_IO_PENDING.
      */
     DWORD PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, ChunkOpKind op_kind, u64 block_addr, u32 count);
-
-    // wait for the operation queue
-    DWORD Wait(DWORD timeout_ms = INFINITE);
 
 private:
     enum IOCPKey
@@ -166,12 +171,16 @@ private:
     // zero-fill buffer and return it to pool
     DWORD ReturnBuffer(Pages buffer);
 
+    // get shared chunk file handle from pool to perform an operation
     DWORD OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_out);
 
+    // chunk file operation done
     DWORD CloseChunk(u64 chunk_idx);
 
+    // refresh chunk state after it's unmapped
     DWORD RefreshChunk(u64 chunk_idx);
 
+    // for READ_PAGE, WRITE_PAGE, WRITE_PAGE_PARTIAL
     // start_off, end_off: block offset in page
     // file_off: offset in chunk corresponding to page
     // buffer: current address, to be updated
@@ -190,10 +199,12 @@ private:
     // try to complete some ops immediately (abort if one of them fails)
     DWORD PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_addr, u32 count, PVOID& buffer);
 
-    // Post a message directly.
-    // Ignore queue depth.
+    // post an internal message
+    // ignore queue depth, no response
+    // currently for REFRESH_CHUNK only
     DWORD PostMsg(ChunkWork work);
 
+    // post REFRESH_CHUNK to all workers including this
     DWORD PostRefreshChunk(u64 chunk_idx);
 
     static void ThreadProc(LPVOID param);
@@ -207,15 +218,17 @@ private:
     // post CK_FAIL if failed
     void PostOp(ChunkOpState& state);
 
-    // requested async I/O (it may have been done synchronously)
+    // check async I/O result, completed either synchronously or asynchronously
     void CompleteOp(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
 
     // send response and close work
-    // lock required
+    // exclusive lock_working_ required
     void CompleteWork(ChunkWork& work);
 
+    // enter idle mode, free buffers and handles
     DWORD IdleWork();
 
+    // cancel all requests to exit the worker thread
     void StopWorks();
 
     // ChunkDiskService::LockPage() with waiting list
@@ -247,6 +260,7 @@ private:
 
     void CompleteWritePage(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
 
+    // operation finished, report to the owner ChunkWork
     void ReportOpResult(ChunkOpState& state, DWORD error = ERROR_SUCCESS);
 
     ChunkDiskService& service_;

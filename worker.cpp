@@ -109,7 +109,6 @@ DWORD ChunkDiskWorker::Stop(DWORD timeout_ms)
     auto err = StopAsync(h);
     if (err != ERROR_SUCCESS) return err;
 
-    // join thread
     return WaitForSingleObject(h, timeout_ms);
 }
 
@@ -317,16 +316,15 @@ DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_ou
 {
     auto g = SRWLockGuard(lock_handles_.get(), true);
 
-    // check HANDLE pool
     auto it = chunk_handles_.find(chunk_idx);
     if (it != chunk_handles_.end())
     {
         chunk_handles_.reinsert_back(it);
-
         auto& cfh = (*it).second;
 
         if (cfh.pending)
         {
+            // chunk was unmapped, update CreateChunk() result
             auto h = FileHandle();
             auto err = service_.CreateChunk(chunk_idx, h, is_write, true);
             if (err != ERROR_SUCCESS) return err;
@@ -337,6 +335,8 @@ DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_ou
             }
             else
             {
+                // REFRESH_CHUNK done
+                // chunk reopened, reuse handles
                 cfh.pending = false;
             }
         }
@@ -372,7 +372,7 @@ DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_ou
 
     if (it == chunk_handles_.end())
     {
-        // try to keep MAX_QD by closing old HANDLE's
+        // try to keep MAX_QD by closing old handles
         if (chunk_handles_.size() >= MAX_QD)
         {
             for (auto it2 = chunk_handles_.begin(); it2 != chunk_handles_.end();)
@@ -425,11 +425,14 @@ DWORD ChunkDiskWorker::CloseChunk(u64 chunk_idx)
 
     if (cfh.pending && cfh.refs == 0)
     {
+        // CancelIo() called, all refs to be freed
         if (cfh.handle_rw)
         {
             auto h = FileHandle();
             service_.CreateChunk(chunk_idx, h, false, true);
         }
+        // REFRESH_CHUNK done
+        // chunk was unmapped, handles are not necessary
         chunk_handles_.erase(it);
     }
 
@@ -443,9 +446,11 @@ DWORD ChunkDiskWorker::RefreshChunk(u64 chunk_idx)
     auto it = chunk_handles_.find(chunk_idx);
     if (it == chunk_handles_.end()) return ERROR_NOT_FOUND;
 
+    // chunk has been unmapped, cancel pending I/O requests
     auto& cfh = (*it).second;
     if (cfh.handle_ro) CancelIo(cfh.handle_ro.get());
     if (cfh.handle_rw) CancelIo(cfh.handle_rw.get());
+    // lazily refresh chunk state
     cfh.pending = true;
 
     return ERROR_SUCCESS;
@@ -466,7 +471,7 @@ DWORD ChunkDiskWorker::PreparePageOps(ChunkWork& work, bool is_write, u64 page_i
         if (!(is_write && buffer == nullptr)) buffer = recast<u8*>(buffer) + params.BlockBytes(end_off - start_off);
 
         // try to complete immediately
-        // we can't lock or wait for a page here because work is not queued yet
+        // work is not queued, we can't lock or wait for a page here so READ_PAGE only
         if (kind == READ_PAGE)
         {
             auto page = service_.PeekPage(page_idx);
@@ -507,9 +512,6 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
                 if (err == ERROR_FILE_NOT_FOUND) err = ERROR_SUCCESS;
 
                 ReportOpResult(*it, err);
-                // FIXME comment
-                // Unmap + Read/Write race
-                // broadcast REFRESH_CHUNK
                 if (need_refresh) PostRefreshChunk(chunk_idx);
                 return err;
             }
@@ -677,7 +679,7 @@ DWORD ChunkDiskWorker::PostMsg(ChunkWork work)
     try
     {
         auto g = SRWLockGuard(lock_working_.get(), true);
-        auto work_it = working_.emplace(working_.end(), std::move(work));
+        auto work_it = working_.emplace(working_.end(), std::move(work));   // invalidates ChunkOpState::owner
         work_it->it = work_it;
         for (auto& op : work_it->ops) op.owner = &*work_it;
 
@@ -704,6 +706,8 @@ DWORD ChunkDiskWorker::PostRefreshChunk(u64 chunk_idx)
 
     for (auto& worker : GetWorkers(service_.storage_unit))
     {
+        // prepare single REFRESH_CHUNK op
+        // start_off and end_off are zero
         auto msg = ChunkWork();
         auto msg_buf = PVOID(nullptr);
         auto err1 = PrepareOps(msg, REFRESH_CHUNK, service_.params.ChunkBlocks(chunk_idx), 0, msg_buf);
@@ -799,14 +803,15 @@ void ChunkDiskWorker::PostOp(ChunkOpState& state)
     }
     else if (kind == REFRESH_CHUNK)
     {
-        // FIXME comment
-        // no context, no response
-        // no error result
+        // one-way notification, no response
         RefreshChunk(state.idx);
 
+        // no actual I/O, simulate it
         err = PostQueuedCompletionStatus(
             iocp_.get(), 0, CK_IO, &state.ovl)
             ? ERROR_SUCCESS : GetLastError();
+        if (err != ERROR_SUCCESS) ReportOpResult(state, err);
+        return;
     }
     else
     {
@@ -869,7 +874,7 @@ DWORD ChunkDiskWorker::IdleWork()
     auto gw = SRWLockGuard(lock_working_.get(), true);
     for (auto it = working_.begin(); it != working_.end();)
     {
-        // in case where posting CK_FAIL was failed for some reason
+        // in case where posting CK_FAIL was failed somehow
         if (it->num_completed != it->ops.size())
         {
             ++it;
