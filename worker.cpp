@@ -116,6 +116,28 @@ DWORD ChunkDiskWorker::Stop(DWORD timeout_ms)
     return WaitForSingleObject(h, timeout_ms);
 }
 
+DWORD ChunkDiskWorker::Wait(DWORD timeout_ms)
+{
+    if (!IsRunning()) return ERROR_INVALID_STATE;
+
+    while (true)
+    {
+        auto g = SRWLockGuard(lock_working_.get(), false);
+        if (working_.size() < MAX_QD) return ERROR_SUCCESS;
+
+        if (!ResetEvent(wait_event_.get())) return GetLastError();
+        g.reset();
+
+        auto ticks = (timeout_ms != INFINITE) ? GetTickCount() : 0;
+        auto err = WaitForSingleObject(wait_event_.get(), timeout_ms);
+        if (err != WAIT_OBJECT_0) return err;
+
+        // PostMsg() ignores queue depth so queue may still be full
+        ticks = (timeout_ms != INFINITE) ? (GetTickCount() - ticks) : 0;
+        timeout_ms = (timeout_ms > ticks) ? (timeout_ms - ticks) : 0;
+    }
+}
+
 DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, ChunkOpKind op_kind, u64 block_addr, u32 count)
 {
     if (!IsRunning()) return ERROR_INVALID_STATE;
@@ -259,17 +281,6 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
         return ERROR_NOT_ENOUGH_MEMORY;
     }
     return ERROR_IO_PENDING;
-}
-
-DWORD ChunkDiskWorker::Wait(DWORD timeout_ms)
-{
-    // check queue depth
-    auto g = SRWLockGuard(lock_working_.get(), false);
-    if (working_.size() < MAX_QD) return ERROR_SUCCESS;
-
-    if (!ResetEvent(wait_event_.get())) return GetLastError();
-    g.reset();
-    return WaitForSingleObject(wait_event_.get(), timeout_ms);
 }
 
 DWORD ChunkDiskWorker::GetBuffer(Pages& buffer)
@@ -706,7 +717,7 @@ DWORD ChunkDiskWorker::PostMsg(ChunkWork work)
 
 DWORD ChunkDiskWorker::PostRefreshChunk(u64 chunk_idx)
 {
-    auto err = DWORD(ERROR_SUCCESS);
+    auto err = DWORD(ERROR_IO_PENDING); // means ERROR_SUCCESS for PostMsg()
 
     for (auto& worker : GetWorkers(service_.storage_unit))
     {
@@ -715,14 +726,14 @@ DWORD ChunkDiskWorker::PostRefreshChunk(u64 chunk_idx)
         auto msg = ChunkWork();
         auto msg_buf = PVOID(nullptr);
         auto err1 = PrepareOps(msg, REFRESH_CHUNK, service_.params.ChunkBlocks(chunk_idx), 0, msg_buf);
-        if (err1 != ERROR_SUCCESS)
+        if (err1 != ERROR_IO_PENDING)
         {
             err = err1;
             continue;
         }
 
         err1 = worker->PostMsg(std::move(msg));
-        if (err1 != ERROR_SUCCESS) err = err1;
+        if (err1 != ERROR_IO_PENDING) err = err1;
     }
 
     return err;
@@ -858,13 +869,17 @@ void ChunkDiskWorker::CompleteOp(ChunkOpState& state, DWORD error, DWORD bytes_t
 
 void ChunkDiskWorker::CompleteWork(ChunkWork& work)
 {
-    auto resp_buffer = (work.ops[0].kind == READ_CHUNK || work.ops[0].kind == READ_PAGE)
-        ? work.ops[0].buffer : nullptr;
-    // DataBuffer: byte alignment, MAX_TRANSFER_LENGTH bytes
-    // NOTE: storage unit shuts down if this fails
-    // The dispatcher will shut down, so will the workers
-    ResetEvent(spd_ovl_.hEvent);
-    SpdStorageUnitSendResponse(service_.storage_unit, &work.response, resp_buffer, &spd_ovl_);
+    // SetContext() not called for PostMsg()
+    if (work.response.Hint != 0)
+    {
+        // byte alignment, MAX_TRANSFER_LENGTH bytes
+        auto resp_buffer = (work.ops[0].kind == READ_CHUNK || work.ops[0].kind == READ_PAGE)
+                           ? work.ops[0].buffer : nullptr;
+        ResetEvent(spd_ovl_.hEvent);
+        // NOTE: storage unit shuts down if this fails
+        // The dispatcher will shut down, so will the workers
+        SpdStorageUnitSendResponse(service_.storage_unit, &work.response, resp_buffer, &spd_ovl_);
+    }
 
     ReturnBuffer(std::move(work.buffer));
     working_.erase(work.it);
@@ -941,9 +956,15 @@ void ChunkDiskWorker::StopWorks()
             ? ERROR_SUCCESS : GetLastError();
         if (overlapped == nullptr && err != ERROR_SUCCESS) break;
 
-        // FIXME CK_POST, CK_STOP
-
-        if (ckey == CK_IO || ckey == CK_FAIL)
+        if (ckey == CK_POST)
+        {
+            auto& work = *recast<ChunkWork*>(overlapped);
+            if (work.ops[0].kind == REFRESH_CHUNK)
+            {
+                for (auto& op : work.ops) PostOp(op);
+            }
+        }
+        else if (ckey == CK_IO || ckey == CK_FAIL)
         {
             auto& state = *GetOverlappedOp(overlapped);
             if (ckey == CK_IO)
@@ -959,6 +980,7 @@ void ChunkDiskWorker::StopWorks()
 
             if (state.owner->num_completed == state.owner->ops.size()) CompleteWork(*state.owner);
         }
+        // ignore ckey == CK_STOP
     }
 
     auto gb = SRWLockGuard(lock_buffers_.get(), true);
