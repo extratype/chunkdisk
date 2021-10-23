@@ -374,27 +374,31 @@ DWORD CreateStorageUnit(PWSTR chunkdisk_file, BOOLEAN write_protected, PWSTR pip
 
 DWORD StopWorkers(ChunkDisk& cdisk, DWORD timeout_ms = INFINITE)
 {
-    try
+    vector<HANDLE> handles;
+    auto err = [&cdisk, timeout_ms, &handles]() -> DWORD
     {
-        // FIXME handles may leak
-        vector<HANDLE> handles;
-        handles.reserve(cdisk.workers.size());
-
-        for (auto& worker : cdisk.workers)
+        try
         {
-            HANDLE h;
-            auto err = worker->StopAsync(h);
-            if (err != ERROR_SUCCESS) return err;
-            handles.push_back(h);
-        }
+            handles.reserve(cdisk.workers.size());
+            for (auto& worker : cdisk.workers)
+            {
+                HANDLE h;
+                auto err = worker->StopAsync(h);
+                if (err != ERROR_SUCCESS) return err;
+                handles.push_back(h);
+            }
 
-        if (handles.empty()) return ERROR_SUCCESS;
-        return WaitForMultipleObjects(handles.size(), &handles.front(), TRUE, timeout_ms);
-    }
-    catch (const bad_alloc&)
-    {
-        return ERROR_NOT_ENOUGH_MEMORY;
-    }
+            if (handles.empty()) return ERROR_SUCCESS;
+            return WaitForMultipleObjects(handles.size(), &handles.front(), TRUE, timeout_ms);
+        }
+        catch (const bad_alloc&)
+        {
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+    }();
+
+    for (auto h : handles) CloseHandle(h);
+    return err;
 }
 
 // num_workers: should be positive

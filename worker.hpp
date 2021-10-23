@@ -113,11 +113,11 @@ class ChunkDiskWorker
 public:
     explicit ChunkDiskWorker(ChunkDiskService& service) : service_(service) {}
 
-    ~ChunkDiskWorker() { if (IsRunning()) Stop(); }
+    ~ChunkDiskWorker() { Stop(); }
 
     ChunkDiskWorker(ChunkDiskWorker&&) = default;
 
-    bool IsRunning() { return iocp_ != nullptr; }
+    bool IsRunning() { return thread_.joinable(); }
 
     // start a worker thread to perform I/O operations
     // Stop() then Start() to restart
