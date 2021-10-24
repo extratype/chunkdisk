@@ -253,8 +253,8 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
 
     if (work.num_completed == work.ops.size())
     {
-        if (op_kind == READ_CHUNK) memcpy(ctx_buffer, work.ops[0].buffer, service_.MaxTransferLength());
         // read all done immediately
+        if (op_kind == READ_CHUNK) memcpy(ctx_buffer, work.ops[0].buffer, params.BlockBytes(count));
         return ERROR_SUCCESS;
     }
 
