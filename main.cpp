@@ -311,7 +311,7 @@ DWORD CreateStorageUnit(PWSTR chunkdisk_file, BOOLEAN write_protected, PWSTR pip
     {
         constexpr wchar_t ProductId[] = L"ChunkDisk";
         constexpr wchar_t ProductRevision[] = L"0.6";   // FIXME bump
-        SPD_STORAGE_UNIT_PARAMS unit_params = {};
+        auto unit_params = SPD_STORAGE_UNIT_PARAMS();
 
         UuidCreate(&unit_params.Guid);
         unit_params.BlockCount = params.block_count;

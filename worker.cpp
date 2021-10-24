@@ -55,7 +55,7 @@ DWORD ChunkDiskWorker::Start()
         return GetLastError();
     }
 
-    spd_ovl_ = OVERLAPPED{};
+    spd_ovl_ = OVERLAPPED();
     spd_ovl_.hEvent = spd_ovl_event_.get();
 
     try
@@ -890,7 +890,7 @@ void ChunkDiskWorker::CompleteWork(ChunkWork& work)
         // NOTE: storage unit shuts down if this fails
         // The dispatcher will shut down, so will the workers
         SpdStorageUnitSendResponse(service_.storage_unit, &work.response, resp_buffer, &spd_ovl_);
-        spd_ovl_ = OVERLAPPED{};
+        spd_ovl_ = OVERLAPPED();
         spd_ovl_.hEvent = spd_ovl_event_.get();
     }
 
@@ -1301,7 +1301,8 @@ DWORD ChunkDiskWorker::PostWritePage(ChunkOpState& state)
     }
 
     // write through
-    err = WriteFile(h, page.ptr, u32(params.PageBytes(1)), nullptr, &state.ovl) ? ERROR_SUCCESS : GetLastError();
+    err = WriteFile(h, page.ptr, u32(params.PageBytes(1)), nullptr, &state.ovl)
+        ? ERROR_SUCCESS : GetLastError();
     if (err != ERROR_SUCCESS && err != ERROR_IO_PENDING)
     {
         CloseChunk(chunk_idx);
@@ -1330,12 +1331,7 @@ void ChunkDiskWorker::CompleteWritePartialReadPage(ChunkOpState& state, DWORD er
         auto chunk_idx = params.BlockChunkRange(params.PageBlocks(state.idx), 0).start_idx;
         CloseChunk(chunk_idx);
     }
-    if (error != ERROR_SUCCESS)
-    {
-        FreePageAsync(state, state.idx, true);
-        ReportOpResult(state, error);
-    }
-    else
+    if (error == ERROR_SUCCESS)
     {
         // read complete, move on to writing
         // page not freed, claim it later
@@ -1343,6 +1339,11 @@ void ChunkDiskWorker::CompleteWritePartialReadPage(ChunkOpState& state, DWORD er
         state.ovl = OVERLAPPED{.Offset = state.ovl.Offset, .OffsetHigh=state.ovl.OffsetHigh};
         state.step = OP_READ_PAGE;
         PostOp(state);
+    }
+    else
+    {
+        FreePageAsync(state, state.idx, true);
+        ReportOpResult(state, error);
     }
 }
 
