@@ -736,7 +736,7 @@ DWORD ChunkDiskWorker::PostRefreshChunk(u64 chunk_idx)
         auto msg = ChunkWork();
         auto msg_buf = PVOID(nullptr);
         auto err1 = PrepareOps(msg, REFRESH_CHUNK, service_.params.ChunkBlocks(chunk_idx), 0, msg_buf);
-        if (err1 != ERROR_IO_PENDING)
+        if (err1 != ERROR_SUCCESS)
         {
             err = err1;
             continue;
