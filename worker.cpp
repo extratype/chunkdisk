@@ -787,14 +787,13 @@ void ChunkDiskWorker::DoWorks()
         else if (ckey == CK_POST)
         {
             // do work...
-            for (auto& op : recast<ChunkWork*>(overlapped)->ops) PostOp(op);
+            auto& work = *recast<ChunkWork*>(overlapped);
+            for (auto& op : work.ops) PostOp(op);
         }
-        else
+        else if (ckey == CK_IO || ckey == CK_FAIL)
         {
-            // ckey == CK_IO || ckey == CK_FAIL
             auto& state = *GetOverlappedOp(overlapped);
             if (ckey == CK_IO) CompleteOp(state, err, bytes_transferred);
-
             if (state.owner->num_completed == state.owner->ops.size())
             {
                 auto g = SRWLockGuard(lock_working_.get(), true);
