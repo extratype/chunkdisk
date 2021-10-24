@@ -1191,12 +1191,16 @@ DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
     auto page = LockPageAsync(state, state.idx);
     if (page.error != ERROR_SUCCESS) return page.error;
 
-    auto chunk_idx = params.BlockChunkRange(params.PageBlocks(state.idx), 0).start_idx;
     if (!page.is_hit)
     {
+        auto chunk_idx = params.BlockChunkRange(params.PageBlocks(state.idx), 0).start_idx;
         auto h = HANDLE(INVALID_HANDLE_VALUE);
         auto err = OpenChunk(chunk_idx, false, h);
-        if (err != ERROR_SUCCESS) return err;
+        if (err != ERROR_SUCCESS)
+        {
+            FreePageAsync(state, state.idx, true);
+            return err;
+        }
 
         if (h != INVALID_HANDLE_VALUE)
         {
@@ -1287,7 +1291,11 @@ DWORD ChunkDiskWorker::PostWritePage(ChunkOpState& state)
     auto chunk_idx = params.BlockChunkRange(params.PageBlocks(state.idx), 0).start_idx;
     auto h = HANDLE(INVALID_HANDLE_VALUE);
     auto err = OpenChunk(chunk_idx, true, h);
-    if (err != ERROR_SUCCESS) return err;
+    if (err != ERROR_SUCCESS)
+    {
+        FreePageAsync(state, state.idx, true);
+        return err;
+    }
 
     auto size = params.BlockBytes(state.end_off - state.start_off);
     if (state.buffer != nullptr)
