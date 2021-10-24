@@ -170,7 +170,7 @@ Page is already in use?
     retry operation after FreePage()
 
 Truncate chunk while it's being used?
-    Unmap and Write: incorrect chunk size
+    Unmap then Write: incorrect chunk size
     Unmap then Read: EOF
 
     Cancel I/O

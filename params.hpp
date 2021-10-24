@@ -60,12 +60,13 @@ struct ChunkDiskParams
     // in blocks
     ChunkRange BlockChunkRange(u64 block_addr, u32 count) const;
 
+    // ChunkRange::start_off, ChunkRange::end_off
     bool IsWholeChunk(u64 start_off, u64 end_off) const { return start_off == 0 && end_off == chunk_length; }
 
     // start_off, end_off: block offsets relative to chunk
     PageRange BlockPageRange(u64 chunk_idx, u64 start_off, u64 end_off) const;
 
-    // start_off: PageRange::start_off, end_off: PageRange::end_off
+    // PageRange::start_off, PageRange::end_off
     // also check buffer page alignment
     bool IsWholePages(u64 start_off, u64 end_off, void* buffer = nullptr) const
     {

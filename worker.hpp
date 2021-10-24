@@ -131,11 +131,11 @@ public:
     // StopAsync() and wait for the handle
     DWORD Stop(DWORD timeout_ms = INFINITE);
 
-    // wait for the operation queue
+    // wait for the request queue
     DWORD Wait(DWORD timeout_ms = INFINITE);
 
     /*
-     * Perform an I/O operation for WinSpd.
+     * Handle an I/O request from WinSpd.
      *
      * op_kind: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK
      * For UNMAP_CHUNK, context->DataBuffer is SPD_UNMAP_DESCRIPTOR[],
@@ -148,8 +148,8 @@ public:
      * Synchronously: Asynchronous I/O is requested but GetLastError() is not ERROR_IO_PENDING.
      * Asynchronously: Asynchronous I/O is requested and GetLastError() is ERROR_IO_PENDING.
      *
-     * Return ERROR_BUSY if the queue is full (Response not set).
-     * Return ERROR_SUCCESS when the request is done immediately.
+     * Return ERROR_BUSY if the request queue is full (Response not set).
+     * Return ERROR_SUCCESS when the operation is done immediately.
      * Return ERROR_IO_PENDING when some operations are processed synchronously or asynchronously.
      * Return an error with Response->Status set when an error occurred while doing immediately or starting operations.
      * Response is sent when all operations are finished for ERROR_IO_PENDING.
@@ -165,16 +165,16 @@ private:
         CK_STOP         // cancel pending I/O ops and stop DoWorks()
     };
 
-    // get zero-filled buffer from pool
+    // get zero-filled, page aligned buffer from the pool
     DWORD GetBuffer(Pages& buffer);
 
-    // zero-fill buffer and return it to pool
+    // zero-fill buffer and return it to the pool
     DWORD ReturnBuffer(Pages buffer);
 
-    // get shared chunk file handle from pool to perform an operation
+    // get shared chunk file handle from the pool
     DWORD OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_out);
 
-    // chunk file operation done
+    // done using the handle from the pool
     DWORD CloseChunk(u64 chunk_idx);
 
     // refresh chunk state after it's unmapped
@@ -182,14 +182,14 @@ private:
 
     // for READ_PAGE, WRITE_PAGE, WRITE_PAGE_PARTIAL
     // start_off, end_off: block offset in page
-    // file_off: offset in chunk corresponding to page
+    // file_off: offset in chunk corresponding to the page, to be updated
     // buffer: current address, to be updated
     DWORD PreparePageOps(ChunkWork& work, bool is_write, u64 page_idx,
                          u32 start_off, u32 end_off, LONGLONG& file_off, PVOID& buffer);
 
     // start_off, end_off: block offset in chunk
     // buffer: current address, to be updated
-    // partial UNMAP_CHUNK becomes WRITE_CHUNK with nullptr buffer
+    // partial UNMAP_CHUNK becomes WRITE_CHUNK
     DWORD PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 chunk_idx,
                           u64 start_off, u64 end_off, PVOID& buffer);
 
@@ -218,6 +218,7 @@ private:
     void PostOp(ChunkOpState& state);
 
     // check async I/O result, completed either synchronously or asynchronously
+    // ReportOpResult() or next step
     void CompleteOp(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
 
     // send response and close work

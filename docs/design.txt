@@ -51,4 +51,4 @@ File HANDLE:
         always align to 4096 bytes
         convert unaligned block I/O to page I/O
             disk cached by Windows
-            write-through, flush if aligned
+            write through, flush if aligned

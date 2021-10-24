@@ -162,31 +162,32 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
 
     if (op_kind == READ_CHUNK || op_kind == WRITE_CHUNK)
     {
-        // prepare buffer
-        // work.buffer zero-filled, write back to ctx_buffer if done immediately
+        // prepare zero-filled buffer
+        // write back to ctx_buffer if read request processed immediately
+        // write request is never processed immediately
         err = GetBuffer(work.buffer);
         if (err != ERROR_SUCCESS)
         {
             SetScsiError(&context->Response->Status, SCSI_SENSE_HARDWARE_ERROR, SCSI_ADSENSE_NO_SENSE);
             return err;
         }
-
-        // page align buffer to requested range
+        // whole disk as pages
+        // r.start_idx, r.end_idx: page index
+        // r.start_off, r.end_off: block offset in page
         const auto r = params.BlockPageRange(0, block_addr, block_addr + count);
 
         if (params.IsWholePages(r.start_off, r.end_off) || r.start_idx == r.end_idx)
         {
-            // no need to align
+            // no need to page align buffer
             auto ops_buffer = work.buffer.get();
-            // write is never done immediately
             if (op_kind == WRITE_CHUNK) memcpy(ops_buffer, ctx_buffer, params.BlockBytes(count));
             err = PrepareOps(work, op_kind, block_addr, count, ops_buffer);
         }
         else
         {
+            // page align buffer to the next page
             // GetBuffer() provides margin of one page
             auto ops_buffer = PVOID(recast<u8*>(work.buffer.get()) + params.BlockBytes(r.start_off));
-            // write is never done immediately
             if (op_kind == WRITE_CHUNK) memcpy(ops_buffer, ctx_buffer, params.BlockBytes(count));
 
             while (true)
@@ -199,12 +200,12 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
                 }
 
                 // aligned to page
-                // [start_idx, end_idx] -> [soff, eoff)
-                auto soff = params.PageBlocks(r.start_idx) + ((r.start_off != 0) ? params.page_length : 0);
-                auto eoff = params.PageBlocks(r.end_idx) + ((r.end_off != params.page_length) ? 0 : params.page_length);
-                if (soff != eoff)
+                // [start_idx, end_idx] -> [saddr, eaddr)
+                auto saddr = params.PageBlocks(r.start_idx) + ((r.start_off != 0) ? params.page_length : 0);
+                auto eaddr = params.PageBlocks(r.end_idx) + ((r.end_off != params.page_length) ? 0 : params.page_length);
+                if (saddr != eaddr)
                 {
-                    err = PrepareOps(work, op_kind, soff, eoff - soff, ops_buffer);
+                    err = PrepareOps(work, op_kind, saddr, eaddr - saddr, ops_buffer);
                     if (err != ERROR_SUCCESS) break;
                 }
 
@@ -252,8 +253,8 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
 
     if (work.num_completed == work.ops.size())
     {
-        // all done immediately
         if (op_kind == READ_CHUNK) memcpy(ctx_buffer, work.ops[0].buffer, service_.MaxTransferLength());
+        // read all done immediately
         return ERROR_SUCCESS;
     }
 
@@ -285,6 +286,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
 
 DWORD ChunkDiskWorker::GetBuffer(Pages& buffer)
 {
+    // buffers_ used by the dispatcher and the worker thread
     auto g = SRWLockGuard(lock_buffers_.get(), true);
 
     if (buffers_.empty())
@@ -317,7 +319,9 @@ DWORD ChunkDiskWorker::ReturnBuffer(Pages buffer)
 
     try
     {
+        // buffers_ used by the dispatcher and the worker thread
         auto g = SRWLockGuard(lock_buffers_.get(), true);
+        // LIFO order
         buffers_.emplace_front(std::move(buffer));
     }
     catch (const bad_alloc&)
@@ -329,6 +333,7 @@ DWORD ChunkDiskWorker::ReturnBuffer(Pages buffer)
 
 DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_out)
 {
+    // chunk_handles_ used by the dispatcher and the worker thread
     auto g = SRWLockGuard(lock_handles_.get(), true);
 
     auto it = chunk_handles_.find(chunk_idx);
@@ -339,7 +344,9 @@ DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_ou
 
         if (cfh.pending)
         {
-            // chunk was unmapped, update CreateChunk() result
+            // chunk was unmapped, refresh chunk state
+            // update CreateChunk() result
+            // fix chunk size when unmap then write
             auto h = FileHandle();
             auto err = service_.CreateChunk(chunk_idx, h, is_write, true);
             if (err != ERROR_SUCCESS) return err;
@@ -350,8 +357,7 @@ DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_ou
             }
             else
             {
-                // REFRESH_CHUNK done
-                // chunk reopened, reuse handles
+                // REFRESH_CHUNK done, continue reusing handles
                 cfh.pending = false;
             }
         }
@@ -430,6 +436,7 @@ DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_ou
 
 DWORD ChunkDiskWorker::CloseChunk(u64 chunk_idx)
 {
+    // chunk_handles_ used by the dispatcher and the worker thread
     auto g = SRWLockGuard(lock_handles_.get(), true);
 
     auto it = chunk_handles_.find(chunk_idx);
@@ -437,6 +444,7 @@ DWORD ChunkDiskWorker::CloseChunk(u64 chunk_idx)
 
     auto& cfh = (*it).second;
     --cfh.refs;
+    // handles closed in OpenChunk() or IdleWork()
 
     if (cfh.pending && cfh.refs == 0)
     {
@@ -447,7 +455,7 @@ DWORD ChunkDiskWorker::CloseChunk(u64 chunk_idx)
             service_.CreateChunk(chunk_idx, h, false, true);
         }
         // REFRESH_CHUNK done
-        // chunk was unmapped, handles are not necessary
+        // chunk was unmapped, handles are not used anymore
         chunk_handles_.erase(it);
     }
 
@@ -456,12 +464,13 @@ DWORD ChunkDiskWorker::CloseChunk(u64 chunk_idx)
 
 DWORD ChunkDiskWorker::RefreshChunk(u64 chunk_idx)
 {
+    // chunk_handles_ used by the dispatcher and the worker thread
     auto g = SRWLockGuard(lock_handles_.get(), true);
 
     auto it = chunk_handles_.find(chunk_idx);
     if (it == chunk_handles_.end()) return ERROR_NOT_FOUND;
 
-    // chunk has been unmapped, cancel pending I/O requests
+    // chunk has been unmapped, cancel pending I/O operations
     auto& cfh = (*it).second;
     if (cfh.handle_ro) CancelIo(cfh.handle_ro.get());
     if (cfh.handle_rw) CancelIo(cfh.handle_rw.get());
@@ -604,6 +613,7 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
     }
     else if (buffer == nullptr && r.start_idx != r.end_idx)
     {
+        // align to the next page
         auto file_off = LONGLONG(params.PageBytes(r.start_idx));
         auto err = DWORD(ERROR_SUCCESS);
 
@@ -732,7 +742,7 @@ DWORD ChunkDiskWorker::PostRefreshChunk(u64 chunk_idx)
             continue;
         }
 
-        err1 = worker->PostMsg(std::move(msg));
+        err1 = worker->PostMsg(std::move(msg)); // invalidates ChunkOpState::owner
         if (err1 != ERROR_IO_PENDING) err = err1;
     }
 
@@ -750,7 +760,7 @@ void ChunkDiskWorker::DoWorks()
     auto bytes_transferred = DWORD();
     auto ckey = u64();
     auto* overlapped = (OVERLAPPED*)(nullptr);
-    auto next_timeout = DWORD(INFINITE);   // no resource to be freed at first
+    auto next_timeout = DWORD(INFINITE);   // no resource to be freed at start
 
     while (true)
     {
@@ -818,7 +828,7 @@ void ChunkDiskWorker::PostOp(ChunkOpState& state)
     }
     else if (kind == REFRESH_CHUNK)
     {
-        // one-way notification, no response
+        // no response to the sender
         RefreshChunk(state.idx);
 
         // no actual I/O, simulate it
@@ -834,12 +844,13 @@ void ChunkDiskWorker::PostOp(ChunkOpState& state)
     }
 
     // CK_IO sent if ERROR_SUCCESS
-    // will be retried if ERROR_BUSY
+    // will be retried by FreePageAsync() if ERROR_BUSY
     if (err == ERROR_SUCCESS || err == ERROR_BUSY) return;
 
     ReportOpResult(state, err);
 
-    // state will be reviewed after STANDBY_MS if this fails
+    // avoid recursive lock_working_
+    // state will be reviewed after STANDBY_MS or in StopWorks() if this fails
     PostQueuedCompletionStatus(iocp_.get(), 0, CK_FAIL, &state.ovl);
 }
 
@@ -1060,12 +1071,14 @@ DWORD ChunkDiskWorker::PostReadChunk(ChunkOpState& state)
         auto bytes_read = DWORD();
         err = ReadFile(h, state.buffer, DWORD(length_bytes), &bytes_read, &state.ovl)
             ? ERROR_SUCCESS : GetLastError();
+
         if (err != ERROR_SUCCESS && err != ERROR_IO_PENDING)
         {
             auto file_size = LARGE_INTEGER();
             if (err == ERROR_HANDLE_EOF && bytes_read == 0
                 && GetFileSizeEx(h, &file_size) && file_size.QuadPart == 0)
             {
+                // handle synchronous EOF when unmap then read
                 // simulate ReadFile()
                 err = PostQueuedCompletionStatus(iocp_.get(), length_bytes, CK_IO, &state.ovl)
                     ? ERROR_SUCCESS : GetLastError();
@@ -1164,9 +1177,9 @@ void ChunkDiskWorker::CompleteChunkOp(ChunkOpState& state, DWORD error, DWORD by
 DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
 {
     auto& params = service_.params;
-    // we always lock because
+    // always lock page because
     // READ_PAGE: PeekPage() was called in PreparePageOps()
-    // WRITE_PAGE_PARTIAL: we need to lock first
+    // WRITE_PAGE_PARTIAL: write followed by read, lock required
     auto page = LockPageAsync(state, state.idx);
     if (page.error != ERROR_SUCCESS) return page.error;
 
@@ -1187,6 +1200,7 @@ DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
                 if (err == ERROR_HANDLE_EOF && bytes_read == 0
                     && GetFileSizeEx(h, &file_size) && file_size.QuadPart == 0)
                 {
+                    // handle synchronous EOF when unmap then read
                     // simulate ReadFile()
                     err = PostQueuedCompletionStatus(iocp_.get(), u32(params.PageBytes(1)), CK_IO, &state.ovl)
                         ? ERROR_SUCCESS : GetLastError();
@@ -1209,6 +1223,7 @@ DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
     }
 
     // page.is_hit || h == INVALID_HANDLE_VALUE
+    // page zero-filled when created
     // simulate ReadFile()
     // set bytes_transferred to -1 to indicate
     auto err = PostQueuedCompletionStatus(
