@@ -1243,7 +1243,7 @@ DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
         ? ERROR_SUCCESS : GetLastError();
     if (err != ERROR_SUCCESS)
     {
-        FreePageAsync(state, state.idx, true);
+        FreePageAsync(state, state.idx, false);
         return err;
     }
     return ERROR_SUCCESS;
