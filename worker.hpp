@@ -240,6 +240,9 @@ private:
     // ChunkDiskService::FlushPages() and wait for a busy page
     DWORD FlushPagesAsync(ChunkOpState& state, const PageRange& r);
 
+    // handle asynchronous EOF when unmap then read
+    DWORD CheckAsyncEOF(ChunkOpState& state);
+
     DWORD PostReadChunk(ChunkOpState& state);
 
     // zero-fill if buffer is nullptr
