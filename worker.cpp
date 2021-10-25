@@ -17,6 +17,12 @@ static constexpr auto STANDBY_MS = u32(60000);
 static constexpr auto MAX_QD = u32(32);    // QD32
 static constexpr auto STOP_TIMEOUT_MS = u32(5000);
 
+// Thread-safety notes
+//
+// * Public functions are called only from the dispatcher thread.
+// * ChunkWork and ChunkOpState instances are used only by the worker thread after they are dequeued.
+// * PostMsg() is called by other worker threads.
+
 DWORD ChunkDiskWorker::Start()
 {
     if (IsRunning()) return ERROR_INVALID_STATE;
@@ -143,7 +149,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
     if (!IsRunning()) return ERROR_INVALID_STATE;
 
     // check queue depth
-    // single dispatcher, no more works to be queued
+    // single dispatcher, no more works to be queued from it
     {
         auto g = SRWLockGuard(lock_working_.get(), false);
         if (working_.size() >= MAX_QD) return ERROR_BUSY;
@@ -697,6 +703,8 @@ DWORD ChunkDiskWorker::PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_a
 
 DWORD ChunkDiskWorker::PostMsg(ChunkWork work)
 {
+    // this check is not thread-safe,
+    // it's fine because all workers start and stop in series
     if (!IsRunning()) return ERROR_INVALID_STATE;
     // ignore queue depth
 
@@ -729,6 +737,7 @@ DWORD ChunkDiskWorker::PostRefreshChunk(u64 chunk_idx)
 {
     auto err = DWORD(ERROR_IO_PENDING); // means ERROR_SUCCESS for PostMsg()
 
+    // not thread-safe but GetWorkers() does not change
     for (auto& worker : GetWorkers(service_.storage_unit))
     {
         // prepare single REFRESH_CHUNK op
@@ -746,6 +755,7 @@ DWORD ChunkDiskWorker::PostRefreshChunk(u64 chunk_idx)
         if (err1 != ERROR_IO_PENDING) err = err1;
     }
 
+    // last error
     return err;
 }
 

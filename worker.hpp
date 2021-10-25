@@ -152,7 +152,7 @@ public:
      * Return ERROR_SUCCESS when the operation is done immediately.
      * Return ERROR_IO_PENDING when some operations are processed synchronously or asynchronously.
      * Return an error with Response->Status set when an error occurred while doing immediately or starting operations.
-     * Response is sent when all operations are finished for ERROR_IO_PENDING.
+     * Response is sent when all operations are completed for ERROR_IO_PENDING.
      */
     DWORD PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, ChunkOpKind op_kind, u64 block_addr, u32 count);
 
@@ -263,7 +263,7 @@ private:
 
     void CompleteWritePage(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
 
-    // operation finished, report to the owner ChunkWork
+    // operation completed, report to the owner ChunkWork
     void ReportOpResult(ChunkOpState& state, DWORD error = ERROR_SUCCESS);
 
     ChunkDiskService& service_;
