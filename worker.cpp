@@ -884,7 +884,7 @@ void ChunkDiskWorker::CompleteWork(ChunkWork& work)
     {
         // byte alignment, MAX_TRANSFER_LENGTH bytes
         auto resp_buffer = (work.ops[0].kind == READ_CHUNK || work.ops[0].kind == READ_PAGE)
-                           ? work.ops[0].buffer : nullptr;
+            ? work.ops[0].buffer : nullptr;
         ResetEvent(spd_ovl_.hEvent);
         // NOTE: storage unit shuts down if this fails
         // The dispatcher will shut down, so will the workers
@@ -923,8 +923,8 @@ DWORD ChunkDiskWorker::IdleWork()
     // enter idle mode
     auto gb = SRWLockGuard(lock_buffers_.get(), true);
     auto gh = SRWLockGuard(lock_handles_.get(), true);
-    buffers_.clear();
     chunk_handles_.clear();
+    buffers_.clear();
 
     return INFINITE;
 }
@@ -932,17 +932,18 @@ DWORD ChunkDiskWorker::IdleWork()
 void ChunkDiskWorker::StopWorks()
 {
     auto gw = SRWLockGuard(lock_working_.get(), true);
+    auto abort_op = [this](ChunkOpState& state)
+    {
+        ReportOpResult(state, ERROR_OPERATION_ABORTED);
+        if (state.owner->num_completed == state.owner->ops.size()) CompleteWork(*state.owner);
+    };
 
     // cancel ops waiting for a page
     for (auto& work : working_)
     {
         for (auto& op : work.ops)
         {
-            if (op.next != nullptr)
-            {
-                ReportOpResult(*op.next, ERROR_OPERATION_ABORTED);
-                PostQueuedCompletionStatus(iocp_.get(), 0, CK_FAIL, &op.next->ovl);
-            }
+            if (op.next != nullptr) abort_op(*op.next);
         }
     }
 
@@ -971,9 +972,17 @@ void ChunkDiskWorker::StopWorks()
         if (ckey == CK_POST)
         {
             auto& work = *recast<ChunkWork*>(overlapped);
-            if (work.ops[0].kind == REFRESH_CHUNK)
+
+            for (auto& op : work.ops)
             {
-                for (auto& op : work.ops) PostOp(op);
+                if (op.kind == REFRESH_CHUNK)
+                {
+                    // shortcut without PostQueuedCompletionStatus()
+                    RefreshChunk(op.idx);
+                    ReportOpResult(op);
+                    // the following ReportOpResult() ignored
+                }
+                abort_op(op);
             }
         }
         else if (ckey == CK_IO || ckey == CK_FAIL)
@@ -983,16 +992,32 @@ void ChunkDiskWorker::StopWorks()
             {
                 if (state.kind == WRITE_PAGE_PARTIAL && state.step == OP_READY)
                 {
-                    // forcefully abort PostOp()
-                    state.kind = WRITE_PAGE;
-                    bytes_transferred = 0;
+                    // block OP_READ_PAGE
+                    CompleteOp(state, ERROR_OPERATION_ABORTED, bytes_transferred);
                 }
-                CompleteOp(state, err, bytes_transferred);
+                else
+                {
+                    CompleteOp(state, err, bytes_transferred);
+                }
             }
-
             if (state.owner->num_completed == state.owner->ops.size()) CompleteWork(*state.owner);
         }
         // ignore ckey == CK_STOP
+    }
+    for (auto it = working_.begin(); it != working_.end();)
+    {
+        // in case where posting CK_FAIL was failed somehow
+        if (it->num_completed != it->ops.size())
+        {
+            ++it;
+        }
+        else
+        {
+            auto it_next = it;
+            ++it_next;
+            CompleteWork(*it);
+            it = it_next;
+        }
     }
 
     auto gb = SRWLockGuard(lock_buffers_.get(), true);
