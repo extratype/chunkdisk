@@ -268,7 +268,7 @@ PageResult ChunkDiskService::PeekPage(u64 page_idx)
     if (it == cached_pages_.end()) return PageResult{ERROR_NOT_FOUND};
 
     auto* entry = &((*it).second);
-    if (entry->owner == GetCurrentThreadId()) return PageResult{ERROR_BUSY};
+    if (entry->owner == GetCurrentThreadId()) return PageResult{ERROR_LOCK_FAILED};
     return PageResult{
         ERROR_SUCCESS,
         true,
@@ -334,7 +334,7 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
                 if (entry->owner == GetCurrentThreadId())
                 {
                     return PageResult{
-                        .error = ERROR_BUSY,
+                        .error = ERROR_LOCK_FAILED,
                         .user = recast<void**>(entry->user.get())};
                 }
                 AcquireSRWLockExclusive(entry->lock.get());
@@ -437,11 +437,11 @@ PageResult ChunkDiskService::FlushPages(const PageRange& r)
         if (it == cached_pages_.end()) continue;
 
         auto err = RemovePageEntry(g, it);
-        if (err == ERROR_BUSY)
+        if (err == ERROR_LOCK_FAILED)
         {
-            // g not reset if ERROR_BUSY
+            // g not reset if ERROR_LOCK_FAILED
             return PageResult{
-                .error = ERROR_BUSY,
+                .error = ERROR_LOCK_FAILED,
                 .user = recast<void**>((*it).second.user.get())};
         }
         else if (err != ERROR_SUCCESS)
@@ -489,7 +489,7 @@ DWORD ChunkDiskService::RemovePageEntry(SRWLockGuard& g, Map<u64, PageEntry>::it
 
     auto page_idx = (*it).first;
     auto* entry = &((*it).second);
-    if (entry->owner == GetCurrentThreadId()) return ERROR_BUSY;
+    if (entry->owner == GetCurrentThreadId()) return ERROR_LOCK_FAILED;
     auto find_entry = [this, page_idx, &it, &entry]() -> bool
     {
         it = cached_pages_.find(page_idx);

@@ -115,7 +115,7 @@ public:
 
     // set exclusive lock for updating a page
     // persistent use, empty PageResult::guard, the calling thread must FreePage() later
-    // PageResult::user valid for ERROR_SUCCESS and ERROR_BUSY
+    // PageResult::user valid for ERROR_SUCCESS and ERROR_LOCK_FAILED
     PageResult LockPage(u64 page_idx);
 
     // get LockPage() result for the thread that have called it
@@ -127,12 +127,12 @@ public:
     DWORD FreePage(u64 page_idx, bool remove = false);
 
     // remove cached pages in range
-    // ERROR_BUSY and PageResult::user returned if one of them is locked by the current thread
+    // ERROR_LOCK_FAILED and PageResult::user returned if one of them is locked by the current thread
     PageResult FlushPages(const PageRange& r);
 
     // try to remove all cached pages
     // skip pages locked by the current thread
-    // return ERROR_BUSY if there's one
+    // return ERROR_LOCK_FAILED if there's one
     DWORD FlushPages();
 
     const ChunkDiskParams params;
@@ -148,7 +148,7 @@ public:
 private:
     // g: lock_pages_, shared
     // it: from cached_pages_ while holding g
-    // ERROR_BUSY if it is locked by the current thread
+    // ERROR_LOCK_FAILED if it is locked by the current thread
     // g temporaily reset otherwise, iterators may be invalidated
     DWORD RemovePageEntry(SRWLockGuard& g, Map<u64, PageEntry>::iterator it);
 

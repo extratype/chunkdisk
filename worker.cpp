@@ -855,8 +855,8 @@ DWORD ChunkDiskWorker::PostOp(ChunkOpState& state)
     }
 
     // CK_IO sent if ERROR_SUCCESS
-    // will be retried by FreePageAsync() if ERROR_BUSY
-    if (err == ERROR_SUCCESS || err == ERROR_BUSY) return ERROR_SUCCESS;
+    // will be retried by FreePageAsync() if ERROR_LOCK_FAILED
+    if (err == ERROR_SUCCESS || err == ERROR_LOCK_FAILED) return ERROR_SUCCESS;
 
     ReportOpResult(state, err);
     return err;
@@ -1043,7 +1043,7 @@ PageResult ChunkDiskWorker::LockPageAsync(ChunkOpState& state, u64 page_idx)
     {
         *page.user = &state;    // state in ChunkWork::ops in working_
     }
-    else if (page.error == ERROR_BUSY)
+    else if (page.error == ERROR_LOCK_FAILED)
     {
         auto* cur = recast<ChunkOpState*>(*page.user);
         for (; cur->next != nullptr; cur = cur->next) {}
@@ -1077,12 +1077,12 @@ DWORD ChunkDiskWorker::FlushPagesAsync(ChunkOpState& state, const PageRange& r)
 {
     auto page = service_.FlushPages(r);
     if (page.error == ERROR_SUCCESS) return ERROR_SUCCESS;
-    if (page.error != ERROR_BUSY) return page.error;
+    if (page.error != ERROR_LOCK_FAILED) return page.error;
 
     auto* cur = recast<ChunkOpState*>(*page.user);
     for (; cur->next != nullptr; cur = cur->next) {}
     cur->next = &state;
-    return ERROR_BUSY;
+    return ERROR_LOCK_FAILED;
 }
 
 DWORD ChunkDiskWorker::CheckAsyncEOF(ChunkOpState& state)
