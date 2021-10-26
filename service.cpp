@@ -369,7 +369,7 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
                     InitializeSRWLock(lock.get());
                     AcquireSRWLockExclusive(lock.get());
 
-                    entry = &((*(cached_pages_.emplace(page_idx).first)).second);
+                    entry = &((*(cached_pages_.try_emplace(page_idx).first)).second);
                     entry->lock = std::move(lock);
                     entry->owner = GetCurrentThreadId();
                     entry->ptr = std::move(ptr);

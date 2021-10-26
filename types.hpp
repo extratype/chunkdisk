@@ -85,7 +85,7 @@ public:
         }
 
     private:
-        friend struct Map;
+        friend class Map;
 
         std::unordered_map<KT, VIt>* map_ = nullptr;
         typename std::unordered_map<KT, VIt>::iterator it_;

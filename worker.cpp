@@ -418,7 +418,7 @@ DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_ou
 
         try
         {
-            it = chunk_handles_.emplace(chunk_idx).first;
+            it = chunk_handles_.try_emplace(chunk_idx).first;
         }
         catch (const bad_alloc&)
         {
