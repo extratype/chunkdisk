@@ -703,6 +703,8 @@ DWORD ChunkDiskWorker::PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_a
 
 DWORD ChunkDiskWorker::PostMsg(ChunkWork work)
 {
+    if (work.ops.empty()) return ERROR_INVALID_PARAMETER;
+
     // this check is not thread-safe,
     // it's fine because all workers start and stop in batch
     if (!IsRunning()) return ERROR_INVALID_STATE;
@@ -940,7 +942,11 @@ void ChunkDiskWorker::StopWorks()
     {
         for (auto& op : work.ops)
         {
-            if (op.next != nullptr) ReportOpResult(*op.next, ERROR_OPERATION_ABORTED);
+            if (op.next != nullptr)
+            {
+                ReportOpResult(*op.next, ERROR_OPERATION_ABORTED);
+                op.next = nullptr;
+            }
         }
     }
     if (!working_.empty())
@@ -1013,11 +1019,8 @@ void ChunkDiskWorker::StopWorks()
         auto* work = &*working_.begin();
         while (work != nullptr)
         {
-            for (auto& op : work->ops)
-            {
-                ReportOpResult(op, ERROR_OPERATION_ABORTED);
-                if (CompleteWork(op.owner, &work)) break;
-            }
+            for (auto& op : work->ops) ReportOpResult(op, ERROR_OPERATION_ABORTED);
+            if (CompleteWork(work, &work)) break;
         }
     }
 
