@@ -346,6 +346,7 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
                     entry->ptr.get(),
                     recast<void**>(entry->user.get())};
 
+                g.reset();
                 g.reset(SRWLockGuard(lock_pages_.get(), true));
                 // entry locked but may be moved
                 cached_pages_.reinsert_back(cached_pages_.find(page_idx));
@@ -382,6 +383,7 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
                         recast<void**>(entry->user.get())};
 
                     // entry locked but may be moved
+                    g.reset();
                     g.reset(SRWLockGuard(lock_pages_.get(), false));
                     trim_pages();
                     return result;
@@ -393,6 +395,7 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
             }
         }
         // double check
+        g.reset();
         g.reset(SRWLockGuard(lock_pages_.get(), !g.is_exclusive()));
     }
 }
@@ -519,11 +522,13 @@ DWORD ChunkDiskService::RemovePageEntry(SRWLockGuard& g, Map<u64, PageEntry>::it
                 ReleaseSRWLockExclusive(lock.get());
                 lock.reset();
 
+                g.reset();
                 g.reset(SRWLockGuard(lock_pages_.get(), false));
                 return ERROR_SUCCESS;
             }
         }
         // double check
+        g.reset();
         g.reset(SRWLockGuard(lock_pages_.get(), !g.is_exclusive()));
         if (!find_entry()) return ERROR_SUCCESS;
     }

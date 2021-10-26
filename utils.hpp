@@ -58,6 +58,7 @@ public:
     }
 
     // release *this and take the ownership of other
+    // NOTE: reset() before resetting with the same lock
     void reset(SRWLockGuard&& other) { swap(*this, other); }
 
 protected:
