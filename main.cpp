@@ -32,7 +32,7 @@ static constexpr auto PAGE_SIZE = u32(4096);
 static constexpr auto MAX_TRANSFER_LENGTH = u32(64 * 1024);
 
 // maximum number of cached pages (write through)
-static constexpr auto MAX_PAGES = u32(1024);
+static constexpr auto MAX_PAGES = u32(2048);
 
 // maximum operating bytes expected per worker
 static constexpr auto WORKER_CAPACITY = u32(1024 * 1024);
