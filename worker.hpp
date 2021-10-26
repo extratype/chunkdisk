@@ -160,7 +160,6 @@ private:
     enum IOCPKey
     {
         CK_IO = 0,      // completed file I/O
-        CK_FAIL,        // failed to initiate file I/O
         CK_POST,        // disk I/O request from PostWork()
         CK_STOP         // cancel pending I/O ops and stop DoWorks()
     };
@@ -214,16 +213,16 @@ private:
 
     // initiate async I/O
     // post CK_IO (I/O result may be an error)
-    // post CK_FAIL if failed
-    void PostOp(ChunkOpState& state);
+    // ReportOpResult() if failed synchronously
+    DWORD PostOp(ChunkOpState& state);
 
     // check async I/O result, completed either synchronously or asynchronously
     // ReportOpResult() or next step
-    void CompleteOp(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
+    void CompleteIO(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
 
-    // send response and close work
-    // exclusive lock_working_ required
-    void CompleteWork(ChunkWork& work);
+    // check if work is completed, send response and close work
+    // lock required if next != nullptr
+    bool CompleteWork(ChunkWork* work, ChunkWork** next = nullptr);
 
     // enter idle mode, free buffers and handles
     DWORD IdleWork();
