@@ -223,7 +223,8 @@ private:
     // lock required if next != nullptr
     bool CompleteWork(ChunkWork* work, ChunkWork** next = nullptr);
 
-    // enter idle mode, free buffers and handles
+    // enter idle mode, free resources
+    // resources may not be freed if operations are always processed immediately
     DWORD IdleWork();
 
     // cancel all requests to exit the worker thread

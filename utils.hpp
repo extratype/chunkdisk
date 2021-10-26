@@ -23,6 +23,8 @@ DWORD ConvertUTF8(const u8* text, int size, std::wstring& result);
 // match to SpdStorageUnitStartDispatcher() behavior
 DWORD GetThreadCount(PDWORD ThreadCount);
 
+u64 GetSystemFileTime();
+
 // like lock_guard<SRWLOCK>
 // can be reset
 // NOTE: it's a programming error to try to acquire an SRW lock recursively.

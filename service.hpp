@@ -145,6 +145,11 @@ public:
     // may exceed temporarily when pages are being used for I/O
     const u32 max_pages;
 
+    // atomic in x86-64
+    u64 GetPostFileTime() const { return post_ft_; }
+
+    void SetPostFileTime(u64 ft) { post_ft_ = ft; }
+
 private:
     // g: lock_pages_, shared
     // it: from cached_pages_ while holding g
@@ -166,6 +171,8 @@ private:
     // read cache, write through
     // add to back, evict from front
     Map<u64, PageEntry> cached_pages_;
+
+    u64 post_ft_ = 0;
 };
 
 }

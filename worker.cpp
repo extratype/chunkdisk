@@ -927,10 +927,12 @@ DWORD ChunkDiskWorker::IdleWork()
 {
     if (!working_.empty()) return STANDBY_MS;
 
+    auto disk_idle = (GetSystemFileTime() >= service_.GetPostFileTime() + STANDBY_MS * 10000);
     auto gb = SRWLockGuard(lock_buffers_.get(), true);
     auto gh = SRWLockGuard(lock_handles_.get(), true);
     chunk_handles_.clear();
     buffers_.clear();
+    if (disk_idle) service_.FlushPages();
     return INFINITE;
 }
 

@@ -19,8 +19,6 @@ using std::vector;
 
 namespace fs = std::filesystem;
 
-// FIXME docs
-
 namespace chunkdisk
 {
 
@@ -168,10 +166,12 @@ BOOLEAN PostWork(SPD_STORAGE_UNIT* StorageUnit, ChunkOpKind op_kind, u64 block_a
         if (count) block_addr = descs[0].BlockAddress;
     }
 
-    // FIXME comment (parallelism)
-    auto err = [StorageUnit, op_kind, block_addr, count, context]() -> DWORD
+    // schedule requests, see docs/asyncio.txt
+    auto* cdisk = StorageUnitChunkDisk(StorageUnit);
+    auto post_ft = GetSystemFileTime();
+
+    auto err = [cdisk, op_kind, block_addr, count, context]() -> DWORD
     {
-        auto* cdisk = StorageUnitChunkDisk(StorageUnit);
         auto& workers = cdisk->workers;
         // choose worker based on address
         auto start = (block_addr / cdisk->service.params.ByteBlock(WORKER_CAPACITY).first) % (workers.size());
@@ -191,11 +191,15 @@ BOOLEAN PostWork(SPD_STORAGE_UNIT* StorageUnit, ChunkOpKind op_kind, u64 block_a
         workers[start]->Wait();
         return workers[start]->PostWork(context, op_kind, block_addr, count);
     }();
+    if (err == ERROR_IO_PENDING) cdisk->service.SetPostFileTime(post_ft);
 
-    if (err == ERROR_INVALID_STATE || err == ERROR_BUSY)
+    if (err != ERROR_IO_PENDING && err != ERROR_SUCCESS)
     {
-        // FIXME shutdown
-        SetScsiError(&context->Response->Status, SCSI_SENSE_HARDWARE_ERROR, SCSI_ADSENSE_NO_SENSE);
+        auto& status = context->Response->Status;
+        if (status.ScsiStatus == SCSISTAT_GOOD)
+        {
+            SetScsiError(&status, SCSI_SENSE_HARDWARE_ERROR, SCSI_ADSENSE_NO_SENSE);
+        }
     }
     return (err == ERROR_IO_PENDING) ? FALSE : TRUE;
 }
@@ -219,6 +223,7 @@ BOOLEAN Write(SPD_STORAGE_UNIT* StorageUnit,
     return PostWork(StorageUnit, WRITE_CHUNK, BlockAddress, BlockCount);
 }
 
+// Flush(0, 0) requested at exit
 BOOLEAN Flush(SPD_STORAGE_UNIT* StorageUnit,
                      UINT64 BlockAddress, UINT32 BlockCount,
                      SPD_STORAGE_UNIT_STATUS* Status)
@@ -226,11 +231,8 @@ BOOLEAN Flush(SPD_STORAGE_UNIT* StorageUnit,
     SpdWarnOnce(!StorageUnit->StorageUnitParams.WriteProtected);
     SpdWarnOnce(StorageUnit->StorageUnitParams.CacheSupported);
 
-    // release memory resources
-    // requested at exit
-    if (BlockAddress == 0 && BlockCount == 0) StorageUnitChunkDisk(StorageUnit)->service.FlushPages();
-
     // unbuffered, pages write through, nothing to flush
+    // metadata flushed when handles are closed in ChunkDiskWorker::IdleWork()
     return TRUE;
 }
 

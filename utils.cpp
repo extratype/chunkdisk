@@ -45,6 +45,12 @@ DWORD GetThreadCount(PDWORD ThreadCount)
     return ERROR_SUCCESS;
 }
 
+u64 GetSystemFileTime()
+{
+    u64 ft;
+    GetSystemTimeAsFileTime(recast<LPFILETIME>(&ft));
+    return ft;
+}
 
 void SetScsiError(SPD_IOCTL_STORAGE_UNIT_STATUS* status, u8 sense_key, u8 asc)
 {
