@@ -44,7 +44,7 @@ struct ChunkOpState;
 // single Read(), Write() or Unmap() request
 struct ChunkWork
 {
-    std::vector<ChunkOpState> ops;
+    std::vector<ChunkOpState> ops;              // must not be empty
     Pages buffer;
     std::list<ChunkWork>::iterator it = {};     // from ChunkDiskWorker::working_
     u32 num_completed = 0;                      // work finished when num_completed == ops.size()
@@ -211,16 +211,15 @@ private:
     // event loop of the worker thread
     void DoWorks();
 
-    // initiate async I/O
-    // post CK_IO (I/O result may be an error)
-    // ReportOpResult() if failed synchronously
+    // initiate async I/O to post CK_IO to IOCP
+    // ReportOpResult() if failed synchronously, return error code
     DWORD PostOp(ChunkOpState& state);
 
-    // check async I/O result, completed either synchronously or asynchronously
-    // ReportOpResult() or next step
+    // check async I/O result
+    // ReportOpResult() if completed or next step
     void CompleteIO(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
 
-    // check if work is completed, send response and close work
+    // check if all ops are completed, send response and remove work
     // lock required if next != nullptr
     bool CompleteWork(ChunkWork* work, ChunkWork** next = nullptr);
 

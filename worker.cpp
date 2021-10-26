@@ -704,7 +704,7 @@ DWORD ChunkDiskWorker::PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_a
 DWORD ChunkDiskWorker::PostMsg(ChunkWork work)
 {
     // this check is not thread-safe,
-    // it's fine because all workers start and stop in series
+    // it's fine because all workers start and stop in batch
     if (!IsRunning()) return ERROR_INVALID_STATE;
     // ignore queue depth
 
@@ -1131,6 +1131,7 @@ DWORD ChunkDiskWorker::PostReadChunk(ChunkOpState& state)
             {
                 // handle synchronous EOF when unmap then read
                 // simulate ReadFile()
+                // buffer already zero-filled
                 err = PostQueuedCompletionStatus(iocp_.get(), length_bytes, CK_IO, &state.ovl)
                     ? ERROR_SUCCESS : GetLastError();
                 if (err != ERROR_SUCCESS)
@@ -1208,7 +1209,7 @@ void ChunkDiskWorker::CompleteChunkOp(ChunkOpState& state, DWORD error, DWORD by
     {
         if (CheckAsyncEOF(state) == ERROR_SUCCESS) error = ERROR_SUCCESS;
     }
-    if (state.kind != READ_CHUNK || bytes_transferred != u32(-1)) CloseChunk(state.idx);
+    if (!(state.kind == READ_CHUNK && bytes_transferred == u32(-1))) CloseChunk(state.idx);
     ReportOpResult(state, error);
 }
 
@@ -1235,7 +1236,8 @@ DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
         if (h != INVALID_HANDLE_VALUE)
         {
             auto bytes_read = DWORD();
-            err = ReadFile(h, page.ptr, u32(params.PageBytes(1)), &bytes_read, &state.ovl) ? ERROR_SUCCESS : GetLastError();
+            err = ReadFile(h, page.ptr, u32(params.PageBytes(1)), &bytes_read, &state.ovl)
+                ? ERROR_SUCCESS : GetLastError();
             if (err != ERROR_SUCCESS && err != ERROR_IO_PENDING)
             {
                 auto file_size = LARGE_INTEGER();
@@ -1244,8 +1246,10 @@ DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
                 {
                     // handle synchronous EOF when unmap then read
                     // simulate ReadFile()
-                    err = PostQueuedCompletionStatus(iocp_.get(), u32(params.PageBytes(1)), CK_IO, &state.ovl)
-                        ? ERROR_SUCCESS : GetLastError();
+                    // page already zero-filled
+                    err = PostQueuedCompletionStatus(
+                        iocp_.get(), u32(params.PageBytes(1)),
+                        CK_IO, &state.ovl) ? ERROR_SUCCESS : GetLastError();
                     if (err != ERROR_SUCCESS)
                     {
                         CloseChunk(chunk_idx);
@@ -1265,9 +1269,9 @@ DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
     }
 
     // page.is_hit || h == INVALID_HANDLE_VALUE
-    // page zero-filled when created
     // simulate ReadFile()
     // set bytes_transferred to -1 to indicate
+    // page already zero-filled
     auto err = PostQueuedCompletionStatus(
         iocp_.get(), u32(-1), CK_IO, &state.ovl)
         ? ERROR_SUCCESS : GetLastError();
