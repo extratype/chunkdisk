@@ -23,6 +23,7 @@ DWORD ChunkDiskService::Start()
         // make class movable
         lock_parts_ = std::make_unique<SRWLOCK>();
         lock_pages_ = std::make_unique<SRWLOCK>();
+        lock_unmapped_ = std::make_unique<SRWLOCK>();
     }
     catch (const bad_alloc&)
     {
@@ -31,6 +32,7 @@ DWORD ChunkDiskService::Start()
 
     InitializeSRWLock(lock_parts_.get());
     InitializeSRWLock(lock_pages_.get());
+    InitializeSRWLock(lock_unmapped_.get());
 
     auto err = DWORD(ERROR_SUCCESS);
 
@@ -532,6 +534,83 @@ DWORD ChunkDiskService::RemovePageEntry(SRWLockGuard& g, Map<u64, PageEntry>::it
         g.reset(SRWLockGuard(lock_pages_.get(), !g.is_exclusive()));
         if (!find_entry()) return ERROR_SUCCESS;
     }
+}
+
+void ChunkDiskService::InvalidateUnmapRanges(u64 chunk_idx)
+{
+    auto g = SRWLockGuard(lock_unmapped_.get(), false);
+    if (chunk_unmapped_.empty()) return;
+    if (chunk_unmapped_.find(chunk_idx) == chunk_unmapped_.end()) return;
+
+    g.reset();
+    g.reset(SRWLockGuard(lock_unmapped_.get(), true));
+    auto it = chunk_unmapped_.find(chunk_idx);
+    if (it == chunk_unmapped_.end()) return;
+    chunk_unmapped_.erase(it);
+}
+
+void ChunkDiskService::InvalidateUnmapRanges()
+{
+    auto g = SRWLockGuard(lock_unmapped_.get(), true);
+    chunk_unmapped_.clear();
+}
+
+// FIXME atomic: check range, unmap if whole
+DWORD ChunkDiskService::AddUnmapRange(u64 chunk_idx, u64 start_off, u64 end_off)
+{
+    if (start_off >= end_off) return ERROR_SUCCESS;
+    if (end_off > params.chunk_length) return ERROR_INVALID_PARAMETER;
+
+    auto g = SRWLockGuard(lock_unmapped_.get(), true);
+    auto& ranges = chunk_unmapped_.try_emplace(chunk_idx).first->second;
+
+    auto start = ranges.upper_bound(start_off); // start_off < start->first
+    auto end = ranges.upper_bound(end_off);     // end_off < end->first
+    auto new_start = (start == ranges.begin());
+
+    if (!new_start)
+    {
+        --start;
+        // check overlap on the left
+        if (start_off <= start->second)
+        {
+            start->second = max(start->second, end_off);
+        }
+        else
+        {
+            new_start = true;
+        }
+    }
+    if (new_start)
+    {
+        try
+        {
+            start = ranges.emplace(start_off, end_off).first;
+        }
+        catch (const bad_alloc&)
+        {
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+    }
+
+    auto it = start;
+    for (++it; it != end; ++it)
+    {
+        if (it->second > end_off) break;
+    }
+    ranges.erase(std::next(start), it);
+
+    if (it != ranges.end())
+    {
+        // check overlap on the right
+        if (it->first <= start->second)
+        {
+            start->second = max(start->second, it->second);
+            ranges.erase(it);
+        }
+    }
+
+    return ERROR_SUCCESS;
 }
 
 }

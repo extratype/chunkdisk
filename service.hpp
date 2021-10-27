@@ -10,6 +10,7 @@
 #define CHUNKDISK_SERVICE_HPP_
 
 #include <vector>
+#include <map>
 #include <unordered_map>
 #include "utils.hpp"
 #include "params.hpp"
@@ -145,6 +146,13 @@ public:
     // may exceed temporarily when pages are being used for I/O
     const u32 max_pages;
 
+    void InvalidateUnmapRanges(u64 chunk_idx);
+
+    void InvalidateUnmapRanges();
+
+    // mark [start_off, end_off) unmapped
+    DWORD AddUnmapRange(u64 chunk_idx, u64 start_off, u64 end_off);
+
     // atomic in x86-64
     u64 GetPostFileTime() const { return post_ft_; }
 
@@ -171,6 +179,10 @@ private:
     // read cache, write through
     // add to back, evict from front
     Map<u64, PageEntry> cached_pages_;
+
+    std::unique_ptr<SRWLOCK> lock_unmapped_;
+    // chunk index -> [start_off, end_off)
+    std::unordered_map<u64, std::map<u64, u64>> chunk_unmapped_;
 
     u64 post_ft_ = 0;
 };
