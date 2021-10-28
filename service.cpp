@@ -11,6 +11,7 @@
 namespace fs = std::filesystem;
 
 using std::bad_alloc;
+using std::make_unique;
 using std::unordered_map;
 
 namespace chunkdisk
@@ -21,9 +22,9 @@ DWORD ChunkDiskService::Start()
     try
     {
         // make class movable
-        lock_parts_ = std::make_unique<SRWLOCK>();
-        lock_pages_ = std::make_unique<SRWLOCK>();
-        lock_unmapped_ = std::make_unique<SRWLOCK>();
+        lock_parts_ = make_unique<SRWLOCK>();
+        lock_pages_ = make_unique<SRWLOCK>();
+        lock_unmapped_ = make_unique<SRWLOCK>();
     }
     catch (const bad_alloc&)
     {
@@ -109,7 +110,11 @@ DWORD ChunkDiskService::Start()
 
                     auto* endp = PWSTR();
                     auto idx = wcstoull(fname.data() + 5, &endp, 10);
-                    if (fname.data() + 5 == endp || *endp != L'\0' || errno == ERANGE || idx >= params.chunk_count) continue;
+                    if (fname.data() + 5 == endp || *endp != L'\0'
+                        || errno == ERANGE || idx >= params.chunk_count)
+                    {
+                        continue;
+                    }
 
                     if (!chunk_parts.emplace(idx, i).second) return ERROR_FILE_EXISTS;
                     if (++part_current[i] > params.part_max[i]) return ERROR_PARAMETER_QUOTA_EXCEEDED;
@@ -218,7 +223,10 @@ DWORD ChunkDiskService::CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool 
             else
             {
                 if (file_size.QuadPart > chunk_bytes) return ERROR_INCORRECT_SIZE;
-                if (!fix_size && file_size.QuadPart != 0 && file_size.QuadPart != chunk_bytes) return ERROR_INCORRECT_SIZE;
+                if (!fix_size && file_size.QuadPart != 0 && file_size.QuadPart != chunk_bytes)
+                {
+                    return ERROR_INCORRECT_SIZE;
+                }
 
                 if ((is_write && file_size.QuadPart == 0) ||
                     (fix_size && file_size.QuadPart != 0 && file_size.QuadPart != chunk_bytes))
@@ -255,8 +263,10 @@ DWORD ChunkDiskService::UnmapChunk(u64 chunk_idx)
 
     auto h = FileHandle(CreateFileW(
         path.data(),
-        GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING, nullptr));
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING, nullptr));
     if (!h) return GetLastError();
     if (!SetEndOfFile(h.get())) return GetLastError();
 
@@ -363,12 +373,12 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
                 // page miss
                 try
                 {
-                    auto user = std::make_unique<u64>();
+                    auto user = make_unique<u64>();
                     auto ptr = Pages(VirtualAlloc(nullptr, params.PageBytes(1),
                                                   MEM_COMMIT, PAGE_READWRITE));
                     if (ptr == nullptr) return PageResult{ERROR_NOT_ENOUGH_MEMORY};
 
-                    auto lock = std::make_unique<SRWLOCK>();
+                    auto lock = make_unique<SRWLOCK>();
                     InitializeSRWLock(lock.get());
                     AcquireSRWLockExclusive(lock.get());
 
