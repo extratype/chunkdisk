@@ -1,0 +1,48 @@
+File I/O:
+    simple ReadFile, WriteFile:
+        buffered, synchronous
+        easy to implement
+        inconsistent performance
+
+    memory mapping:
+        buffered, synchronous
+        best performance
+        not memory efficient
+        data lost if not flushed
+
+File metadata:
+    last modified timestamp update delayed up to 1 hour if not closed
+        FlushFileBuffers?
+            flush ALL data, not HANDLE specific
+            flush metadata
+
+FILE_FLAG_NO_BUFFERING: no caching, metadata still cached
+FILE_FLAG_WRITE_THROUGH: write through instead of write back
+FILE_FLAG_OVERLAPPED: asynchronous I/O
+
+Problems with naive synchronous implementation:
+    Sequential access requests get scattered over multiple dispatcher threads
+        Access pattern randomized
+        Bad sequential performance with HDDs
+
+    Cached twice
+        Data in virtual disk, Data in real disk
+        Inconsistent virtual disk performance
+        Windows may hang if the cache is full
+
+    No queueing
+
+Unbuffered, asynchronous I/O:
+    Best performance with cache enabled for virtual disk
+
+    No memory used for caching data for real disk
+        No need to flush cache
+
+    Requests can be queued
+        Queue sequential requests in a worker thread for better performance
+        No scattered requests with single dispatcher and multiple worker threads
+
+Performance experiments with DiskSpd:
+    DRAM: > 1M IOPS, so single dispatcher
+    SSD: parallel accesses > outstanding (queued) accesses
+    HDD: better sequential performance with queue, tune total request size

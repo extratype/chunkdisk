@@ -16,6 +16,7 @@
 namespace chunkdisk
 {
 
+// disk range in chunks
 // [start_idx, end_idx], [start_off, end_off), 0 <= start_off <= end_off <= chunk_length
 struct ChunkRange
 {
@@ -25,6 +26,7 @@ struct ChunkRange
     u64 end_off;
 };
 
+// disk range in pages
 // base_idx + [start_idx, end_idx], [start_off, end_off), 0 <= start_off <= end_off <= page_length
 struct PageRange
 {
@@ -57,17 +59,17 @@ struct ChunkDiskParams
 
     u64 ChunkBlocks(u64 count) const { return chunk_length * count; }
 
-    // in blocks
+    // block_addr, count: in blocks
     ChunkRange BlockChunkRange(u64 block_addr, u32 count) const;
 
-    // ChunkRange::start_off, ChunkRange::end_off
+    // start_off, end_off: block offsets relative to a chunk
     bool IsWholeChunk(u64 start_off, u64 end_off) const { return start_off == 0 && end_off == chunk_length; }
 
-    // start_off, end_off: block offsets relative to chunk
+    // start_off, end_off: block offsets relative to the chunk
     PageRange BlockPageRange(u64 chunk_idx, u64 start_off, u64 end_off) const;
 
-    // PageRange::start_off, PageRange::end_off
-    // also check buffer page alignment
+    // start_off, end_off: block offsets relative to a page
+    // also check buffer is aligned to pages
     bool IsWholePages(u64 start_off, u64 end_off, void* buffer = nullptr) const
     {
         return start_off == 0 && end_off == page_length &&

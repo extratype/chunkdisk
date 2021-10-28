@@ -1,54 +1,38 @@
-C++
-WinSpd
+C++, WinSpd
 
-name.chunkdisk
-    disksize
-    chunksize
-    NUM path/to/dir/prefix...
+Disk metadata file: name.chunkdisk
+    disk_size
+    chunk_size
+    num_of_chunks path/to/dir/prefix...
 
 Create chunk:
-    directory: use part from first...last
+    directory (part): choose from top to bottom
     file name: chunk###
-    chunk size: 0 or chunksize; empty or full, no deletion
+    file size: 0 or chunk_size; empty or full, no deletion
+    sparse chunk?
+        set chunk size small
+        do TRIM
 
-Read, Write:
-    chunk not found or empty: zero-fill buffer for read
-    ReadFile, WriteFile
+Read: ReadFile
+    chunk not found or empty: zero-fill buffer
+
+Write: WriteFile
 
 Unmap (a.k.a. TRIM):
     unmap range >= chunk: Truncate (Set size to 0)
     unmap range <  chunk: FSCTL_SET_ZERO_DATA
 
+Asynchronous I/O:
+    FILE_FLAG_NO_BUFFERING && FILE_FLAG_WRITE_THROUGH for best asynchronous performance
+    See asyncio.txt
 
-File I/O:
-    simple ReadFile, WriteFile:
-        buffered, synchronous
-        easy to implement
-        inconsistent performance
+    Alignment requirements with FILE_FLAG_NO_BUFFERING:
+        always align to 4096 bytes (pages)
+        convert unaligned block I/O to page I/O:
+            write through
+            flush when aligned
+            performance?
+                Windows caches virtual disk
+                Cluster size is 4096 bytes by default
 
-    memory mapping:
-        buffered, synchronous
-        best performance
-        not memory efficient
-        flushing required
-
-    asynchronous I/O? See asyncio.txt
-
-
-File HANDLE:
-    FILE_FLAG_NO_BUFFERING
-    FILE_FLAG_OVERLAPPED
-    ... for best asynchronous performance
-
-    last modified timestamp update delayed up to 1 hour if not closed
-        FlushFileBuffers?
-                flush ALL data, not HANDLE specific
-                flush metadata
-
-        close HANDLE if idle
-
-    sector alignment?
-        always align to 4096 bytes
-        convert unaligned block I/O to page I/O
-            disk cached by Windows
-            write through, flush if aligned
+    Close file handles if idle to trigger metadata updates

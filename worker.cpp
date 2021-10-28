@@ -710,7 +710,7 @@ DWORD ChunkDiskWorker::PostMsg(ChunkWork work)
 {
     if (work.ops.empty()) return ERROR_INVALID_PARAMETER;
 
-    // this check is not thread-safe,
+    // this check is not thread safe,
     // it's fine because all workers start and stop in batch
     if (!IsRunning()) return ERROR_INVALID_STATE;
     // ignore queue depth
@@ -744,7 +744,7 @@ DWORD ChunkDiskWorker::PostRefreshChunk(u64 chunk_idx)
 {
     auto err = DWORD(ERROR_IO_PENDING); // means ERROR_SUCCESS for PostMsg()
 
-    // not thread-safe but GetWorkers() does not change
+    // not thread safe but GetWorkers() does not change
     for (auto& worker : GetWorkers(service_.storage_unit))
     {
         // prepare single REFRESH_CHUNK op

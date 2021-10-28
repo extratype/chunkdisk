@@ -418,76 +418,6 @@ PageResult ChunkDiskService::ClaimPage(u64 page_idx)
         recast<void**>(entry->user.get())};
 }
 
-DWORD ChunkDiskService::FreePage(u64 page_idx, bool remove)
-{
-    auto g = SRWLockGuard(lock_pages_.get(), false);
-    auto it = cached_pages_.find(page_idx);
-    if (it == cached_pages_.end()) return ERROR_NOT_FOUND;
-
-    auto* entry = &((*it).second);
-    if (entry->owner != GetCurrentThreadId()) return ERROR_INVALID_STATE;
-    entry->owner = 0;
-    ReleaseSRWLockExclusive(entry->lock.get());
-    return remove ? RemovePageEntry(g, it) : ERROR_SUCCESS;
-}
-
-PageResult ChunkDiskService::FlushPages(const PageRange& r)
-{
-    auto g = SRWLockGuard(lock_pages_.get(), false);
-
-    for (auto i = r.start_idx; i <= r.end_idx; ++i)
-    {
-        if (cached_pages_.empty()) return PageResult{ERROR_SUCCESS};
-        auto it = cached_pages_.find(r.base_idx + i);
-        if (it == cached_pages_.end()) continue;
-
-        auto err = RemovePageEntry(g, it);
-        if (err == ERROR_LOCK_FAILED)
-        {
-            // g not reset if ERROR_LOCK_FAILED
-            return PageResult{
-                .error = ERROR_LOCK_FAILED,
-                .user = recast<void**>((*it).second.user.get())};
-        }
-        else if (err != ERROR_SUCCESS)
-        {
-            return PageResult{err};
-        }
-    }
-
-    return PageResult{ERROR_SUCCESS};
-}
-
-DWORD ChunkDiskService::FlushPages()
-{
-    auto g = SRWLockGuard(lock_pages_.get(), false);
-    auto err = DWORD(ERROR_SUCCESS);
-
-    while (!cached_pages_.empty())
-    {
-        // RemovePageEntry() resets g
-        // Iterating over cached_pages_ is not thread-safe
-        auto size = cached_pages_.size();
-        auto pages = std::vector<u64>();
-        pages.reserve(size);
-        for (auto p : cached_pages_) pages.push_back(p.first);
-
-        for (auto idx : pages)
-        {
-            auto it = cached_pages_.find(idx);
-            if (it == cached_pages_.end()) continue;
-
-            auto err1 = RemovePageEntry(g, it);
-            if (err1 != ERROR_SUCCESS) err = err1;
-        }
-
-        // no progress
-        if (size == cached_pages_.size()) break;
-    }
-
-    return err;
-}
-
 DWORD ChunkDiskService::RemovePageEntry(SRWLockGuard& g, Map<u64, PageEntry>::iterator it)
 {
     if (!g || g.is_exclusive()) return ERROR_INVALID_PARAMETER;
@@ -536,24 +466,76 @@ DWORD ChunkDiskService::RemovePageEntry(SRWLockGuard& g, Map<u64, PageEntry>::it
     }
 }
 
-void ChunkDiskService::FlushUnmapRanges(u64 chunk_idx)
+DWORD ChunkDiskService::FreePage(u64 page_idx, bool remove)
 {
-    auto g = SRWLockGuard(lock_unmapped_.get(), false);
-    if (chunk_unmapped_.empty()) return;
-    if (chunk_unmapped_.find(chunk_idx) == chunk_unmapped_.end()) return;
+    auto g = SRWLockGuard(lock_pages_.get(), false);
+    auto it = cached_pages_.find(page_idx);
+    if (it == cached_pages_.end()) return ERROR_NOT_FOUND;
 
-    g.reset();
-    g.reset(SRWLockGuard(lock_unmapped_.get(), true));
-    auto it = chunk_unmapped_.find(chunk_idx);
-    if (it == chunk_unmapped_.end()) return;
-    chunk_unmapped_.erase(it);
+    auto* entry = &((*it).second);
+    if (entry->owner != GetCurrentThreadId()) return ERROR_INVALID_STATE;
+    entry->owner = 0;
+    ReleaseSRWLockExclusive(entry->lock.get());
+    return remove ? RemovePageEntry(g, it) : ERROR_SUCCESS;
 }
 
-void ChunkDiskService::FlushUnmapRanges()
+PageResult ChunkDiskService::FlushPages(const PageRange& r)
 {
-    auto g = SRWLockGuard(lock_unmapped_.get(), true);
-    chunk_unmapped_.clear();
+    auto g = SRWLockGuard(lock_pages_.get(), false);
+
+    for (auto i = r.start_idx; i <= r.end_idx; ++i)
+    {
+        if (cached_pages_.empty()) return PageResult{ERROR_SUCCESS};
+        auto it = cached_pages_.find(r.base_idx + i);
+        if (it == cached_pages_.end()) continue;
+
+        auto err = RemovePageEntry(g, it);
+        if (err == ERROR_LOCK_FAILED)
+        {
+            // g not reset if ERROR_LOCK_FAILED
+            return PageResult{
+                .error = ERROR_LOCK_FAILED,
+                .user = recast<void**>((*it).second.user.get())};
+        }
+        else if (err != ERROR_SUCCESS)
+        {
+            return PageResult{err};
+        }
+    }
+
+    return PageResult{ERROR_SUCCESS};
 }
+
+DWORD ChunkDiskService::FlushPages()
+{
+    auto g = SRWLockGuard(lock_pages_.get(), false);
+    auto err = DWORD(ERROR_SUCCESS);
+
+    while (!cached_pages_.empty())
+    {
+        // RemovePageEntry() resets g
+        // Iterating over cached_pages_ is not thread safe
+        auto size = cached_pages_.size();
+        auto pages = std::vector<u64>();
+        pages.reserve(size);
+        for (auto p : cached_pages_) pages.push_back(p.first);
+
+        for (auto idx : pages)
+        {
+            auto it = cached_pages_.find(idx);
+            if (it == cached_pages_.end()) continue;
+
+            auto err1 = RemovePageEntry(g, it);
+            if (err1 != ERROR_SUCCESS) err = err1;
+        }
+
+        // no progress
+        if (size == cached_pages_.size()) break;
+    }
+
+    return err;
+}
+
 
 DWORD ChunkDiskService::UnmapRange(SRWLockGuard& g, u64 chunk_idx, u64 start_off, u64 end_off)
 {
@@ -617,6 +599,25 @@ DWORD ChunkDiskService::UnmapRange(SRWLockGuard& g, u64 chunk_idx, u64 start_off
     if (!params.IsWholeChunk(ranges.begin()->first, ranges.begin()->second)) return ERROR_IO_PENDING;
     chunk_unmapped_.erase(rit);
     return ERROR_SUCCESS;
+}
+
+void ChunkDiskService::FlushUnmapRanges(u64 chunk_idx)
+{
+    auto g = SRWLockGuard(lock_unmapped_.get(), false);
+    if (chunk_unmapped_.empty()) return;
+    if (chunk_unmapped_.find(chunk_idx) == chunk_unmapped_.end()) return;
+
+    g.reset();
+    g.reset(SRWLockGuard(lock_unmapped_.get(), true));
+    auto it = chunk_unmapped_.find(chunk_idx);
+    if (it == chunk_unmapped_.end()) return;
+    chunk_unmapped_.erase(it);
+}
+
+void ChunkDiskService::FlushUnmapRanges()
+{
+    auto g = SRWLockGuard(lock_unmapped_.get(), true);
+    chunk_unmapped_.clear();
 }
 
 }

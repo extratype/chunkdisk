@@ -164,6 +164,22 @@ private:
         CK_STOP         // cancel pending I/O ops and stop DoWorks()
     };
 
+    ChunkDiskService& service_;
+    std::thread thread_;
+    GenericHandle iocp_;
+    GenericHandle wait_event_;
+    GenericHandle spd_ovl_event_;
+    OVERLAPPED spd_ovl_ = {};
+
+    std::unique_ptr<SRWLOCK> lock_working_;
+    std::list<ChunkWork> working_;
+
+    std::unique_ptr<SRWLOCK> lock_buffers_;
+    std::deque<Pages> buffers_;
+
+    std::unique_ptr<SRWLOCK> lock_handles_;
+    Map<u64, ChunkFileHandle> chunk_handles_;   // add to back, evict from front
+
     // get zero-filled, page aligned buffer from the pool
     DWORD GetBuffer(Pages& buffer);
 
@@ -264,22 +280,6 @@ private:
 
     // operation completed, report to the owner ChunkWork
     void ReportOpResult(ChunkOpState& state, DWORD error = ERROR_SUCCESS);
-
-    ChunkDiskService& service_;
-    std::thread thread_;
-    GenericHandle iocp_;
-    GenericHandle wait_event_;
-    GenericHandle spd_ovl_event_;
-    OVERLAPPED spd_ovl_ = {};
-
-    std::unique_ptr<SRWLOCK> lock_working_;
-    std::list<ChunkWork> working_;
-
-    std::unique_ptr<SRWLOCK> lock_buffers_;
-    std::deque<Pages> buffers_;
-
-    std::unique_ptr<SRWLOCK> lock_handles_;
-    Map<u64, ChunkFileHandle> chunk_handles_;   // add to back, evict from front
 };
 
 }

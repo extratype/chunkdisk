@@ -1,4 +1,5 @@
-Trigger unmap: defrag X: /L
+Trigger unmap for all unused sectors: defrag X: /L
+    consolidate free space: defrag X: /X
 
 TODO check partition -> TRIM -> shrink -> delete orphan empty chunks
 
