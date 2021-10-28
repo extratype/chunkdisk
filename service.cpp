@@ -536,7 +536,7 @@ DWORD ChunkDiskService::RemovePageEntry(SRWLockGuard& g, Map<u64, PageEntry>::it
     }
 }
 
-void ChunkDiskService::InvalidateUnmapRanges(u64 chunk_idx)
+void ChunkDiskService::FlushUnmapRanges(u64 chunk_idx)
 {
     auto g = SRWLockGuard(lock_unmapped_.get(), false);
     if (chunk_unmapped_.empty()) return;
@@ -549,21 +549,23 @@ void ChunkDiskService::InvalidateUnmapRanges(u64 chunk_idx)
     chunk_unmapped_.erase(it);
 }
 
-void ChunkDiskService::InvalidateUnmapRanges()
+void ChunkDiskService::FlushUnmapRanges()
 {
     auto g = SRWLockGuard(lock_unmapped_.get(), true);
     chunk_unmapped_.clear();
 }
 
-// FIXME atomic: check range, unmap if whole
-DWORD ChunkDiskService::AddUnmapRange(u64 chunk_idx, u64 start_off, u64 end_off)
+DWORD ChunkDiskService::UnmapRange(SRWLockGuard& g, u64 chunk_idx, u64 start_off, u64 end_off)
 {
-    if (start_off >= end_off) return ERROR_SUCCESS;
+    if (g) return ERROR_INVALID_PARAMETER;
+    if (start_off >= end_off) return ERROR_INVALID_PARAMETER;
     if (end_off > params.chunk_length) return ERROR_INVALID_PARAMETER;
 
-    auto g = SRWLockGuard(lock_unmapped_.get(), true);
-    auto& ranges = chunk_unmapped_.try_emplace(chunk_idx).first->second;
+    g.reset(SRWLockGuard(lock_unmapped_.get(), true));
+    auto rit = chunk_unmapped_.try_emplace(chunk_idx).first;
+    auto& ranges = rit->second;
 
+    // add range [start_off, end_off)
     auto start = ranges.upper_bound(start_off); // start_off < start->first
     auto end = ranges.upper_bound(end_off);     // end_off < end->first
     auto new_start = (start == ranges.begin());
@@ -589,6 +591,7 @@ DWORD ChunkDiskService::AddUnmapRange(u64 chunk_idx, u64 start_off, u64 end_off)
         }
         catch (const bad_alloc&)
         {
+            g.reset();
             return ERROR_NOT_ENOUGH_MEMORY;
         }
     }
@@ -610,6 +613,9 @@ DWORD ChunkDiskService::AddUnmapRange(u64 chunk_idx, u64 start_off, u64 end_off)
         }
     }
 
+    if (ranges.size() != 1) return ERROR_IO_PENDING;
+    if (!params.IsWholeChunk(ranges.begin()->first, ranges.begin()->second)) return ERROR_IO_PENDING;
+    chunk_unmapped_.erase(rit);
     return ERROR_SUCCESS;
 }
 

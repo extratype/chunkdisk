@@ -535,8 +535,10 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
         {
             try
             {
-                auto it = ops.emplace(ops.end(), &work, kind, chunk_idx, start_off, end_off, 0, buffer);
+                service_.FlushUnmapRanges(chunk_idx);
+
                 // buffer is nullptr
+                auto it = ops.emplace(ops.end(), &work, kind, chunk_idx, start_off, end_off, 0, buffer);
                 auto err = service_.UnmapChunk(chunk_idx);
                 auto need_refresh = err == ERROR_SUCCESS;
                 if (err == ERROR_FILE_NOT_FOUND) err = ERROR_SUCCESS;
@@ -603,6 +605,9 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
     // prepare asynchronous I/O
     auto is_write = (kind == WRITE_CHUNK);
     const auto r = params.BlockPageRange(chunk_idx, start_off, end_off);
+
+    // write operation, invalidate all ranges for simplicity
+    if (is_write && buffer != nullptr) service_.FlushUnmapRanges(chunk_idx);
 
     if (params.IsWholePages(r.start_off, r.end_off, buffer))
     {
@@ -932,7 +937,11 @@ DWORD ChunkDiskWorker::IdleWork()
     auto gh = SRWLockGuard(lock_handles_.get(), true);
     chunk_handles_.clear();
     buffers_.clear();
-    if (disk_idle) service_.FlushPages();
+    if (disk_idle)
+    {
+        service_.FlushUnmapRanges();
+        service_.FlushPages();
+    }
     return INFINITE;
 }
 
@@ -1216,6 +1225,18 @@ void ChunkDiskWorker::CompleteChunkOp(ChunkOpState& state, DWORD error, DWORD by
     }
     if (!(state.kind == READ_CHUNK && bytes_transferred == u32(-1))) CloseChunk(state.idx);
     ReportOpResult(state, error);
+
+    // FIXME flush on error
+    if (state.kind == WRITE_CHUNK && error == ERROR_SUCCESS && state.buffer == nullptr)
+    {
+        SRWLockGuard g;
+        if (service_.UnmapRange(g, state.idx, state.start_off, state.end_off) == ERROR_SUCCESS)
+        {
+            // whole chunk unmapped
+            auto err = service_.UnmapChunk(state.idx);
+            if (err == ERROR_SUCCESS) PostRefreshChunk(state.idx);
+        }
+    }
 }
 
 DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
@@ -1397,10 +1418,23 @@ void ChunkDiskWorker::CompleteWritePage(ChunkOpState& state, DWORD error, DWORD 
 {
     auto& params = service_.params;
     if (error == ERROR_SUCCESS && bytes_transferred != params.PageBytes(1)) error = ERROR_INVALID_DATA;
-    auto chunk_idx = params.BlockChunkRange(params.PageBlocks(state.idx), 0).start_idx;
+    auto r = params.BlockChunkRange(params.PageBlocks(state.idx), state.end_off - state.start_off);
+    auto chunk_idx = r.start_idx;
     CloseChunk(chunk_idx);
     FreePageAsync(state, state.idx, error != ERROR_SUCCESS);
     ReportOpResult(state, error);
+
+    // FIXME flush on error
+    if (error == ERROR_SUCCESS && state.buffer == nullptr)
+    {
+        SRWLockGuard g;
+        if (service_.UnmapRange(g, chunk_idx, r.start_off, r.end_off) == ERROR_SUCCESS)
+        {
+            // whole chunk unmapped
+            auto err = service_.UnmapChunk(chunk_idx);
+            if (err == ERROR_SUCCESS) PostRefreshChunk(chunk_idx);
+        }
+    }
 }
 
 void ChunkDiskWorker::ReportOpResult(ChunkOpState& state, DWORD error)
