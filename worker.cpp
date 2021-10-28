@@ -1226,15 +1226,21 @@ void ChunkDiskWorker::CompleteChunkOp(ChunkOpState& state, DWORD error, DWORD by
     if (!(state.kind == READ_CHUNK && bytes_transferred == u32(-1))) CloseChunk(state.idx);
     ReportOpResult(state, error);
 
-    // FIXME flush on error
-    if (state.kind == WRITE_CHUNK && error == ERROR_SUCCESS && state.buffer == nullptr)
+    if (state.kind == WRITE_CHUNK && state.buffer == nullptr)
     {
-        SRWLockGuard g;
-        if (service_.UnmapRange(g, state.idx, state.start_off, state.end_off) == ERROR_SUCCESS)
+        if (error != ERROR_SUCCESS)
         {
-            // whole chunk unmapped
-            auto err = service_.UnmapChunk(state.idx);
-            if (err == ERROR_SUCCESS) PostRefreshChunk(state.idx);
+            service_.FlushUnmapRanges(state.idx);
+        }
+        else
+        {
+            SRWLockGuard g;
+            if (service_.UnmapRange(g, state.idx, state.start_off, state.end_off) == ERROR_SUCCESS)
+            {
+                // whole chunk unmapped
+                auto err = service_.UnmapChunk(state.idx);
+                if (err == ERROR_SUCCESS) PostRefreshChunk(state.idx);
+            }
         }
     }
 }
@@ -1424,15 +1430,21 @@ void ChunkDiskWorker::CompleteWritePage(ChunkOpState& state, DWORD error, DWORD 
     FreePageAsync(state, state.idx, error != ERROR_SUCCESS);
     ReportOpResult(state, error);
 
-    // FIXME flush on error
-    if (error == ERROR_SUCCESS && state.buffer == nullptr)
+    if (state.buffer == nullptr)
     {
-        SRWLockGuard g;
-        if (service_.UnmapRange(g, chunk_idx, r.start_off, r.end_off) == ERROR_SUCCESS)
+        if (error != ERROR_SUCCESS)
         {
-            // whole chunk unmapped
-            auto err = service_.UnmapChunk(chunk_idx);
-            if (err == ERROR_SUCCESS) PostRefreshChunk(chunk_idx);
+            service_.FlushUnmapRanges(chunk_idx);
+        }
+        else
+        {
+            SRWLockGuard g;
+            if (service_.UnmapRange(g, chunk_idx, r.start_off, r.end_off) == ERROR_SUCCESS)
+            {
+                // whole chunk unmapped
+                auto err = service_.UnmapChunk(chunk_idx);
+                if (err == ERROR_SUCCESS) PostRefreshChunk(chunk_idx);
+            }
         }
     }
 }

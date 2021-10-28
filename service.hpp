@@ -151,7 +151,7 @@ public:
     void FlushUnmapRanges();
 
     // mark [start_off, end_off) unmapped
-    // ERROR_SUCCESS and ranges reset if whole, ERROR_IO_PENDING otherwise
+    // return ERROR_SUCCESS and ranges reset if whole, ERROR_IO_PENDING otherwise
     // g: empty, hold lock_unmapped_ when return ERROR_SUCCESS or ERROR_IO_PENDING
     DWORD UnmapRange(SRWLockGuard& g, u64 chunk_idx, u64 start_off, u64 end_off);
 
