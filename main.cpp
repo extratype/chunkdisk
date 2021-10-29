@@ -166,7 +166,7 @@ BOOLEAN PostWork(SPD_STORAGE_UNIT* StorageUnit, ChunkOpKind op_kind, u64 block_a
         if (count) block_addr = descs[0].BlockAddress;
     }
 
-    // schedule requests, see docs/asyncio.txt
+    // schedule requests
     auto* cdisk = StorageUnitChunkDisk(StorageUnit);
     auto post_ft = GetSystemFileTime();
 

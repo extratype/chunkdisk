@@ -84,7 +84,7 @@ struct PageResult
 {
     DWORD error;                    // page invalid if not ERROR_SUCCESS
     bool is_hit = false;            // true if page hit
-    PageGuard guard;                // hold while using ptr
+    PageGuard guard;                // hold while using ptr and user
     LPVOID ptr = nullptr;           // PageEntry::ptr
     void** user = nullptr;          // PageEntry::user
 };
@@ -124,7 +124,7 @@ public:
     DWORD UnmapChunk(u64 chunk_idx);
 
     // acquire shared lock for reading an existing page
-    // local use
+    // local use, don't call LockPage() while holding PageResult::guard
     // PageResult::error is ERROR_LOCK_FAILED if the page is locked by the current thread
     // PageResult::user not available
     PageResult PeekPage(u64 page_idx);

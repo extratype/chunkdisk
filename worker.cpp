@@ -21,6 +21,7 @@ static constexpr auto STOP_TIMEOUT_MS = u32(5000);
 //
 // * Public functions are called only from the dispatcher thread.
 // * ChunkWork and ChunkOpState instances are used only by the worker thread after they are dequeued.
+// * buffers_ and chunk_handles_ are shared.
 // * PostMsg() is called by other worker threads.
 
 DWORD ChunkDiskWorker::Start()
@@ -663,7 +664,7 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
     }
     else
     {
-        // not aligned to page
+        // unaligned to page
         auto file_off = LONGLONG(params.PageBytes(r.start_idx));
 
         auto err = PreparePageOps(work, is_write, r.base_idx + r.start_idx, r.start_off,

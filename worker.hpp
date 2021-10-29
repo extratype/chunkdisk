@@ -23,8 +23,8 @@ enum ChunkOpKind : u32
     // for PostWork()
     READ_CHUNK,             // aligned read, flush pages
     WRITE_CHUNK,            // aligned write, flush pages
-    READ_PAGE,              // not aligned, read in pages
-    WRITE_PAGE,             // not aligned, write in pages
+    READ_PAGE,              // unaligned, read in pages
+    WRITE_PAGE,             // unaligned, write in pages
     WRITE_PAGE_PARTIAL,     // not page aligned, read then write in pages
     UNMAP_CHUNK,            // become WRITE_CHUNK if partial
 
@@ -75,13 +75,13 @@ struct ChunkWork
 // single operation in ChunkWork
 struct ChunkOpState
 {
-    OVERLAPPED ovl = {};
+    OVERLAPPED ovl = {};            // specify file offset
     ChunkWork* owner;
     ChunkOpKind kind;
     ChunkOpStep step = OP_READY;
     u64 idx;                        // chunk_idx or page_idx
-    u64 start_off;
-    u64 end_off;
+    u64 start_off;                  // offset in chunk or page
+    u64 end_off;                    // offset in chunk or page
     PVOID buffer;
     ChunkOpState* next = nullptr;   // next op waiting on this
 

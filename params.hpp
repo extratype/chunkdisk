@@ -69,7 +69,7 @@ struct ChunkDiskParams
     PageRange BlockPageRange(u64 chunk_idx, u64 start_off, u64 end_off) const;
 
     // start_off, end_off: block offsets relative to a page
-    // also check buffer is aligned to pages
+    // also check buffer is aligned to page
     bool IsWholePages(u64 start_off, u64 end_off, void* buffer = nullptr) const
     {
         return start_off == 0 && end_off == page_length &&

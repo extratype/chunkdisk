@@ -1,0 +1,36 @@
+v0.1
+
+* Initial release.
+
+v0.2
+
+* Make sure to update the last modified time.
+
+v0.3
+
+* Flush all only if whole chunk is explicitly requested to be flushed, let Windows decide otherwise.
+* Update the last modified time in fine resolution.
+
+v0.4
+
+* Use unbuffered I/O instead of memory mappings.
+* Chunk size must be a multiple of 4096. This breaks backward compatibility.
+* Add an option -t to adjust number of I/O threads.
+* Performance tunings.
+
+v0.5
+
+* Use buffered I/O to improve performance. But the drive stutters when Windows flushes written buffer to the backing chunk.
+
+v0.6
+
+* Create .lock file to prevent re-mounting.
+* Add `chunkdisk-t` class in `install.reg` to set the number of I/O threads by `launchctl-x64.exe start chunkdisk-t InstanceName File.chunkdisk Number`.
+
+v0.9
+
+* Fix chunks created and written when unmapped partially.
+* Use unbuffered, asynchronous I/O.
+* Make I/O scheduling deterministic for better sequential performance on HDDs.
+* Merge unmap ranges across requests for better space efficiency.
+* Flush file metadata after one minute of inactivity.

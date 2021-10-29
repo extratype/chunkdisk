@@ -13,18 +13,18 @@ Create chunk:
         set chunk size small
         do TRIM
 
-Read: ReadFile
+Read: ReadFile()
     chunk not found or empty: zero-fill buffer
 
-Write: WriteFile
+Write: WriteFile()
 
 Unmap (a.k.a. TRIM):
     unmap range >= chunk: Truncate (Set size to 0)
     unmap range <  chunk: FSCTL_SET_ZERO_DATA
 
 Asynchronous I/O:
-    FILE_FLAG_NO_BUFFERING && FILE_FLAG_WRITE_THROUGH for best asynchronous performance
-    See asyncio.txt
+    for best asynchronous performance
+        FILE_FLAG_NO_BUFFERING && FILE_FLAG_WRITE_THROUGH
 
     Alignment requirements with FILE_FLAG_NO_BUFFERING:
         always align to 4096 bytes (pages)
@@ -36,3 +36,191 @@ Asynchronous I/O:
                 Cluster size is 4096 bytes by default
 
     Close file handles if idle to trigger metadata updates
+
+--------------------------------------------------------------------------------
+
+Scheduling requests in dispatcher:
+    worker = (address / 1048576) % (# of workers)
+    choose next worker if QD >= 32, wait if all full
+
+    characteristic:
+        requests parallelized if depth > 32
+        requests serialized if size < 1048576 bytes
+
+ChunkDiskService:
+    Chunks:
+        .lock to prevent accidental double mount
+        CreateChunk(): create/open
+        UnmapChunk(): truncate
+
+    Pages:
+        PeekPage(): concurrent read access
+        LockPage(): exclusive write access
+        FreePage()
+        FlushPages(range)
+        FlushPages()
+
+    Unmap Ranges:
+        UnmapRange(chunk, range): merge ranges, check if whole
+        FlushUnmapRanges(chunk)
+        FlushUnmapRanges()
+
+    Last pending disk I/O timestamp
+        SetPostFileTime()
+        GetPostFileTime()
+
+ChunkDiskWorker:
+    Pools:
+        file handles
+            shared among ops
+            LRU policy, <= QD 32
+
+        aligned buffers
+            aligned to page, zero-filled
+            65536 + 4096 bytes to shift buffer and align to page
+            LIFO policy
+
+    Request → ChunkWork:
+        ops: ChunkOpState array
+            * chunk operations
+            * page operations
+            * no mixing of Read(), Write() or Unmap()
+
+        buffer: from pool
+            copy from DataBuffer for Write()
+            Read():
+                respond with buffer for asynchronous I/O operations
+                copy to DataBuffer for immediate I/O operations
+                    DataBuffer not zero-filled
+
+        completed when all ops are completed
+        respond with the first error if any
+
+    ChunkOpState:
+        Immediate I/O operations: done synchronously in the dispatcher thread
+            * read, chunk empty or not exists
+            * read a cached page
+            * unmap whole chunk
+
+        Asynchronous I/O operations: may be done synchronously
+            * read/write, aligned
+            * read/write in a page
+            * partial write in a page: read then write
+            * partial unmap:
+                becomes write operation with buffer nullptr
+                partial unmap if and only if write operation with buffer nullptr
+                zero-fill using FSCTL_SET_ZERO_DATA
+
+    Event loop using IOCP:
+        1. PostWork() in the dispatcher thread
+            prepare ChunkWork, ChunkOpState
+            do immediate I/O operations
+            Post ChunkWork for asynchronous I/O
+
+        2. Post an asynchronous request for each ChunkOpState
+            ReadFile(), WriteFile(), DeviceIoControl()
+
+        3. Complete ChunkOpState
+            check result
+            complete ChunkWork if all done
+                send response to WinSpd
+
+        Idle timer:
+            GetQueuedCompletionStatus() timed out
+            IdleWork():
+                reset pool
+
+                Disk idle?
+                    No requests except immediate I/O operations
+                    service.SetPostFileTime() in PostWork()
+                    service.GetPostFileTime() + idle timer in IdleWork():
+                        maybe the last worker
+                        service.FlushPages()
+                        service.FlushUnmapRanges()
+            wait indefinitely
+
+    ChunkWork queue:
+        Add to list for asynchronous I/O:
+            max: QD 32
+            wait for list if full
+
+        Remove from list:
+            ChunkWork completed
+            signal list
+
+Synchronize pages:
+    flush pages before aligned read/write
+    shared lock for page read
+    exclusive lock for page miss
+    exclusive lock for partial page write: atomic read and write
+
+    Serialize exclusive accesses within the same worker thread:
+        SRW locks are not recursive
+        check owner thread ID
+        singly-linked list for each page:
+            PageEntry::user -> ChunkOpState*
+            ChunkOpState::next -> ChunkOpState*
+
+            Set PageEntry::user when LockPage() succeeds
+            Traverse next and set ChunkOpState::next when LockPage() fails
+            Retry when FreePage()
+
+Asynchronous I/O:
+    Aligned read/write:
+        OpenChunk()
+        FlushPages(range)...
+        ReadFile()/WriteFile()/DeviceIoControl(FSCTL_SET_ZERO_DATA)...
+        CloseChunk()
+
+    Unaligned read:
+        service.LockPage()...
+        OpenChunk()
+        ReadFile()... to page
+        CloseChunk()
+        copy to buffer
+        service.FreePage()
+
+    Unaligned write:
+        not whole page?
+            Unaligned read...
+
+        service.LockPage()/service.ClaimPage()...
+        OpenChunk(read-write)
+        copy/zero-fill page
+        WriteFile()... from page
+        CloseChunk()
+        service.FreePage()
+
+Unmap():
+    whole chunk: service.UnmapChunk()
+    partial: zero-fill
+
+    Merge unmap ranges:
+        in a single request:
+            sort by address
+            merge ranges
+
+        across multiple requests:
+            before service.UnmapChunk(): service.FlushUnmapRanges(chunk)
+            before Write(): service.FlushUnmapRanges(chunk)
+            after FSCTL_SET_ZERO_DATA:
+                failure: service.FlushUnmapRanges(chunk)
+                success: atomic service.UnmapRange() and service.UnmapChunk()
+
+    Synchronize file handles in all workers:
+        Unmap() then Write(): incorrect chunk size
+            cancel pending asynchronous read/write
+            refresh chunk state for all workers:
+                mark as pending
+
+                CloseChunk():
+                    fix chunk size if opened as read-write
+                    close handle
+
+                OpenChunk():
+                    return empty handle if chunk is empty
+                    fix chunk size
+                    clear mark
+
+        Unmap() then Read(): EOF
+            read successful if zero bytes read and chunk is empty
