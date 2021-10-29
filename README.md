@@ -7,7 +7,7 @@ Mount a disk image split over files (*chunks*) in multiple directories (*parts*)
 I'm not responsible for the data stored using chunkdisk!
 
 1. Install [WinSpd](https://github.com/billziss-gh/winspd/releases/tag/v1.0B1).
-2. Copy chunkdisk-x64.exe to C:\Program Files (x86)\WinSpd\bin\.
+2. Copy chunkdisk-x64.exe and winspd-x64.dll to C:\Program Files (x86)\WinSpd\bin\.
 3. Merge install.reg.
 4. Create a `.chunkdisk` file. For example:
 
@@ -45,6 +45,7 @@ I'm not responsible for the data stored using chunkdisk!
 
 ## Issues
 
+* winspd-x64.dll is not compatible with the original to workaround [an issue](https://github.com/billziss-gh/winspd/issues/10). Specifically, invoking `SpdStorageUnitSendResponse()` or `SpdIoctlTransact()` leads to an undefined behavior. It's fine with the current WinSpd binaries though. The source code is available [here](https://github.com/extratype/winspd).
 * I/O performance is not great with SSDs.
 
 ## Notes and Tips
