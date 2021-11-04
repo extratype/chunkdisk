@@ -179,16 +179,9 @@ BOOLEAN PostWork(SPD_STORAGE_UNIT* StorageUnit, ChunkOpKind op_kind, u64 block_a
         if (count) block_addr = descs[0].BlockAddress;
     }
 
-    // schedule requests
-    auto* cdisk = StorageUnitChunkDisk(StorageUnit);
-    auto post_ft = GetSystemFileTime();
-
     auto* worker = GetWorker(StorageUnit);
     worker->Wait();
     auto err = worker->PostWork(context, op_kind, block_addr, count);
-
-    if (err == ERROR_IO_PENDING) cdisk->service.SetPostFileTime(post_ft);
-
     if (err != ERROR_IO_PENDING && err != ERROR_SUCCESS)
     {
         auto& status = context->Response->Status;

@@ -274,6 +274,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
         work_it->it = work_it;
         for (auto& op : work_it->ops) op.owner = &*work_it;
 
+        auto post_ft = GetSystemFileTime();
         if (!PostQueuedCompletionStatus(iocp_.get(), 0,
                                         CK_POST, recast<OVERLAPPED*>(&*work_it)))
         {
@@ -282,6 +283,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
             SetScsiError(&context->Response->Status, SCSI_SENSE_HARDWARE_ERROR, SCSI_ADSENSE_NO_SENSE);
             return err;
         }
+        service_.SetPostFileTime(post_ft);
     }
     catch (const bad_alloc&)
     {
