@@ -255,6 +255,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
             // same effect calling SpdStatusUnitStatusSetSense()
             context->Response->Status = work.response.Status;
         }
+        service_.SetPostFileTime(GetSystemFileTime());
         return err;
     }
 
@@ -262,6 +263,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
     {
         // read all done immediately
         if (op_kind == READ_CHUNK) memcpy(ctx_buffer, work.ops[0].buffer, params.BlockBytes(count));
+        service_.SetPostFileTime(GetSystemFileTime());
         return ERROR_SUCCESS;
     }
 
@@ -935,11 +937,15 @@ DWORD ChunkDiskWorker::IdleWork()
 {
     if (!working_.empty()) return STANDBY_MS;
 
-    auto disk_idle = (GetSystemFileTime() >= service_.GetPostFileTime() + STANDBY_MS * 10000);
+    auto last_post_ft = service_.GetPostFileTime();
+    auto disk_idle = (GetSystemFileTime() >= last_post_ft + STANDBY_MS * 10000);
+
     auto gb = SRWLockGuard(lock_buffers_.get(), true);
     auto gh = SRWLockGuard(lock_handles_.get(), true);
     chunk_handles_.clear();
     buffers_.clear();
+
+    disk_idle &= (last_post_ft == service_.GetPostFileTime());
     if (disk_idle)
     {
         service_.FlushUnmapRanges();
