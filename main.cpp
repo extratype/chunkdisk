@@ -28,14 +28,11 @@ static constexpr auto BLOCK_SIZE = u32(512);
 // align with the underlying hardware, 4096 will work
 static constexpr auto PAGE_SIZE = u32(4096);
 
-// must be a multiple of PAGE_SIZE, typically 64K
-static constexpr auto MAX_TRANSFER_LENGTH = u32(64 * 1024);
+// must be a multiple of PAGE_SIZE
+static constexpr auto MAX_TRANSFER_LENGTH = u32(1024 * 1024);
 
 // maximum number of cached pages (write through)
 static constexpr auto MAX_PAGES = u32(2048);
-
-// maximum operating bytes expected per worker
-static constexpr auto WORKER_CAPACITY = u32(1024 * 1024);
 
 static constexpr auto MAX_WORKERS = u32(MAXIMUM_WAIT_OBJECTS);
 
@@ -43,6 +40,9 @@ struct ChunkDisk
 {
     ChunkDiskService service;
     vector<unique_ptr<ChunkDiskWorker>> workers;
+
+    std::unique_ptr<SRWLOCK> lock_assigned;
+    u32 workers_assigned = 0;
 
     explicit ChunkDisk(ChunkDiskParams params, SPD_STORAGE_UNIT* storage_unit)
         : service(std::move(params), storage_unit, MAX_PAGES) {}
@@ -152,6 +152,19 @@ ChunkDisk* StorageUnitChunkDisk(SPD_STORAGE_UNIT* StorageUnit)
     return recast<ChunkDisk*>(StorageUnit->UserContext);
 }
 
+ChunkDiskWorker* GetWorker(SPD_STORAGE_UNIT* StorageUnit)
+{
+    static thread_local auto* worker = (ChunkDiskWorker*)(nullptr);
+    if (worker == nullptr)
+    {
+        auto* cdisk = StorageUnitChunkDisk(StorageUnit);
+        auto g = SRWLockGuard(cdisk->lock_assigned.get(), true);
+        worker = cdisk->workers[cdisk->workers_assigned].get();
+        ++cdisk->workers_assigned;
+    }
+    return worker;
+}
+
 // SPD_STORAGE_UNIT_INTERFACE operations
 // op_kind: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK
 BOOLEAN PostWork(SPD_STORAGE_UNIT* StorageUnit, ChunkOpKind op_kind, u64 block_addr, u32 count)
@@ -170,27 +183,10 @@ BOOLEAN PostWork(SPD_STORAGE_UNIT* StorageUnit, ChunkOpKind op_kind, u64 block_a
     auto* cdisk = StorageUnitChunkDisk(StorageUnit);
     auto post_ft = GetSystemFileTime();
 
-    auto err = [cdisk, op_kind, block_addr, count, context]() -> DWORD
-    {
-        auto& workers = cdisk->workers;
-        // choose worker based on address
-        auto start = (block_addr / cdisk->service.params.ByteBlock(WORKER_CAPACITY).first) % (workers.size());
+    auto* worker = GetWorker(StorageUnit);
+    worker->Wait();
+    auto err = worker->PostWork(context, op_kind, block_addr, count);
 
-        for (auto i = start; i < workers.size(); ++i)
-        {
-            auto err = workers[i]->PostWork(context, op_kind, block_addr, count);
-            if (err != ERROR_BUSY) return err;
-        }
-        for (auto i = 0; i < start; ++i)
-        {
-            auto err = workers[i]->PostWork(context, op_kind, block_addr, count);
-            if (err != ERROR_BUSY) return err;
-        }
-
-        // all busy, wait for start
-        workers[start]->Wait();
-        return workers[start]->PostWork(context, op_kind, block_addr, count);
-    }();
     if (err == ERROR_IO_PENDING) cdisk->service.SetPostFileTime(post_ft);
 
     if (err != ERROR_IO_PENDING && err != ERROR_SUCCESS)
@@ -355,6 +351,9 @@ DWORD CreateStorageUnit(PWSTR chunkdisk_file, BOOLEAN write_protected, PWSTR pip
     {
         // unit will be deleted when cdisk is deleted
         cdisk = std::make_unique<ChunkDisk>(std::move(params), unit);
+        cdisk->lock_assigned = std::make_unique<SRWLOCK>();
+        InitializeSRWLock(cdisk->lock_assigned.get());
+
         unit->UserContext = cdisk.get();
     }
     catch (const bad_alloc&)
@@ -576,7 +575,7 @@ int wmain(int argc, wchar_t** argv)
 
     auto* storage_unit = cdisk->service.storage_unit;
     SpdStorageUnitSetDebugLog(storage_unit, DebugFlags);
-    err = SpdStorageUnitStartDispatcher(cdisk->service.storage_unit, 1);
+    err = SpdStorageUnitStartDispatcher(cdisk->service.storage_unit, NumThreads);
     if (err != ERROR_SUCCESS)
     {
         SpdLogErr(L"error: cannot start ChunkDisk: error %lu", err);
