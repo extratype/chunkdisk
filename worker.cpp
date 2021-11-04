@@ -151,10 +151,9 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
 
     // check queue depth
     // single dispatcher, no more works to be queued from it
-    {
-        auto g = SRWLockGuard(lock_working_.get(), false);
-        if (working_.size() >= MAX_QD) return ERROR_BUSY;
-    }
+    auto g = SRWLockGuard(lock_working_.get(), false);
+    if (working_.size() >= MAX_QD) return ERROR_BUSY;
+    g.reset();
 
     // expects something to do
     // expects ChunkWork::ops not empty
@@ -935,15 +934,21 @@ bool ChunkDiskWorker::CompleteWork(ChunkWork* work, ChunkWork** next)
 
 DWORD ChunkDiskWorker::IdleWork()
 {
+    // single dispatcher
+    auto gw = SRWLockGuard(lock_working_.get(), false);
     if (!working_.empty()) return STANDBY_MS;
+    gw.reset();
 
     auto last_post_ft = service_.GetPostFileTime();
     auto disk_idle = (GetSystemFileTime() >= last_post_ft + STANDBY_MS * 10000);
 
     auto gb = SRWLockGuard(lock_buffers_.get(), true);
+    buffers_.clear();
+    gb.reset();
+
     auto gh = SRWLockGuard(lock_handles_.get(), true);
     chunk_handles_.clear();
-    buffers_.clear();
+    gh.reset();
 
     disk_idle &= (last_post_ft == service_.GetPostFileTime());
     if (disk_idle)
@@ -1045,11 +1050,14 @@ void ChunkDiskWorker::StopWorks()
     }
 
     auto gb = SRWLockGuard(lock_buffers_.get(), true);
+    buffers_.clear();
+    gb.reset();
+
     gh.reset(SRWLockGuard(lock_handles_.get(), true));
     chunk_handles_.clear();
-    buffers_.clear();
-    working_.clear();
+    gh.reset();
 
+    working_.clear();
     spd_ovl_event_.reset();
     wait_event_.reset();
     iocp_.reset();

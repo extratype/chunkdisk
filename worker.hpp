@@ -107,7 +107,8 @@ struct ChunkFileHandle
     bool pending = false;   // pending to be refreshed
 };
 
-// for SINGLE dispatcher thread
+// single worker per single dispatcher
+// can't be shared with other dispatchers
 class ChunkDiskWorker
 {
 public:
