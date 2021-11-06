@@ -281,11 +281,17 @@ PageResult ChunkDiskService::PeekPage(u64 page_idx)
 
     auto* entry = &((*it).second);
     if (entry->owner == GetCurrentThreadId()) return PageResult{ERROR_LOCK_FAILED};
-    return PageResult{
+    auto result = PageResult{
         ERROR_SUCCESS,
         true,
         PageGuard(entry, false),
         entry->ptr.get()};
+
+    g.reset();
+    g.reset(SRWLockGuard(lock_pages_.get(), true));
+    // entry locked but may be moved
+    cached_pages_.reinsert_back(cached_pages_.find(page_idx));
+    return result;
 }
 
 PageResult ChunkDiskService::LockPage(u64 page_idx)
