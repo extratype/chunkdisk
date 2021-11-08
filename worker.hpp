@@ -181,10 +181,10 @@ public:
     DWORD PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, ChunkOpKind op_kind, u64 block_addr, u32 count);
 
 private:
-    // get zero-filled, page aligned buffer from the pool
+    // get page aligned buffer from the pool
     DWORD GetBuffer(Pages& buffer);
 
-    // zero-fill buffer and return it to the pool
+    // return buffer to the pool
     DWORD ReturnBuffer(Pages buffer);
 
     // get shared chunk file handle from the pool

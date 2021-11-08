@@ -166,7 +166,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
 
     if (op_kind == READ_CHUNK || op_kind == WRITE_CHUNK)
     {
-        // prepare zero-filled buffer
+        // prepare buffer
         // write back to ctx_buffer if read request processed immediately
         // write request is never processed immediately
         err = GetBuffer(work.buffer);
@@ -316,7 +316,6 @@ DWORD ChunkDiskWorker::GetBuffer(Pages& buffer)
     {
         buffer = std::move(buffers_.front());
         buffers_.pop_front();
-        // buf was zero-filled in ReturnBuffer()
         return ERROR_SUCCESS;
     }
 }
@@ -324,9 +323,6 @@ DWORD ChunkDiskWorker::GetBuffer(Pages& buffer)
 DWORD ChunkDiskWorker::ReturnBuffer(Pages buffer)
 {
     if (!buffer) return ERROR_INVALID_PARAMETER;
-
-    auto buffer_size = service_.MaxTransferLength() + u32(service_.params.PageBytes(1));
-    memset(buffer.get(), 0, buffer_size);
 
     try
     {
@@ -565,11 +561,15 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
         {
             try
             {
-                // buffer was zero-filled, nothing to do if READ_CHUNK
                 // nothing to zero-fill if UNMAP_CHUNK
                 auto it = ops.emplace(ops.end(), &work, kind, chunk_idx, start_off, end_off,
                                       LONGLONG(params.BlockBytes(start_off)), buffer);
-                if (buffer != nullptr) buffer = recast<u8*>(buffer) + params.BlockBytes(end_off - start_off);
+                if (buffer != nullptr)
+                {
+                    // zero-fill if READ_CHUNK
+                    memset(buffer, 0, params.BlockBytes(end_off - start_off));
+                    buffer = recast<u8*>(buffer) + params.BlockBytes(end_off - start_off);
+                }
                 ReportOpResult(*it);
                 return ERROR_SUCCESS;
             }
@@ -1149,9 +1149,9 @@ DWORD ChunkDiskWorker::PostReadChunk(ChunkOpState& state)
     err = OpenChunk(state.idx, false, h);
     if (err != ERROR_SUCCESS) return err;
 
+    auto length_bytes = params.BlockBytes(state.end_off - state.start_off);
     if (h != INVALID_HANDLE_VALUE)
     {
-        auto length_bytes = params.BlockBytes(state.end_off - state.start_off);
         auto bytes_read = DWORD();
         err = ReadFile(h, state.buffer, DWORD(length_bytes), &bytes_read, &state.ovl)
             ? ERROR_SUCCESS : GetLastError();
@@ -1164,7 +1164,7 @@ DWORD ChunkDiskWorker::PostReadChunk(ChunkOpState& state)
             {
                 // handle synchronous EOF when unmap then read
                 // simulate ReadFile()
-                // buffer already zero-filled
+                memset(state.buffer, 0, length_bytes);
                 err = PostQueuedCompletionStatus(iocp_.get(), length_bytes, CK_IO, &state.ovl)
                     ? ERROR_SUCCESS : GetLastError();
                 if (err != ERROR_SUCCESS)
@@ -1183,6 +1183,7 @@ DWORD ChunkDiskWorker::PostReadChunk(ChunkOpState& state)
     else
     {
         // simulate ReadFile()
+        memset(state.buffer, 0, length_bytes);
         // set bytes_transferred to -1 to indicate
         err = PostQueuedCompletionStatus(iocp_.get(), u32(-1), CK_IO, &state.ovl)
             ? ERROR_SUCCESS : GetLastError();
@@ -1240,7 +1241,11 @@ void ChunkDiskWorker::CompleteChunkOp(ChunkOpState& state, DWORD error, DWORD by
     }
     if (error == ERROR_HANDLE_EOF && state.kind == READ_CHUNK && bytes_transferred == 0)
     {
-        if (CheckAsyncEOF(state) == ERROR_SUCCESS) error = ERROR_SUCCESS;
+        if (CheckAsyncEOF(state) == ERROR_SUCCESS)
+        {
+            memset(state.buffer, 0, length_bytes);
+            error = ERROR_SUCCESS;
+        }
     }
     if (!(state.kind == READ_CHUNK && bytes_transferred == u32(-1))) CloseChunk(state.idx);
     ReportOpResult(state, error);
