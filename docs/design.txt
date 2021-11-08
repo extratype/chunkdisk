@@ -39,13 +39,8 @@ Asynchronous I/O:
 
 --------------------------------------------------------------------------------
 
-Scheduling requests in dispatcher:
-    worker = (address / 1048576) % (# of workers)
-    choose next worker if QD >= 32, wait if all full
-
-    characteristic:
-        requests parallelized if depth > 32
-        requests serialized if size < 1048576 bytes
+One worker thread per dispatcher thread:
+    Bypass/Synchronous/Asynchronous I/O
 
 ChunkDiskService:
     Chunks:

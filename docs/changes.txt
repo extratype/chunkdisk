@@ -34,3 +34,11 @@ v0.9
 * Make I/O scheduling deterministic for better sequential performance on HDDs.
 * Merge unmap ranges across requests for better space efficiency.
 * Flush file metadata after one minute of inactivity.
+
+v1.0
+
+* Change maximum transfer length to 1MB to maximize sequential performance.
+* Revert deterministic I/O scheduling to handle concurrent I/O's as intended.
+* Improve handling buffers for small-sized I/O's.
+* Fix bugs in unaligned (page-based) I/O's.
+* Fix inactivity timer.

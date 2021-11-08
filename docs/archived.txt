@@ -46,3 +46,16 @@ Performance experiments with DiskSpd:
     DRAM: > 1M IOPS, so single dispatcher
     SSD: parallel accesses > outstanding (queued) accesses
     HDD: better sequential performance with queue, tune total request size
+
+WinSpd requests while sequential access:
+    Split in maximum transfer length
+
+    Overlap requests in multiple threads to keep disk busy
+        Buffered read: 2 ~ 4 threads
+        Buffered write: up to 5 threads
+
+    Requests more out of order with single dispatcher thread
+        Appears as if strided
+        Not queued, read-ahead buffer required
+
+    Memory usage: (maximum transfer length) * (number of threads)
