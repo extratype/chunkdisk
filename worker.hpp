@@ -172,13 +172,13 @@ private:
     GenericHandle spd_ovl_event_;
     OVERLAPPED spd_ovl_ = {};
 
-    std::unique_ptr<SRWLOCK> lock_working_;
+    std::unique_ptr<std::shared_mutex> mutex_working_;
     std::list<ChunkWork> working_;
 
-    std::unique_ptr<SRWLOCK> lock_buffers_;
+    std::unique_ptr<std::shared_mutex> mutex_buffers_;
     std::deque<Pages> buffers_;
 
-    std::unique_ptr<SRWLOCK> lock_handles_;
+    std::unique_ptr<std::shared_mutex> mutex_handles_;
     Map<u64, ChunkFileHandle> chunk_handles_;   // add to back, evict from front
 
     // get zero-filled, page aligned buffer from the pool

@@ -7,6 +7,7 @@
 #include "worker.hpp"
 
 using std::bad_alloc;
+using std::shared_mutex;
 
 namespace chunkdisk
 {
@@ -31,17 +32,14 @@ DWORD ChunkDiskWorker::Start()
     try
     {
         // make class movable
-        lock_working_ = std::make_unique<SRWLOCK>();
-        lock_buffers_ = std::make_unique<SRWLOCK>();
-        lock_handles_ = std::make_unique<SRWLOCK>();
+        mutex_working_ = std::make_unique<shared_mutex>();
+        mutex_buffers_ = std::make_unique<shared_mutex>();
+        mutex_handles_ = std::make_unique<shared_mutex>();
     }
     catch (const bad_alloc&)
     {
         return ERROR_NOT_ENOUGH_MEMORY;
     }
-    InitializeSRWLock(lock_working_.get());
-    InitializeSRWLock(lock_buffers_.get());
-    InitializeSRWLock(lock_handles_.get());
 
     wait_event_.reset(CreateEventW(nullptr, TRUE, TRUE, nullptr));
     if (!wait_event_) return GetLastError();
@@ -129,11 +127,11 @@ DWORD ChunkDiskWorker::Wait(DWORD timeout_ms)
 
     while (true)
     {
-        auto g = SRWLockGuard(lock_working_.get(), false);
+        auto lk = SRWLock(*mutex_working_, false);
         if (working_.size() < MAX_QD) return ERROR_SUCCESS;
 
         if (!ResetEvent(wait_event_.get())) return GetLastError();
-        g.reset();
+        lk.unlock();
 
         auto ticks = (timeout_ms != INFINITE) ? GetTickCount() : 0;
         auto err = WaitForSingleObject(wait_event_.get(), timeout_ms);
@@ -151,9 +149,9 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
 
     // check queue depth
     // single dispatcher, no more works to be queued from it
-    auto g = SRWLockGuard(lock_working_.get(), false);
+    auto lk = SRWLock(*mutex_working_, false);
     if (working_.size() >= MAX_QD) return ERROR_BUSY;
-    g.reset();
+    lk.unlock();
 
     // expects something to do
     // expects ChunkWork::ops not empty
@@ -270,7 +268,8 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
     work.SetContext(context->Response->Hint, context->Response->Kind);
     try
     {
-        auto g = SRWLockGuard(lock_working_.get(), true);
+        lk.switch_lock();
+        lk.lock();
         auto work_it = working_.emplace(working_.end(), std::move(work));   // invalidates ChunkOpState::owner
         work_it->it = work_it;
         for (auto& op : work_it->ops) op.owner = &*work_it;
@@ -284,6 +283,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
             SetScsiError(&context->Response->Status, SCSI_SENSE_HARDWARE_ERROR, SCSI_ADSENSE_NO_SENSE);
             return err;
         }
+        lk.unlock();
         service_.SetPostFileTime(post_ft);
     }
     catch (const bad_alloc&)
@@ -297,11 +297,11 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
 DWORD ChunkDiskWorker::GetBuffer(Pages& buffer)
 {
     // buffers_ used by the dispatcher and the worker thread
-    auto g = SRWLockGuard(lock_buffers_.get(), true);
+    auto lk = SRWLock(*mutex_buffers_, true);
 
     if (buffers_.empty())
     {
-        g.reset();
+        lk.unlock();
 
         // align buffer to pages
         // additional page for unaligned requests
@@ -330,7 +330,7 @@ DWORD ChunkDiskWorker::ReturnBuffer(Pages buffer)
     try
     {
         // buffers_ used by the dispatcher and the worker thread
-        auto g = SRWLockGuard(lock_buffers_.get(), true);
+        auto lk = SRWLock(*mutex_buffers_, true);
         // LIFO order
         buffers_.emplace_front(std::move(buffer));
     }
@@ -344,7 +344,7 @@ DWORD ChunkDiskWorker::ReturnBuffer(Pages buffer)
 DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_out)
 {
     // chunk_handles_ used by the dispatcher and the worker thread
-    auto g = SRWLockGuard(lock_handles_.get(), true);
+    auto lk = SRWLock(*mutex_handles_, true);
 
     auto it = chunk_handles_.find(chunk_idx);
     if (it != chunk_handles_.end())
@@ -447,7 +447,7 @@ DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_ou
 DWORD ChunkDiskWorker::CloseChunk(u64 chunk_idx)
 {
     // chunk_handles_ used by the dispatcher and the worker thread
-    auto g = SRWLockGuard(lock_handles_.get(), true);
+    auto lk = SRWLock(*mutex_handles_, true);
 
     auto it = chunk_handles_.find(chunk_idx);
     if (it == chunk_handles_.end()) return ERROR_NOT_FOUND;
@@ -475,7 +475,7 @@ DWORD ChunkDiskWorker::CloseChunk(u64 chunk_idx)
 DWORD ChunkDiskWorker::RefreshChunk(u64 chunk_idx)
 {
     // chunk_handles_ used by the dispatcher and the worker thread
-    auto g = SRWLockGuard(lock_handles_.get(), true);
+    auto lk = SRWLock(*mutex_handles_, true);
 
     auto it = chunk_handles_.find(chunk_idx);
     if (it == chunk_handles_.end()) return ERROR_NOT_FOUND;
@@ -722,7 +722,7 @@ DWORD ChunkDiskWorker::PostMsg(ChunkWork work)
     auto err = DWORD(ERROR_SUCCESS);
     try
     {
-        auto g = SRWLockGuard(lock_working_.get(), true);
+        auto lk = SRWLock(*mutex_working_, true);
         auto work_it = working_.emplace(working_.end(), std::move(work));   // invalidates ChunkOpState::owner
         work_it->it = work_it;
         for (auto& op : work_it->ops) op.owner = &*work_it;
@@ -906,8 +906,8 @@ bool ChunkDiskWorker::CompleteWork(ChunkWork* work, ChunkWork** next)
     }
     else
     {
-        SRWLockGuard g;
-        if (next == nullptr) g.reset(SRWLockGuard(lock_working_.get(), true));
+        SRWLock lk;
+        if (next == nullptr) lk = SRWLock(*mutex_working_, true);
 
         // SetContext() not called for PostMsg()
         if (work->response.Hint != 0)
@@ -935,20 +935,20 @@ bool ChunkDiskWorker::CompleteWork(ChunkWork* work, ChunkWork** next)
 DWORD ChunkDiskWorker::IdleWork()
 {
     // single dispatcher
-    auto gw = SRWLockGuard(lock_working_.get(), false);
+    auto lkw = SRWLock(*mutex_working_, false);
     if (!working_.empty()) return STANDBY_MS;
-    gw.reset();
+    lkw.unlock();
 
     auto last_post_ft = service_.GetPostFileTime();
     auto disk_idle = (GetSystemFileTime() >= last_post_ft + STANDBY_MS * 10000);
 
-    auto gb = SRWLockGuard(lock_buffers_.get(), true);
+    auto lkb = SRWLock(*mutex_buffers_, true);
     buffers_.clear();
-    gb.reset();
+    lkb.unlock();
 
-    auto gh = SRWLockGuard(lock_handles_.get(), true);
+    auto lkh = SRWLock(*mutex_handles_, true);
     chunk_handles_.clear();
-    gh.reset();
+    lkh.unlock();
 
     disk_idle &= (last_post_ft == service_.GetPostFileTime());
     if (disk_idle)
@@ -962,7 +962,7 @@ DWORD ChunkDiskWorker::IdleWork()
 void ChunkDiskWorker::StopWorks()
 {
     // cancel ops waiting for a page
-    auto gw = SRWLockGuard(lock_working_.get(), true);
+    auto lkw = SRWLock(*mutex_working_, true);
     for (auto& work : working_)
     {
         for (auto& op : work.ops)
@@ -979,17 +979,17 @@ void ChunkDiskWorker::StopWorks()
         auto* work = &*working_.begin();
         while (work != nullptr) CompleteWork(work, &work);
     }
-    gw.reset();
+    lkw.unlock();
 
     // cancel ops waiting for file I/O
-    auto gh = SRWLockGuard(lock_handles_.get(), false);
+    auto lkh = SRWLock(*mutex_handles_, false);
     for (auto p : chunk_handles_)
     {
         auto& cfh = p.second;
         if (cfh.handle_ro) CancelIo(cfh.handle_ro.get());
         if (cfh.handle_rw) CancelIo(cfh.handle_rw.get());
     }
-    gh.reset();
+    lkh.unlock();
 
     // process cancelled ops
     auto bytes_transferred = DWORD();
@@ -1038,7 +1038,7 @@ void ChunkDiskWorker::StopWorks()
         // ignore ckey == CK_STOP
     }
 
-    gw.reset(SRWLockGuard(lock_working_.get(), true));
+    lkw.lock();
     if (!working_.empty())
     {
         auto* work = &*working_.begin();
@@ -1049,13 +1049,14 @@ void ChunkDiskWorker::StopWorks()
         }
     }
 
-    auto gb = SRWLockGuard(lock_buffers_.get(), true);
+    auto lkb = SRWLock(*mutex_buffers_, true);
     buffers_.clear();
-    gb.reset();
+    lkb.unlock();
 
-    gh.reset(SRWLockGuard(lock_handles_.get(), true));
+    lkh.switch_lock();
+    lkh.lock();
     chunk_handles_.clear();
-    gh.reset();
+    lkh.unlock();
 
     working_.clear();
     spd_ovl_event_.reset();
@@ -1251,8 +1252,8 @@ void ChunkDiskWorker::CompleteChunkOp(ChunkOpState& state, DWORD error, DWORD by
         }
         else
         {
-            SRWLockGuard g;
-            if (service_.UnmapRange(g, state.idx, state.start_off, state.end_off) == ERROR_SUCCESS)
+            SRWLock lk;
+            if (service_.UnmapRange(lk, state.idx, state.start_off, state.end_off) == ERROR_SUCCESS)
             {
                 // whole chunk unmapped
                 auto err = service_.UnmapChunk(state.idx);
@@ -1455,8 +1456,8 @@ void ChunkDiskWorker::CompleteWritePage(ChunkOpState& state, DWORD error, DWORD 
         }
         else
         {
-            SRWLockGuard g;
-            if (service_.UnmapRange(g, chunk_idx, r.start_off, r.end_off) == ERROR_SUCCESS)
+            SRWLock lk;
+            if (service_.UnmapRange(lk, chunk_idx, r.start_off, r.end_off) == ERROR_SUCCESS)
             {
                 // whole chunk unmapped
                 auto err = service_.UnmapChunk(chunk_idx);

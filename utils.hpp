@@ -11,67 +11,194 @@
 
 #include <memory>
 #include <string>
+#include <shared_mutex>
 #include <winspd/winspd.h>
 #include "types.hpp"
 
 namespace chunkdisk
 {
 
-// text may or may not be null-terminated
-DWORD ConvertUTF8(const u8* text, int size, std::wstring& result);
-
-// match to SpdStorageUnitStartDispatcher() behavior
-DWORD GetThreadCount(PDWORD ThreadCount);
-
-u64 GetSystemFileTime();
-
-// like lock_guard<SRWLOCK>
-// can be reset
-// NOTE: it's a programming error to try to acquire an SRW lock recursively.
-class SRWLockGuard
+// shared_mutex is an SRW lock in Windows
+// unique_lock or shared_lock
+template <class Derived>
+class SRWLockBase
 {
 public:
-    SRWLockGuard() : lock_(nullptr), is_exclusive_(false) {}
+    SRWLockBase() = default;
 
-    explicit SRWLockGuard(PSRWLOCK lock, bool is_exclusive)
-        : lock_(lock), is_exclusive_(is_exclusive)
+    SRWLockBase(std::shared_mutex& m, bool is_exclusive)
+    {
+        if (is_exclusive)
+        {
+            ulock_ = std::unique_lock(m);
+            static_cast<Derived*>(this)->on_locked(true);
+        }
+        else
+        {
+            slock_ = std::shared_lock(m);
+            static_cast<Derived*>(this)->on_locked(false);
+        }
+    }
+
+    SRWLockBase(std::shared_mutex& m, bool is_exclusive, std::defer_lock_t t)
+    {
+        if (is_exclusive)
+        {
+            ulock_ = std::unique_lock(m, t);
+        }
+        else
+        {
+            slock_ = std::shared_lock(m, t);
+        }
+    }
+
+    SRWLockBase(std::shared_mutex& m, bool is_exclusive, std::adopt_lock_t t)
+    {
+        if (is_exclusive)
+        {
+            ulock_ = std::unique_lock(m, t);
+        }
+        else
+        {
+            slock_ = std::shared_lock(m, t);
+        }
+    }
+
+    SRWLockBase(SRWLockBase&& other) noexcept = default;
+
+    ~SRWLockBase()
     {
         if (!*this) return;
-        is_exclusive_ ? AcquireSRWLockExclusive(lock_) : AcquireSRWLockShared(lock_);
+        unlock();
     }
 
-    ~SRWLockGuard() { reset(); }
+    SRWLockBase& operator=(SRWLockBase&& other) noexcept = default;
 
-    SRWLockGuard(const SRWLockGuard&) = delete;
+    // always false if no mutex associated
+    bool is_exclusive() const noexcept { return ulock_.mutex() != nullptr; }
 
-    SRWLockGuard(SRWLockGuard&& other) noexcept : SRWLockGuard(nullptr, false) { swap(*this, other); }
+    auto* mutex() const noexcept { return is_exclusive() ? ulock_.mutex() : slock_.mutex(); }
 
-    explicit operator bool() const noexcept { return lock_ != nullptr; }
+    explicit operator bool() const noexcept { return bool(ulock_) || bool(slock_); }
 
-    bool is_exclusive() const noexcept { return is_exclusive_; }
-
-    void reset()
+    void lock()
     {
-        if (!*this) return;
-        is_exclusive_ ? ReleaseSRWLockExclusive(lock_) : ReleaseSRWLockShared(lock_);
-        lock_ = nullptr;
+        if (*this) throw std::system_error(std::make_error_code(std::errc::resource_deadlock_would_occur));
+        if (ulock_.mutex() != nullptr)
+        {
+            ulock_.lock();
+            static_cast<Derived*>(this)->on_locked(true);
+        }
+        else if (slock_.mutex() != nullptr)
+        {
+            slock_.lock();
+            static_cast<Derived*>(this)->on_locked(false);
+        }
+        else
+        {
+            throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
+        }
     }
 
-    // release *this and take the ownership of other
-    // NOTE: reset() before resetting with the same lock
-    void reset(SRWLockGuard&& other) { swap(*this, other); }
-
-protected:
-    PSRWLOCK lock_;
-
-    bool is_exclusive_;
-
-    friend void swap(SRWLockGuard& a, SRWLockGuard& b) noexcept
+    bool try_lock()
     {
-        using std::swap;
-        swap(a.lock_, b.lock_);
-        swap(a.is_exclusive_, b.is_exclusive_);
+        if (*this) throw std::system_error(std::make_error_code(std::errc::resource_deadlock_would_occur));
+        if (ulock_.mutex() != nullptr)
+        {
+            auto locked = ulock_.try_lock();
+            if (locked) static_cast<Derived*>(this)->on_locked(true);
+            return locked;
+        }
+        else if (slock_.mutex() != nullptr)
+        {
+            auto locked = slock_.try_lock();
+            if (locked) static_cast<Derived*>(this)->on_locked(false);
+            return locked;
+        }
+        else
+        {
+            throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
+        }
     }
+
+    void unlock()
+    {
+        if (!*this) throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
+        if (ulock_.mutex() != nullptr)
+        {
+            static_cast<Derived*>(this)->on_unlock(true);
+            ulock_.unlock();
+        }
+        else if (slock_.mutex() != nullptr)
+        {
+            static_cast<Derived*>(this)->on_unlock(false);
+            slock_.unlock();
+        }
+        else
+        {
+            throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
+        }
+    }
+
+    // switch between exclusive and shared lock
+    bool switch_lock()
+    {
+        auto excl = is_exclusive();
+        auto* m = mutex();
+        if (m == nullptr) return false;
+        auto owns = bool(*this);
+
+        if (owns) unlock();
+
+        if (excl)
+        {
+            ulock_.release();
+            slock_ = std::shared_lock(*m, std::defer_lock);
+        }
+        else
+        {
+            slock_.release();
+            ulock_ = std::unique_lock(*m, std::defer_lock);
+        }
+
+        if (owns) lock();
+
+        return !excl;
+    }
+
+    auto* release() noexcept
+    {
+        auto* um = ulock_.release();
+        auto* sm = slock_.release();
+        return um != nullptr ? um : sm;
+    }
+
+    void on_locked(bool is_exclusive);
+
+    void on_unlock(bool is_exclusive);
+
+private:
+    std::unique_lock<std::shared_mutex> ulock_;
+    std::shared_lock<std::shared_mutex> slock_;
+};
+
+class SRWLock : public SRWLockBase<SRWLock>
+{
+public:
+    SRWLock() : SRWLockBase() {}
+
+    SRWLock(std::shared_mutex& m, bool is_exclusive)
+        : SRWLockBase(m, is_exclusive) {}
+
+    SRWLock(std::shared_mutex& m, bool is_exclusive, std::defer_lock_t t)
+        : SRWLockBase(m, is_exclusive, t) {}
+
+    SRWLock(std::shared_mutex& m, bool is_exclusive, std::adopt_lock_t t)
+        : SRWLockBase(m, is_exclusive, t) {}
+
+    void on_locked(bool is_exclusive) {}
+
+    void on_unlock(bool is_exclusive) {}
 };
 
 struct HandleDeleter
@@ -116,6 +243,14 @@ struct PagesDeleter
 
 // deleted by VirtualFree()
 using Pages = std::unique_ptr<void, PagesDeleter>;
+
+// text may or may not be null-terminated
+DWORD ConvertUTF8(const u8* text, int size, std::wstring& result);
+
+// match to SpdStorageUnitStartDispatcher() behavior
+DWORD GetThreadCount(PDWORD ThreadCount);
+
+u64 GetSystemFileTime();
 
 void SetScsiError(SPD_IOCTL_STORAGE_UNIT_STATUS* status, u8 sense_key, u8 asc);
 void SetScsiError(SPD_IOCTL_STORAGE_UNIT_STATUS* status, u8 sense_key, u8 asc, u64 info);

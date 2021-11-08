@@ -38,45 +38,32 @@ struct PageEntry
     std::unique_ptr<size_t> user;
 };
 
-// Don't upcast a pointer to SRWLockGuard
-class PageGuard : public SRWLockGuard
+class PageLock : public SRWLockBase<PageLock>
 {
 public:
-    PageGuard() : SRWLockGuard(), entry_(nullptr) {}
+    PageLock() : SRWLockBase(), entry_(nullptr) {}
 
-    explicit PageGuard(PageEntry* entry, bool is_exclusive)
-        : SRWLockGuard(entry->lock.get(), is_exclusive), entry_(entry)
+    PageLock(PageEntry& entry, bool is_exclusive)
+        : SRWLockBase(*entry.mutex, is_exclusive), entry_(&entry) {}
+
+    PageLock(PageEntry& entry, bool is_exclusive, std::defer_lock_t t)
+        : SRWLockBase(*entry.mutex, is_exclusive, t), entry_(&entry) {}
+
+    PageLock(PageEntry& entry, bool is_exclusive, std::adopt_lock_t t)
+        : SRWLockBase(*entry.mutex, is_exclusive, t), entry_(&entry) {}
+
+    void on_locked(bool is_exclusive)
     {
-        if (is_exclusive) entry_->owner = GetCurrentThreadId();
+        if (is_exclusive) entry_->set_owner();
     }
 
-    // not virtual
-    ~PageGuard() { reset(); }
-
-    PageGuard(PageGuard&& other) noexcept : PageGuard() { swap(*this, other); }
-
-    // not virtual
-    void reset()
+    void on_unlock(bool is_exclusive)
     {
-        if (!*this) return;
-        if (is_exclusive()) entry_->owner = 0;
-        SRWLockGuard::reset();
+        if (is_exclusive) entry_->clear_owner();
     }
-
-    // release *this and take the ownership of other
-    // NOTE: reset() before resetting with the same lock
-    void reset(PageGuard&& other) { swap(*this, other); }
 
 private:
     PageEntry* entry_;
-
-    friend void swap(PageGuard& a, PageGuard& b) noexcept
-    {
-        using std::swap;
-        swap(a.lock_, b.lock_);
-        swap(a.is_exclusive_, b.is_exclusive_);
-        swap(a.entry_, b.entry_);
-    }
 };
 
 // operation result, only for current thread
@@ -85,7 +72,7 @@ struct PageResult
 {
     DWORD error;                    // page invalid if not ERROR_SUCCESS
     bool is_hit = false;            // true if page hit
-    PageGuard guard;                // hold while using ptr and user
+    PageLock lock;                  // hold while using ptr and user
     LPVOID ptr = nullptr;           // PageEntry::ptr
     void** user = nullptr;          // PageEntry::user
 };
@@ -123,13 +110,13 @@ public:
     DWORD UnmapChunk(u64 chunk_idx);
 
     // acquire shared lock for reading an existing page
-    // local use, don't call LockPage() while holding PageResult::guard
+    // local use, don't call LockPage() while holding PageResult::lock
     // PageResult::error is ERROR_LOCK_FAILED if the page is locked by the current thread
     // PageResult::user not available
     PageResult PeekPage(u64 page_idx);
 
     // acquire exclusive lock for creating/updating a page
-    // persistent use, empty PageResult::guard, the calling thread must FreePage() later
+    // persistent use, empty PageResult::lock, the calling thread must FreePage() later
     // PageResult::error is ERROR_LOCK_FAILED if the page is locked by the current thread
     // PageResult::user valid for ERROR_SUCCESS and ERROR_LOCK_FAILED
     PageResult LockPage(u64 page_idx);
@@ -154,8 +141,8 @@ public:
 
     // mark [start_off, end_off) unmapped
     // return ERROR_SUCCESS and reset ranges if whole, ERROR_IO_PENDING otherwise
-    // g: empty, hold lock_unmapped_ when ERROR_SUCCESS or ERROR_IO_PENDING returned
-    DWORD UnmapRange(SRWLockGuard& g, u64 chunk_idx, u64 start_off, u64 end_off);
+    // lk: empty, hold mutex_unmapped_ when ERROR_SUCCESS or ERROR_IO_PENDING returned
+    DWORD UnmapRange(SRWLock& lk, u64 chunk_idx, u64 start_off, u64 end_off);
 
     void FlushUnmapRanges(u64 chunk_idx);
 
@@ -170,7 +157,7 @@ public:
 private:
     std::vector<FileHandle> part_lock_;             // part index -> .lock
 
-    std::unique_ptr<SRWLOCK> lock_parts_;
+    std::unique_ptr<std::shared_mutex> mutex_parts_;
     std::vector<u64> part_current_;                 // part index -> # of chunks
     size_t part_current_new_ = 0;                   // part index for new chunks
     std::unordered_map<u64, size_t> chunk_parts_;   // chunk index -> part index
@@ -183,18 +170,18 @@ private:
     // add to back, evict from front
     Map<u64, PageEntry> cached_pages_;
 
-    std::unique_ptr<SRWLOCK> lock_unmapped_;
+    std::unique_ptr<std::shared_mutex> mutex_unmapped_;
     // chunk index -> [start_off, end_off)
     std::unordered_map<u64, std::map<u64, u64>> chunk_unmapped_;
 
     // not movable
     std::atomic<u64> post_ft_ = 0;
 
-    // g: lock_pages_, shared
-    // it: from cached_pages_ while holding g
+    // lk: mutex_pages_, shared
+    // it: from cached_pages_ while holding lk
     // return ERROR_LOCK_FAILED if it is locked by the current thread
-    // g temporaily reset otherwise, iterators may be invalidated
-    DWORD RemovePageEntry(SRWLockGuard& g, Map<u64, PageEntry>::iterator it);
+    // lk temporaily reset otherwise, iterators may be invalidated
+    DWORD RemovePageEntry(SRWLock& lk, Map<u64, PageEntry>::iterator it);
 };
 
 }

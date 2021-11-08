@@ -13,6 +13,7 @@ namespace fs = std::filesystem;
 using std::bad_alloc;
 using std::make_unique;
 using std::unordered_map;
+using std::shared_mutex;
 
 namespace chunkdisk
 {
@@ -22,18 +23,14 @@ DWORD ChunkDiskService::Start()
     try
     {
         // make class movable
-        lock_parts_ = make_unique<SRWLOCK>();
-        lock_pages_ = make_unique<SRWLOCK>();
-        lock_unmapped_ = make_unique<SRWLOCK>();
+        mutex_parts_ = make_unique<shared_mutex>();
+        mutex_pages_ = make_unique<shared_mutex>();
+        mutex_unmapped_ = make_unique<shared_mutex>();
     }
     catch (const bad_alloc&)
     {
         return ERROR_NOT_ENOUGH_MEMORY;
     }
-
-    InitializeSRWLock(lock_parts_.get());
-    InitializeSRWLock(lock_pages_.get());
-    InitializeSRWLock(lock_unmapped_.get());
 
     auto err = DWORD(ERROR_SUCCESS);
 
@@ -146,7 +143,7 @@ DWORD ChunkDiskService::CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool 
     try
     {
         // check existence
-        auto g = SRWLockGuard(lock_parts_.get(), true);
+        auto lk = SRWLock(*mutex_parts_, true);
 
         // assign part if not found
         auto part_it = chunk_parts_.find(chunk_idx);
@@ -253,7 +250,7 @@ DWORD ChunkDiskService::CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool 
 
 DWORD ChunkDiskService::UnmapChunk(u64 chunk_idx)
 {
-    auto gp = SRWLockGuard(lock_parts_.get(), false);
+    auto lkp = SRWLock(*mutex_parts_, false);
 
     auto part_it = chunk_parts_.find(chunk_idx);
     if (part_it == chunk_parts_.end()) return ERROR_FILE_NOT_FOUND;
@@ -552,14 +549,13 @@ DWORD ChunkDiskService::FlushPages()
     return err;
 }
 
-
-DWORD ChunkDiskService::UnmapRange(SRWLockGuard& g, u64 chunk_idx, u64 start_off, u64 end_off)
+DWORD ChunkDiskService::UnmapRange(SRWLock& lk, u64 chunk_idx, u64 start_off, u64 end_off)
 {
-    if (g) return ERROR_INVALID_PARAMETER;
+    if (lk) return ERROR_INVALID_PARAMETER;
     if (start_off >= end_off) return ERROR_INVALID_PARAMETER;
     if (end_off > params.chunk_length) return ERROR_INVALID_PARAMETER;
 
-    g.reset(SRWLockGuard(lock_unmapped_.get(), true));
+    lk = SRWLock(*mutex_unmapped_, true);
     auto rit = chunk_unmapped_.try_emplace(chunk_idx).first;
     auto& ranges = rit->second;
 
@@ -589,7 +585,6 @@ DWORD ChunkDiskService::UnmapRange(SRWLockGuard& g, u64 chunk_idx, u64 start_off
         }
         catch (const bad_alloc&)
         {
-            g.reset();
             return ERROR_NOT_ENOUGH_MEMORY;
         }
     }
@@ -619,12 +614,11 @@ DWORD ChunkDiskService::UnmapRange(SRWLockGuard& g, u64 chunk_idx, u64 start_off
 
 void ChunkDiskService::FlushUnmapRanges(u64 chunk_idx)
 {
-    auto g = SRWLockGuard(lock_unmapped_.get(), false);
+    auto lk = SRWLock(*mutex_unmapped_, false);
     if (chunk_unmapped_.empty()) return;
     if (chunk_unmapped_.find(chunk_idx) == chunk_unmapped_.end()) return;
 
-    g.reset();
-    g.reset(SRWLockGuard(lock_unmapped_.get(), true));
+    lk.switch_lock();
     auto it = chunk_unmapped_.find(chunk_idx);
     if (it == chunk_unmapped_.end()) return;
     chunk_unmapped_.erase(it);
@@ -632,7 +626,7 @@ void ChunkDiskService::FlushUnmapRanges(u64 chunk_idx)
 
 void ChunkDiskService::FlushUnmapRanges()
 {
-    auto g = SRWLockGuard(lock_unmapped_.get(), true);
+    auto lk = SRWLock(*mutex_unmapped_, true);
     chunk_unmapped_.clear();
 }
 

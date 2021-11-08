@@ -16,6 +16,7 @@ using std::bad_alloc;
 using std::unique_ptr;
 using std::wstring;
 using std::vector;
+using std::shared_mutex;
 
 namespace fs = std::filesystem;
 
@@ -38,10 +39,10 @@ static constexpr auto MAX_WORKERS = u32(MAXIMUM_WAIT_OBJECTS);
 
 struct ChunkDisk
 {
-    ChunkDiskService service;
+    ChunkDiskService service;                       // not movable
     vector<unique_ptr<ChunkDiskWorker>> workers;
 
-    std::unique_ptr<SRWLOCK> lock_assigned;
+    std::unique_ptr<shared_mutex> lock_assigned;
     u32 workers_assigned = 0;
 
     explicit ChunkDisk(ChunkDiskParams params, SPD_STORAGE_UNIT* storage_unit)
@@ -158,7 +159,7 @@ ChunkDiskWorker* GetWorker(SPD_STORAGE_UNIT* StorageUnit)
     if (worker == nullptr)
     {
         auto* cdisk = StorageUnitChunkDisk(StorageUnit);
-        auto g = SRWLockGuard(cdisk->lock_assigned.get(), true);
+        auto lk = SRWLock(*cdisk->lock_assigned, true);
         worker = cdisk->workers[cdisk->workers_assigned].get();
         ++cdisk->workers_assigned;
     }
@@ -344,8 +345,7 @@ DWORD CreateStorageUnit(PWSTR chunkdisk_file, BOOLEAN write_protected, PWSTR pip
     {
         // unit will be deleted when cdisk is deleted
         cdisk = std::make_unique<ChunkDisk>(std::move(params), unit);
-        cdisk->lock_assigned = std::make_unique<SRWLOCK>();
-        InitializeSRWLock(cdisk->lock_assigned.get());
+        cdisk->lock_assigned = std::make_unique<shared_mutex>();
 
         unit->UserContext = cdisk.get();
     }
