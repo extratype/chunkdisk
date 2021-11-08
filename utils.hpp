@@ -23,6 +23,9 @@ namespace chunkdisk
 template <class Derived>
 class SRWLockBase
 {
+    std::unique_lock<std::shared_mutex> ulock_;
+    std::shared_lock<std::shared_mutex> slock_;
+
 public:
     SRWLockBase() = default;
 
@@ -176,10 +179,6 @@ public:
     void on_locked(bool is_exclusive);
 
     void on_unlock(bool is_exclusive);
-
-private:
-    std::unique_lock<std::shared_mutex> ulock_;
-    std::shared_lock<std::shared_mutex> slock_;
 };
 
 class SRWLock : public SRWLockBase<SRWLock>

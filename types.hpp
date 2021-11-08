@@ -47,17 +47,27 @@ struct pair_hash
 template <class KT, class VT>
 class Map
 {
-public:
     struct VIt
     {
         VT val;
         typename std::list<const KT*>::iterator it; // iterator in key_order_
     };
 
+    std::unordered_map<KT, VIt> map_;
+    std::list<const KT*> key_order_;
+
+public:
     // iterate in the insertion order
     // invalidated if invalidated in map_
-    struct iterator
+    class iterator
     {
+        friend class Map;
+
+        std::unordered_map<KT, VIt>* map_ = nullptr;
+        typename std::unordered_map<KT, VIt>::iterator it_;
+        typename std::list<const KT*>::iterator end_it_;    // key_order_.end()
+
+    public:
         iterator() = default;
 
         explicit iterator(std::unordered_map<KT, VIt>* map,
@@ -83,13 +93,6 @@ public:
         {
             return map_ == other.map_ && it_ == other.it_ && end_it_ == other.end_it_;
         }
-
-    private:
-        friend class Map;
-
-        std::unordered_map<KT, VIt>* map_ = nullptr;
-        typename std::unordered_map<KT, VIt>::iterator it_;
-        typename std::list<const KT*>::iterator end_it_;    // key_order_.end()
     };
 
     auto front() { return *find(*key_order_.front()); }
@@ -189,10 +192,6 @@ public:
     }
 
     void reserve(size_t count) { map_.reserve(count); }
-
-private:
-    std::unordered_map<KT, VIt> map_;
-    std::list<const KT*> key_order_;
 };
 
 }

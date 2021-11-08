@@ -111,6 +111,29 @@ struct ChunkFileHandle
 // can't be shared with other dispatchers
 class ChunkDiskWorker
 {
+    enum IOCPKey
+    {
+        CK_IO = 0,      // completed file I/O
+        CK_POST,        // disk I/O request from PostWork()
+        CK_STOP         // cancel pending I/O ops and stop DoWorks()
+    };
+
+    ChunkDiskService& service_;
+    std::thread thread_;
+    GenericHandle iocp_;
+    GenericHandle wait_event_;
+    GenericHandle spd_ovl_event_;
+    OVERLAPPED spd_ovl_ = {};
+
+    std::unique_ptr<std::shared_mutex> mutex_working_;
+    std::list<ChunkWork> working_;
+
+    std::unique_ptr<std::shared_mutex> mutex_buffers_;
+    std::deque<Pages> buffers_;
+
+    std::unique_ptr<std::shared_mutex> mutex_handles_;
+    Map<u64, ChunkFileHandle> chunk_handles_;   // add to back, evict from front
+
 public:
     explicit ChunkDiskWorker(ChunkDiskService& service) : service_(service) {}
 
@@ -158,29 +181,6 @@ public:
     DWORD PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, ChunkOpKind op_kind, u64 block_addr, u32 count);
 
 private:
-    enum IOCPKey
-    {
-        CK_IO = 0,      // completed file I/O
-        CK_POST,        // disk I/O request from PostWork()
-        CK_STOP         // cancel pending I/O ops and stop DoWorks()
-    };
-
-    ChunkDiskService& service_;
-    std::thread thread_;
-    GenericHandle iocp_;
-    GenericHandle wait_event_;
-    GenericHandle spd_ovl_event_;
-    OVERLAPPED spd_ovl_ = {};
-
-    std::unique_ptr<std::shared_mutex> mutex_working_;
-    std::list<ChunkWork> working_;
-
-    std::unique_ptr<std::shared_mutex> mutex_buffers_;
-    std::deque<Pages> buffers_;
-
-    std::unique_ptr<std::shared_mutex> mutex_handles_;
-    Map<u64, ChunkFileHandle> chunk_handles_;   // add to back, evict from front
-
     // get zero-filled, page aligned buffer from the pool
     DWORD GetBuffer(Pages& buffer);
 

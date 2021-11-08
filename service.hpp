@@ -69,6 +69,8 @@ struct PageEntry
 
 class PageLock : public SRWLockBase<PageLock>
 {
+    PageEntry* entry_;
+
 public:
     PageLock() : SRWLockBase(), entry_(nullptr) {}
 
@@ -90,9 +92,6 @@ public:
     {
         if (is_exclusive) entry_->clear_owner();
     }
-
-private:
-    PageEntry* entry_;
 };
 
 // operation result, only for current thread
@@ -108,6 +107,26 @@ struct PageResult
 
 class ChunkDiskService
 {
+    std::vector<FileHandle> part_lock_;             // part index -> .lock
+
+    std::unique_ptr<std::shared_mutex> mutex_parts_;
+    std::vector<u64> part_current_;                 // part index -> # of chunks
+    size_t part_current_new_ = 0;                   // part index for new chunks
+    std::unordered_map<u64, size_t> chunk_parts_;   // chunk index -> part index
+
+    std::unique_ptr<std::shared_mutex> mutex_pages_;
+    // BLOCK_SIZE -> PAGE_SIZE access
+    // read cache, write through
+    // add to back, evict from front
+    Map<u64, PageEntry> cached_pages_;
+
+    std::unique_ptr<std::shared_mutex> mutex_unmapped_;
+    // chunk index -> [start_off, end_off)
+    std::unordered_map<u64, std::map<u64, u64>> chunk_unmapped_;
+
+    // not movable
+    std::atomic<u64> post_ft_ = 0;
+
 public:
     const ChunkDiskParams params;
 
@@ -184,26 +203,6 @@ public:
     void SetPostFileTime(u64 ft) { post_ft_.store(ft, std::memory_order_release); }
 
 private:
-    std::vector<FileHandle> part_lock_;             // part index -> .lock
-
-    std::unique_ptr<std::shared_mutex> mutex_parts_;
-    std::vector<u64> part_current_;                 // part index -> # of chunks
-    size_t part_current_new_ = 0;                   // part index for new chunks
-    std::unordered_map<u64, size_t> chunk_parts_;   // chunk index -> part index
-
-    std::unique_ptr<std::shared_mutex> mutex_pages_;
-    // BLOCK_SIZE -> PAGE_SIZE access
-    // read cache, write through
-    // add to back, evict from front
-    Map<u64, PageEntry> cached_pages_;
-
-    std::unique_ptr<std::shared_mutex> mutex_unmapped_;
-    // chunk index -> [start_off, end_off)
-    std::unordered_map<u64, std::map<u64, u64>> chunk_unmapped_;
-
-    // not movable
-    std::atomic<u64> post_ft_ = 0;
-
     // lk: mutex_pages_, shared
     // it: from cached_pages_ while holding lk
     // return ERROR_LOCK_FAILED if it is locked by the current thread
