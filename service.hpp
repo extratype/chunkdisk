@@ -12,6 +12,7 @@
 #include <vector>
 #include <map>
 #include <unordered_map>
+#include <atomic>
 #include "utils.hpp"
 #include "params.hpp"
 
@@ -103,8 +104,6 @@ public:
     ChunkDiskService(ChunkDiskParams params, SPD_STORAGE_UNIT* storage_unit, u32 max_pages)
         : params(std::move(params)), storage_unit(storage_unit), max_pages(max_pages) {}
 
-    ChunkDiskService(ChunkDiskService&&) = default;
-
     u32 MaxTransferLength() const { return storage_unit->StorageUnitParams.MaxTransferLength; }
 
     DWORD Start();
@@ -162,13 +161,11 @@ public:
 
     void FlushUnmapRanges();
 
-    // last pending disk I/O
-    // thread safe in x86-64
-    u64 GetPostFileTime() const { return post_ft_; }
+    // last disk I/O request
+    u64 GetPostFileTime() const { return post_ft_.load(std::memory_order_acquire); }
 
-    // last pending disk I/O
-    // thread safe in x86-64
-    void SetPostFileTime(u64 ft) { post_ft_ = ft; }
+    // last disk I/O request
+    void SetPostFileTime(u64 ft) { post_ft_.store(ft, std::memory_order_release); }
 
 private:
     std::vector<FileHandle> part_lock_;             // part index -> .lock
@@ -190,7 +187,8 @@ private:
     // chunk index -> [start_off, end_off)
     std::unordered_map<u64, std::map<u64, u64>> chunk_unmapped_;
 
-    u64 post_ft_ = 0;
+    // not movable
+    std::atomic<u64> post_ft_ = 0;
 
     // g: lock_pages_, shared
     // it: from cached_pages_ while holding g
