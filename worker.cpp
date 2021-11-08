@@ -260,6 +260,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
     {
         // read all done immediately
         if (op_kind == READ_CHUNK) memcpy(ctx_buffer, work.ops[0].buffer, params.BlockBytes(count));
+        ReturnBuffer(std::move(work.buffer));
         service_.SetPostFileTime(GetSystemFileTime());
         return ERROR_SUCCESS;
     }
