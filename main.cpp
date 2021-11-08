@@ -153,7 +153,7 @@ ChunkDisk* StorageUnitChunkDisk(SPD_STORAGE_UNIT* StorageUnit)
     return recast<ChunkDisk*>(StorageUnit->UserContext);
 }
 
-ChunkDiskWorker* GetWorker(SPD_STORAGE_UNIT* StorageUnit)
+ChunkDiskWorker* GetAssignedWorker(SPD_STORAGE_UNIT* StorageUnit)
 {
     static thread_local auto* worker = (ChunkDiskWorker*)(nullptr);
     if (worker == nullptr)
@@ -180,7 +180,7 @@ BOOLEAN PostWork(SPD_STORAGE_UNIT* StorageUnit, ChunkOpKind op_kind, u64 block_a
         if (count) block_addr = descs[0].BlockAddress;
     }
 
-    auto* worker = GetWorker(StorageUnit);
+    auto* worker = GetAssignedWorker(StorageUnit);
     worker->Wait();
     auto err = worker->PostWork(context, op_kind, block_addr, count);
     if (err != ERROR_IO_PENDING && err != ERROR_SUCCESS)
