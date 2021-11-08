@@ -24,18 +24,47 @@ namespace chunkdisk
 struct PageEntry
 {
     // lock for members
-    std::unique_ptr<SRWLOCK> lock;
+    // hold a reference to wait, entry may be moved or replaced
+    std::shared_ptr<std::shared_mutex> mutex;
 
     // thread ID owning lock exclusively
     // ID 0 is in use by Windows kernel
-    // thread safe to compare to the current thread ID without locks in x86-64
-    DWORD owner = 0;
+    // lock mutex_pages_ to compare with other threads
+    std::atomic<DWORD> owner = 0;
 
     // ChunkDiskParams::PageBytes(1)
     Pages ptr;
 
     // custom value for the owner thread
     std::unique_ptr<size_t> user;
+
+    friend void swap(PageEntry& a, PageEntry& b) noexcept
+    {
+        using std::swap;
+        swap(a.mutex, b.mutex);
+        // not atomic, set a.owner first
+        b.owner.store(a.owner.exchange(b.owner.load(std::memory_order_acquire),
+                                       std::memory_order_acq_rel),
+                      std::memory_order_release);
+        swap(a.ptr, b.ptr);
+        swap(a.user, b.user);
+    }
+
+    PageEntry() = default;
+
+    PageEntry(PageEntry&& other) noexcept : PageEntry() { swap(*this, other); }
+
+    PageEntry& operator=(PageEntry&& other) noexcept
+    {
+        swap(*this, other);
+        return *this;
+    }
+
+    bool is_owned() const { return owner.load(std::memory_order_acquire) == GetCurrentThreadId(); }
+
+    void set_owner() { owner.store(GetCurrentThreadId(), std::memory_order_release); }
+
+    void clear_owner() { owner.store(0, std::memory_order_release); }
 };
 
 class PageLock : public SRWLockBase<PageLock>
@@ -162,9 +191,7 @@ private:
     size_t part_current_new_ = 0;                   // part index for new chunks
     std::unordered_map<u64, size_t> chunk_parts_;   // chunk index -> part index
 
-    // lock cached_pages_
-    // don't wait for PageEntry::lock while exclusively holding this to avoid a deadlock
-    std::unique_ptr<SRWLOCK> lock_pages_;
+    std::unique_ptr<std::shared_mutex> mutex_pages_;
     // BLOCK_SIZE -> PAGE_SIZE access
     // read cache, write through
     // add to back, evict from front

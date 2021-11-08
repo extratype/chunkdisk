@@ -272,41 +272,60 @@ DWORD ChunkDiskService::UnmapChunk(u64 chunk_idx)
 
 PageResult ChunkDiskService::PeekPage(u64 page_idx)
 {
-    auto g = SRWLockGuard(lock_pages_.get(), false);
+    auto lk = SRWLock(*mutex_pages_, true);
     auto it = cached_pages_.find(page_idx);
     if (it == cached_pages_.end()) return PageResult{ERROR_NOT_FOUND};
-
     auto* entry = &((*it).second);
-    if (entry->owner == GetCurrentThreadId()) return PageResult{ERROR_LOCK_FAILED};
-    auto result = PageResult{
-        ERROR_SUCCESS,
-        true,
-        PageGuard(entry, false),
-        entry->ptr.get()};
+    if (entry->is_owned()) return PageResult{ERROR_LOCK_FAILED};
 
-    g.reset();
-    g.reset(SRWLockGuard(lock_pages_.get(), true));
-    // entry locked but may be moved
-    cached_pages_.reinsert_back(cached_pages_.find(page_idx));
-    return result;
+    cached_pages_.reinsert_back(it);
+    auto m = entry->mutex;
+    lk.unlock();
+    lk.switch_lock();
+    auto lkp = SRWLock(*m, false, std::defer_lock);
+
+    while (true)
+    {
+        std::lock(lk, lkp);
+        // entry may be moved or replaced
+        it = cached_pages_.find(page_idx);
+        if (it == cached_pages_.end()) return PageResult{ERROR_NOT_FOUND};
+        entry = &((*it).second);
+        if (m != entry->mutex)
+        {
+            lkp.unlock();
+            m = entry->mutex;
+            lkp = SRWLock(*m, false, std::defer_lock);
+            lk.unlock();
+            continue;
+        }
+
+        lkp.release();
+        return PageResult{
+            ERROR_SUCCESS,
+            true,
+            PageLock(*entry, false, std::adopt_lock),
+            entry->ptr.get()};
+    }
 }
 
 PageResult ChunkDiskService::LockPage(u64 page_idx)
 {
-    auto g = SRWLockGuard(lock_pages_.get(), false);
+    auto lk = SRWLock(*mutex_pages_, true);
 
     // entry to lock
-    auto* entry = (PageEntry*)(nullptr);
-    auto find_entry = [this, page_idx, &entry]() -> bool
+    auto it = cached_pages_.find(page_idx);
+    auto* entry = (it != cached_pages_.end()) ? &((*it).second) : nullptr;
+    auto find_entry = [this, page_idx, &it, &entry]() -> bool
     {
-        auto it = cached_pages_.find(page_idx);
+        it = cached_pages_.find(page_idx);
         entry = (it != cached_pages_.end()) ? &((*it).second) : nullptr;
         return entry != nullptr;
     };
 
     // try to keep < max_pages
-    // g: shared, resets g
-    auto trim_pages = [this, &g]()
+    // lk: shared, resets lk
+    auto trim_pages = [this, &lk]()
     {
         while (cached_pages_.size() >= max_pages)
         {
@@ -315,129 +334,149 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
             for (auto it = cached_pages_.begin(); it != cached_pages_.end();)
             {
                 auto* entry = &((*it).second);
-                if (entry->owner == GetCurrentThreadId())
+                if (entry->is_owned())
                 {
                     // the added entry is skipped here
                     ++it;
                     continue;
                 }
-                // to be released without blocking
-                if (!TryAcquireSRWLockExclusive(entry->lock.get()))
+                // avoid deadlock
+                if (!entry->mutex->try_lock())
                 {
                     ++it;
                     continue;
                 }
-                ReleaseSRWLockExclusive(entry->lock.get());
+                entry->mutex->unlock();
                 it_evict = it;
                 break;
             }
             if (it_evict == cached_pages_.end()) break;
 
-            // resets g, iterators may be invalidated
-            RemovePageEntry(g, it_evict);
+            // resets lk, iterators may be invalidated
+            RemovePageEntry(lk, it_evict);
         }
     };
 
     while (true)
     {
-        if (!g.is_exclusive())
+        if (entry != nullptr)
         {
-            // can wait, but can't add
-            if (find_entry())
+            // page hit
+            if (entry->is_owned())
             {
-                // page hit
-                if (entry->owner == GetCurrentThreadId())
-                {
-                    return PageResult{
-                        .error = ERROR_LOCK_FAILED,
-                        .user = recast<void**>(entry->user.get())};
-                }
-                AcquireSRWLockExclusive(entry->lock.get());
-                entry->owner = GetCurrentThreadId();
-                auto result = PageResult{
-                    ERROR_SUCCESS,
-                    true,
-                    PageGuard(),
-                    entry->ptr.get(),
-                    recast<void**>(entry->user.get())};
-
-                g.reset();
-                g.reset(SRWLockGuard(lock_pages_.get(), true));
-                // entry locked but may be moved
-                cached_pages_.reinsert_back(cached_pages_.find(page_idx));
-                return result;
+                return PageResult{
+                    .error = ERROR_LOCK_FAILED,
+                    .user = recast<void**>(entry->user.get())};
             }
+
+            cached_pages_.reinsert_back(it);
+            auto m = entry->mutex;
+            lk.unlock();
+            lk.switch_lock();
+            auto lkp = SRWLock(*m, true, std::defer_lock);
+
+            while (true)
+            {
+                std::lock(lk, lkp);
+                // entry may be moved or replaced
+                if (!find_entry())
+                {
+                    break;
+                }
+                if (m != entry->mutex)
+                {
+                    lkp.unlock();
+                    m = entry->mutex;
+                    lkp = SRWLock(*m, true, std::defer_lock);
+                    lk.unlock();
+                    continue;
+                }
+                break;
+            }
+            if (entry == nullptr)
+            {
+                lkp.unlock();
+                lk.switch_lock();
+                continue;
+            }
+
+            entry->set_owner();
+            lkp.release();
+            return PageResult{
+                ERROR_SUCCESS,
+                true,
+                PageLock(),
+                entry->ptr.get(),
+                recast<void**>(entry->user.get())};
         }
         else
         {
-            // can add, but can't wait and be blocked
-            if (!find_entry())
+            // page miss
+            try
             {
-                // page miss
+                auto user = make_unique<u64>();
+                auto ptr = Pages(VirtualAlloc(nullptr, params.PageBytes(1),
+                                              MEM_COMMIT, PAGE_READWRITE));
+                if (ptr == nullptr) return PageResult{ERROR_NOT_ENOUGH_MEMORY};
+                auto mutex = std::make_shared<shared_mutex>();
+
+                mutex->lock();
                 try
                 {
-                    auto user = make_unique<u64>();
-                    auto ptr = Pages(VirtualAlloc(nullptr, params.PageBytes(1),
-                                                  MEM_COMMIT, PAGE_READWRITE));
-                    if (ptr == nullptr) return PageResult{ERROR_NOT_ENOUGH_MEMORY};
-
-                    auto lock = make_unique<SRWLOCK>();
-                    InitializeSRWLock(lock.get());
-                    AcquireSRWLockExclusive(lock.get());
-
                     entry = &((*(cached_pages_.try_emplace(page_idx).first)).second);
-                    entry->lock = std::move(lock);
-                    entry->owner = GetCurrentThreadId();
-                    entry->ptr = std::move(ptr);
-                    entry->user = std::move(user);
-                    auto result = PageResult{
-                        ERROR_SUCCESS,
-                        false,
-                        PageGuard(),
-                        entry->ptr.get(),
-                        recast<void**>(entry->user.get())};
-
-                    // entry locked but may be moved
-                    g.reset();
-                    g.reset(SRWLockGuard(lock_pages_.get(), false));
-                    trim_pages();
-                    return result;
                 }
                 catch (const bad_alloc&)
                 {
-                    return PageResult{ERROR_NOT_ENOUGH_MEMORY};
+                    mutex->unlock();
+                    throw;
                 }
+                entry->mutex = std::move(mutex);
+                entry->set_owner();
+                entry->ptr = std::move(ptr);
+                entry->user = std::move(user);
+                auto result = PageResult{
+                    ERROR_SUCCESS,
+                    false,
+                    PageLock(),
+                    entry->ptr.get(),
+                    recast<void**>(entry->user.get())};
+
+                // entry may be moved
+                lk.switch_lock();
+                trim_pages();
+                return result;
+            }
+            catch (const bad_alloc&)
+            {
+                return PageResult{ERROR_NOT_ENOUGH_MEMORY};
             }
         }
-        // double check
-        g.reset();
-        g.reset(SRWLockGuard(lock_pages_.get(), !g.is_exclusive()));
     }
 }
 
 PageResult ChunkDiskService::ClaimPage(u64 page_idx)
 {
-    auto g = SRWLockGuard(lock_pages_.get(), false);
+    auto lk = SRWLock(*mutex_pages_, false);
     auto it = cached_pages_.find(page_idx);
     if (it == cached_pages_.end()) return PageResult{ERROR_NOT_FOUND};
 
     auto* entry = &((*it).second);
-    if (entry->owner != GetCurrentThreadId()) return PageResult{ERROR_INVALID_STATE};
+    if (!entry->is_owned()) return PageResult{ERROR_INVALID_STATE};
     return PageResult{
         ERROR_SUCCESS,
         true,
-        PageGuard(),
+        PageLock(),
         entry->ptr.get(),
         recast<void**>(entry->user.get())};
 }
 
-DWORD ChunkDiskService::RemovePageEntry(SRWLockGuard& g, Map<u64, PageEntry>::iterator it)
+DWORD ChunkDiskService::RemovePageEntry(SRWLock& lk, Map<u64, PageEntry>::iterator it)
 {
-    if (!g || g.is_exclusive()) return ERROR_INVALID_PARAMETER;
+    if (lk.is_exclusive() || !lk) return ERROR_INVALID_PARAMETER;
 
     auto page_idx = (*it).first;
     auto* entry = &((*it).second);
-    if (entry->owner == GetCurrentThreadId()) return ERROR_LOCK_FAILED;
+    if (entry->is_owned()) return ERROR_LOCK_FAILED;
     auto find_entry = [this, page_idx, &it, &entry]() -> bool
     {
         it = cached_pages_.find(page_idx);
@@ -445,56 +484,50 @@ DWORD ChunkDiskService::RemovePageEntry(SRWLockGuard& g, Map<u64, PageEntry>::it
         return entry != nullptr;
     };
 
-    while (true)
+    auto m = entry->mutex;
+    lk.unlock();
+    lk.switch_lock();
+    auto lkp = SRWLock(*m, true, std::defer_lock);
+    std::lock(lk, lkp);
+
+    // entry may be moved or replaced
+    if (!find_entry())
     {
-        if (!g.is_exclusive())
-        {
-            // can wait, but can't remove
-            auto gp = PageGuard(entry, true);
-            gp.reset();
-        }
-        else
-        {
-            // can remove, but can't wait and be blocked
-            if (TryAcquireSRWLockExclusive(entry->lock.get()))
-            {
-                entry->owner = GetCurrentThreadId();
-                entry->ptr.reset();
-                entry->user.reset();
-
-                auto lock = std::unique_ptr<SRWLOCK>(std::move(entry->lock));
-                cached_pages_.erase(it);
-                ReleaseSRWLockExclusive(lock.get());
-                lock.reset();
-
-                g.reset();
-                g.reset(SRWLockGuard(lock_pages_.get(), false));
-                return ERROR_SUCCESS;
-            }
-        }
-        // double check
-        g.reset();
-        g.reset(SRWLockGuard(lock_pages_.get(), !g.is_exclusive()));
-        if (!find_entry()) return ERROR_SUCCESS;
+        lk.switch_lock();
+        return ERROR_SUCCESS;
     }
+    if (m != entry->mutex)
+    {
+        // it deleted but then new entry added
+        lk.switch_lock();
+        return ERROR_SUCCESS;
+    }
+
+    entry->set_owner();
+    cached_pages_.erase(it);
+    lkp.unlock();
+    m.reset();
+
+    lk.switch_lock();
+    return ERROR_SUCCESS;
 }
 
 DWORD ChunkDiskService::FreePage(u64 page_idx, bool remove)
 {
-    auto g = SRWLockGuard(lock_pages_.get(), false);
+    auto lk = SRWLock(*mutex_pages_, false);
     auto it = cached_pages_.find(page_idx);
     if (it == cached_pages_.end()) return ERROR_NOT_FOUND;
 
     auto* entry = &((*it).second);
-    if (entry->owner != GetCurrentThreadId()) return ERROR_INVALID_STATE;
-    entry->owner = 0;
-    ReleaseSRWLockExclusive(entry->lock.get());
-    return remove ? RemovePageEntry(g, it) : ERROR_SUCCESS;
+    if (!entry->is_owned()) return ERROR_INVALID_STATE;
+    entry->clear_owner();
+    entry->mutex->unlock();
+    return remove ? RemovePageEntry(lk, it) : ERROR_SUCCESS;
 }
 
 PageResult ChunkDiskService::FlushPages(const PageRange& r)
 {
-    auto g = SRWLockGuard(lock_pages_.get(), false);
+    auto g = SRWLock(*mutex_pages_, false);
 
     for (auto i = r.start_idx; i <= r.end_idx; ++i)
     {
@@ -521,7 +554,7 @@ PageResult ChunkDiskService::FlushPages(const PageRange& r)
 
 DWORD ChunkDiskService::FlushPages()
 {
-    auto g = SRWLockGuard(lock_pages_.get(), false);
+    auto g = SRWLock(*mutex_pages_, false);
     auto err = DWORD(ERROR_SUCCESS);
 
     while (!cached_pages_.empty())
