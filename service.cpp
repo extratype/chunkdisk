@@ -564,7 +564,7 @@ DWORD ChunkDiskService::FlushPages()
         auto size = cached_pages_.size();
         auto pages = std::vector<u64>();
         pages.reserve(size);
-        for (auto p : cached_pages_) pages.push_back(p.first);
+        for (auto&& p : cached_pages_) pages.push_back(p.first);
 
         for (auto idx : pages)
         {

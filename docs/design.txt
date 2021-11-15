@@ -10,8 +10,8 @@ Create chunk:
     file name: chunk###
     file size: 0 or chunk_size; empty or full, no deletion
     sparse chunk?
-        set chunk size small
-        do TRIM
+        set chunk size small, or
+        set sparse manually
 
 Read: ReadFile()
     chunk not found or empty: zero-fill buffer
@@ -20,7 +20,7 @@ Write: WriteFile()
 
 Unmap (a.k.a. TRIM):
     unmap range >= chunk: Truncate (Set size to 0)
-    unmap range <  chunk: FSCTL_SET_ZERO_DATA
+    unmap range <  chunk: FSCTL_SET_ZERO_DATA (supports sparse files)
 
 Asynchronous I/O:
     for best asynchronous performance
@@ -72,7 +72,7 @@ ChunkDiskWorker:
 
         aligned buffers
             aligned to page, zero-filled
-            65536 + 4096 bytes to shift buffer and align to page
+            1048576 + 4096 bytes to shift buffer and align to page
             LIFO policy
 
     Request → ChunkWork:
@@ -133,6 +133,12 @@ ChunkDiskWorker:
                         service.FlushPages()
                         service.FlushUnmapRanges()
             wait indefinitely
+
+        Check low activity when active:
+            Count max. load of pool
+            PeriodicCheck():
+                check if low
+                shrink to fit load
 
     ChunkWork queue:
         Add to list for asynchronous I/O:

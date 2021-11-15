@@ -89,6 +89,14 @@ public:
             return *this;
         }
 
+        auto operator--() noexcept
+        {
+            // follow key_order_
+            auto vit = (it_ == map_->end()) ? end_it_ : it_->second.it;
+            it_ = map_->find(**(--vit));
+            return *this;
+        }
+
         bool operator==(const iterator& other) const noexcept
         {
             return map_ == other.map_ && it_ == other.it_ && end_it_ == other.end_it_;

@@ -15,6 +15,7 @@ namespace chunkdisk
 extern std::vector<std::unique_ptr<ChunkDiskWorker>>& GetWorkers(SPD_STORAGE_UNIT* StorageUnit);
 
 static constexpr auto STANDBY_MS = u32(60000);
+static constexpr auto LOW_LOAD_THRESHOLD = u32(4);
 static constexpr auto MAX_QD = u32(32);    // QD32
 static constexpr auto STOP_TIMEOUT_MS = u32(5000);
 
@@ -299,6 +300,8 @@ DWORD ChunkDiskWorker::GetBuffer(Pages& buffer)
 {
     // buffers_ used by the dispatcher and the worker thread
     auto lk = SRWLock(*mutex_buffers_, true);
+    buffers_load_ += 1;
+    buffers_load_max_ = max(buffers_load_max_, buffers_load_);
 
     if (buffers_.empty())
     {
@@ -308,7 +311,12 @@ DWORD ChunkDiskWorker::GetBuffer(Pages& buffer)
         // additional page for unaligned requests
         auto buffer_size = service_.MaxTransferLength() + u32(service_.params.PageBytes(1));
         auto new_buffer = Pages(VirtualAlloc(nullptr, buffer_size, MEM_COMMIT, PAGE_READWRITE));
-        if (!new_buffer) return ERROR_NOT_ENOUGH_MEMORY;
+        if (!new_buffer)
+        {
+            lk.lock();
+            buffers_load_ -= 1;
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
         buffer = std::move(new_buffer);
         return ERROR_SUCCESS;
     }
@@ -328,6 +336,7 @@ DWORD ChunkDiskWorker::ReturnBuffer(Pages buffer)
     {
         // buffers_ used by the dispatcher and the worker thread
         auto lk = SRWLock(*mutex_buffers_, true);
+        buffers_load_ -= 1;
         // LIFO order
         buffers_.emplace_front(std::move(buffer));
     }
@@ -372,12 +381,22 @@ DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_ou
         if (!is_write && cfh.handle_ro)
         {
             handle_out = cfh.handle_ro.get();
+            if (cfh.refs_ro == 0)
+            {
+                handles_ro_load_ += 1;
+                handles_ro_load_max_ = max(handles_ro_load_max_, handles_ro_load_);
+            }
             ++cfh.refs_ro;
             return ERROR_SUCCESS;
         }
         if (is_write && cfh.handle_rw)
         {
             handle_out = cfh.handle_rw.get();
+            if (cfh.refs_rw == 0)
+            {
+                handles_rw_load_ += 1;
+                handles_rw_load_max_ = max(handles_rw_load_max_, handles_rw_load_);
+            }
             ++cfh.refs_rw;
             return ERROR_SUCCESS;
         }
@@ -432,11 +451,21 @@ DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_ou
     if (!is_write)
     {
         cfh.handle_ro = std::move(h);
+        if (cfh.refs_ro == 0)
+        {
+            handles_ro_load_ += 1;
+            handles_ro_load_max_ = max(handles_ro_load_max_, handles_ro_load_);
+        }
         ++cfh.refs_ro;
     }
     else
     {
         cfh.handle_rw = std::move(h);
+        if (cfh.refs_rw == 0)
+        {
+            handles_rw_load_ += 1;
+            handles_rw_load_max_ = max(handles_rw_load_max_, handles_rw_load_);
+        }
         ++cfh.refs_rw;
     }
     return ERROR_SUCCESS;
@@ -454,12 +483,14 @@ DWORD ChunkDiskWorker::CloseChunk(u64 chunk_idx, bool is_write)
     if (!is_write)
     {
         --cfh.refs_ro;
+        if (cfh.refs_ro == 0) handles_ro_load_ -= 1;
     }
     else
     {
         --cfh.refs_rw;
+        if (cfh.refs_rw == 0) handles_rw_load_ -= 1;
     }
-    // handles closed in OpenChunk() or IdleWork()
+    // handles closed in OpenChunk() or PeriodicCheck()
 
     if (cfh.pending && cfh.refs_ro == 0 && cfh.refs_rw == 0)
     {
@@ -790,21 +821,21 @@ void ChunkDiskWorker::DoWorks()
     auto bytes_transferred = DWORD();
     auto ckey = u64();
     auto* overlapped = (OVERLAPPED*)(nullptr);
-    auto next_timeout = DWORD(INFINITE);   // no resource to be freed at start
+    auto next_timeout = DWORD(INFINITE);   // no resources to be freed at start
+    auto next_check_time = u64();
 
     while (true)
     {
         auto err = GetQueuedCompletionStatus(
             iocp_.get(), &bytes_transferred, &ckey, &overlapped, next_timeout)
             ? ERROR_SUCCESS : GetLastError();
-        if (next_timeout == INFINITE) next_timeout = STANDBY_MS;    // woke up
 
         if (overlapped == nullptr)
         {
             if (err == WAIT_TIMEOUT)
             {
                 next_timeout = IdleWork();
-                continue;
+                if (next_timeout == INFINITE) continue; // sleep
             }
             else
             {
@@ -831,6 +862,23 @@ void ChunkDiskWorker::DoWorks()
             auto& state = *GetOverlappedOp(overlapped);
             CompleteIO(state, err, bytes_transferred);
             CompleteWork(state.owner);
+        }
+
+        if (next_timeout == INFINITE)
+        {
+            // woke up
+            next_timeout = STANDBY_MS;
+            next_check_time = GetSystemFileTime() + STANDBY_MS * 10000;
+        }
+        else
+        {
+            // check only when active
+            auto check_time = GetSystemFileTime();
+            if (check_time >= next_check_time)
+            {
+                auto next_check = PeriodicCheck();
+                next_check_time  = check_time + next_check * 10000;
+            }
         }
     }
 }
@@ -915,7 +963,7 @@ bool ChunkDiskWorker::CompleteWork(ChunkWork* work, ChunkWork** next)
     }
     else
     {
-        SRWLock lk;
+        auto lk = SRWLock();
         if (next == nullptr) lk = SRWLock(*mutex_working_, true);
 
         // SetContext() not called for PostMsg()
@@ -953,10 +1001,16 @@ DWORD ChunkDiskWorker::IdleWork()
 
     auto lkb = SRWLock(*mutex_buffers_, true);
     buffers_.clear();
+    buffers_load_ = 0;
+    buffers_load_max_ = 0;
     lkb.unlock();
 
     auto lkh = SRWLock(*mutex_handles_, true);
     chunk_handles_.clear();
+    handles_ro_load_ = 0;
+    handles_ro_load_max_ = 0;
+    handles_rw_load_ = 0;
+    handles_rw_load_max_ = 0;
     lkh.unlock();
 
     disk_idle &= (last_post_ft == service_.GetPostFileTime());
@@ -966,6 +1020,69 @@ DWORD ChunkDiskWorker::IdleWork()
         service_.FlushPages();
     }
     return INFINITE;
+}
+
+DWORD ChunkDiskWorker::PeriodicCheck()
+{
+    auto lkb = SRWLock(*mutex_buffers_, true);
+    auto blm = (buffers_load_max_ != 0) ? buffers_load_max_ : buffers_load_;
+    if (blm <= LOW_LOAD_THRESHOLD && !buffers_.empty())
+    {
+        // current: buffers_load_ + buffers_.size()
+        // one extra buffer for dispatcher
+        auto new_size = min(blm - buffers_load_ + 1, buffers_.size());
+        buffers_.resize(new_size);
+        buffers_load_max_ = 0;
+    }
+    lkb.unlock();
+
+    auto lkh = SRWLock(*mutex_handles_, true);
+    auto hrom = (handles_ro_load_max_ != 0) ? handles_ro_load_max_ : handles_ro_load_;
+    auto hrwm = (handles_rw_load_max_ != 0) ? handles_rw_load_max_ : handles_rw_load_;
+    if (hrom <= LOW_LOAD_THRESHOLD || hrwm <= LOW_LOAD_THRESHOLD)
+    {
+        auto count_ro = u32(0);
+        auto count_rw = u32(0);
+        for (auto&& p : chunk_handles_)
+        {
+            auto& cfh = p.second;
+            if (cfh.handle_ro) ++count_ro;
+            if (cfh.handle_rw) ++count_rw;
+        }
+
+        auto unused_ro = (hrom <= LOW_LOAD_THRESHOLD && count_ro >= hrom) ? (count_ro - hrom) : 0;
+        auto unused_rw = (hrwm <= LOW_LOAD_THRESHOLD && count_rw >= hrwm) ? (count_rw - hrwm) : 0;
+        for (auto it = chunk_handles_.begin(); it != chunk_handles_.end();)
+        {
+            if (unused_ro == 0 && unused_rw == 0) break;
+
+            auto& cfh = (*it).second;
+            if (cfh.refs_ro == 0 && unused_ro > 0)
+            {
+                cfh.handle_ro.reset();
+                --unused_ro;
+            }
+            if (cfh.refs_rw == 0 && unused_rw > 0)
+            {
+                cfh.handle_rw.reset();
+                --unused_rw;
+            }
+            if (!cfh.handle_ro && !cfh.handle_rw)
+            {
+                it = chunk_handles_.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+
+        if (hrom <= LOW_LOAD_THRESHOLD) handles_ro_load_max_ = 0;
+        if (hrwm <= LOW_LOAD_THRESHOLD) handles_rw_load_max_ = 0;
+    }
+    lkh.unlock();
+
+    return STANDBY_MS;
 }
 
 void ChunkDiskWorker::StopWorks()

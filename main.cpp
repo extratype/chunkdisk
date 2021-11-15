@@ -222,7 +222,8 @@ BOOLEAN Flush(SPD_STORAGE_UNIT* StorageUnit,
     SpdWarnOnce(StorageUnit->StorageUnitParams.CacheSupported);
 
     // unbuffered, pages write through, nothing to flush
-    // metadata flushed when handles are closed in ChunkDiskWorker::IdleWork()
+    // metadata flushed when handles are closed
+    // in ChunkDiskWorker::PeriodicCheck(), ChunkDiskWorker::IdleWork()
     return TRUE;
 }
 

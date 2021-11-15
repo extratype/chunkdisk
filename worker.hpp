@@ -101,8 +101,8 @@ static ChunkOpState* GetOverlappedOp(OVERLAPPED* ovl)
 
 struct ChunkFileHandle
 {
-    FileHandle handle_ro;   // read only, for !is_write
-    FileHandle handle_rw;   // read and write, for is_write
+    FileHandle handle_ro;   // read-only, for !is_write
+    FileHandle handle_rw;   // read-write, for is_write
     u32 refs_ro = 0;        // close later if zero
     u32 refs_rw = 0;        // close later if zero
     bool pending = false;   // pending to be refreshed
@@ -131,9 +131,15 @@ class ChunkDiskWorker
 
     std::unique_ptr<std::shared_mutex> mutex_buffers_;
     std::deque<Pages> buffers_;
+    u32 buffers_load_ = 0;
+    u32 buffers_load_max_ = 0;
 
     std::unique_ptr<std::shared_mutex> mutex_handles_;  // reuse, close later
     Map<u64, ChunkFileHandle> chunk_handles_;   // add to back, evict from front
+    u32 handles_ro_load_ = 0;
+    u32 handles_ro_load_max_ = 0;
+    u32 handles_rw_load_ = 0;
+    u32 handles_rw_load_max_ = 0;
 
 public:
     explicit ChunkDiskWorker(ChunkDiskService& service) : service_(service) {}
@@ -244,6 +250,9 @@ private:
     // enter idle mode, free resources
     // resources may not be freed if operations are always processed immediately
     DWORD IdleWork();
+
+    // free resources unused for a while
+    DWORD PeriodicCheck();
 
     // cancel all requests to exit the worker thread
     void StopWorks();
