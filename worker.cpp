@@ -372,13 +372,13 @@ DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_ou
         if (!is_write && cfh.handle_ro)
         {
             handle_out = cfh.handle_ro.get();
-            ++cfh.refs;
+            ++cfh.refs_ro;
             return ERROR_SUCCESS;
         }
         if (is_write && cfh.handle_rw)
         {
             handle_out = cfh.handle_rw.get();
-            ++cfh.refs;
+            ++cfh.refs_rw;
             return ERROR_SUCCESS;
         }
     }
@@ -406,7 +406,7 @@ DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_ou
             for (auto it1 = chunk_handles_.begin(); it1 != chunk_handles_.end();)
             {
                 auto& cfh = (*it1).second;
-                if (cfh.refs != 0)
+                if (cfh.refs_ro != 0 || cfh.refs_rw != 0)
                 {
                     ++it1;
                     continue;
@@ -432,16 +432,17 @@ DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_ou
     if (!is_write)
     {
         cfh.handle_ro = std::move(h);
+        ++cfh.refs_ro;
     }
     else
     {
         cfh.handle_rw = std::move(h);
+        ++cfh.refs_rw;
     }
-    ++cfh.refs;
     return ERROR_SUCCESS;
 }
 
-DWORD ChunkDiskWorker::CloseChunk(u64 chunk_idx)
+DWORD ChunkDiskWorker::CloseChunk(u64 chunk_idx, bool is_write)
 {
     // chunk_handles_ used by the dispatcher and the worker thread
     auto lk = SRWLock(*mutex_handles_, true);
@@ -450,10 +451,17 @@ DWORD ChunkDiskWorker::CloseChunk(u64 chunk_idx)
     if (it == chunk_handles_.end()) return ERROR_NOT_FOUND;
 
     auto& cfh = (*it).second;
-    --cfh.refs;
+    if (!is_write)
+    {
+        --cfh.refs_ro;
+    }
+    else
+    {
+        --cfh.refs_rw;
+    }
     // handles closed in OpenChunk() or IdleWork()
 
-    if (cfh.pending && cfh.refs == 0)
+    if (cfh.pending && cfh.refs_ro == 0 && cfh.refs_rw == 0)
     {
         // CancelIo() called, all refs to be freed
         if (cfh.handle_rw)
@@ -580,7 +588,7 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
         }
         else
         {
-            CloseChunk(chunk_idx);
+            CloseChunk(chunk_idx, false);
         }
 
         if (kind == UNMAP_CHUNK)
@@ -1133,7 +1141,7 @@ DWORD ChunkDiskWorker::CheckAsyncEOF(ChunkOpState& state)
     auto file_size = LARGE_INTEGER();
     err = (GetFileSizeEx(h, &file_size) && file_size.QuadPart == 0)
         ? ERROR_SUCCESS : ERROR_HANDLE_EOF;
-    CloseChunk(chunk_idx);
+    CloseChunk(chunk_idx, false);
     return err;
 }
 
@@ -1169,13 +1177,13 @@ DWORD ChunkDiskWorker::PostReadChunk(ChunkOpState& state)
                     ? ERROR_SUCCESS : GetLastError();
                 if (err != ERROR_SUCCESS)
                 {
-                    CloseChunk(state.idx);
+                    CloseChunk(state.idx, false);
                     return err;
                 }
             }
             else
             {
-                CloseChunk(state.idx);
+                CloseChunk(state.idx, false);
                 return err;
             }
         }
@@ -1222,7 +1230,7 @@ DWORD ChunkDiskWorker::PostWriteChunk(ChunkOpState& state)
     }
     if (err != ERROR_SUCCESS && err != ERROR_IO_PENDING)
     {
-        CloseChunk(state.idx);
+        CloseChunk(state.idx, true);
         return err;
     }
     return ERROR_SUCCESS;
@@ -1247,7 +1255,10 @@ void ChunkDiskWorker::CompleteChunkOp(ChunkOpState& state, DWORD error, DWORD by
             error = ERROR_SUCCESS;
         }
     }
-    if (!(state.kind == READ_CHUNK && bytes_transferred == u32(-1))) CloseChunk(state.idx);
+    if (!(state.kind == READ_CHUNK && bytes_transferred == u32(-1)))
+    {
+        CloseChunk(state.idx, state.kind == WRITE_CHUNK);
+    }
     ReportOpResult(state, error);
 
     if (state.kind == WRITE_CHUNK && state.buffer == nullptr)
@@ -1308,14 +1319,14 @@ DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
                         CK_IO, &state.ovl) ? ERROR_SUCCESS : GetLastError();
                     if (err != ERROR_SUCCESS)
                     {
-                        CloseChunk(chunk_idx);
+                        CloseChunk(chunk_idx, false);
                         FreePageAsync(state, state.idx, true);
                         return err;
                     }
                 }
                 else
                 {
-                    CloseChunk(chunk_idx);
+                    CloseChunk(chunk_idx, false);
                     FreePageAsync(state, state.idx, true);
                     return err;
                 }
@@ -1356,7 +1367,7 @@ void ChunkDiskWorker::CompleteReadPage(ChunkOpState& state, DWORD error, DWORD b
     if (bytes_transferred != u32(-1))
     {
         auto chunk_idx = params.BlockChunkRange(params.PageBlocks(state.idx), 0).start_idx;
-        CloseChunk(chunk_idx);
+        CloseChunk(chunk_idx, false);
     }
     if (error == ERROR_SUCCESS)
     {
@@ -1402,7 +1413,7 @@ DWORD ChunkDiskWorker::PostWritePage(ChunkOpState& state)
         ? ERROR_SUCCESS : GetLastError();
     if (err != ERROR_SUCCESS && err != ERROR_IO_PENDING)
     {
-        CloseChunk(chunk_idx);
+        CloseChunk(chunk_idx, true);
         FreePageAsync(state, state.idx, true);
         return err;
     }
@@ -1426,7 +1437,7 @@ void ChunkDiskWorker::CompleteWritePartialReadPage(ChunkOpState& state, DWORD er
     if (bytes_transferred != u32(-1))
     {
         auto chunk_idx = params.BlockChunkRange(params.PageBlocks(state.idx), 0).start_idx;
-        CloseChunk(chunk_idx);
+        CloseChunk(chunk_idx, false);
     }
     if (error == ERROR_SUCCESS)
     {
@@ -1450,7 +1461,7 @@ void ChunkDiskWorker::CompleteWritePage(ChunkOpState& state, DWORD error, DWORD 
     if (error == ERROR_SUCCESS && bytes_transferred != params.PageBytes(1)) error = ERROR_INVALID_DATA;
     auto r = params.BlockChunkRange(params.PageBlocks(state.idx), state.end_off - state.start_off);
     auto chunk_idx = r.start_idx;
-    CloseChunk(chunk_idx);
+    CloseChunk(chunk_idx, true);
     FreePageAsync(state, state.idx, error != ERROR_SUCCESS);
     ReportOpResult(state, error);
 

@@ -103,7 +103,8 @@ struct ChunkFileHandle
 {
     FileHandle handle_ro;   // read only, for !is_write
     FileHandle handle_rw;   // read and write, for is_write
-    u32 refs = 0;           // may be reused, close in OpenChunk() not CloseChunk()
+    u32 refs_ro = 0;        // close later if zero
+    u32 refs_rw = 0;        // close later if zero
     bool pending = false;   // pending to be refreshed
 };
 
@@ -131,7 +132,7 @@ class ChunkDiskWorker
     std::unique_ptr<std::shared_mutex> mutex_buffers_;
     std::deque<Pages> buffers_;
 
-    std::unique_ptr<std::shared_mutex> mutex_handles_;
+    std::unique_ptr<std::shared_mutex> mutex_handles_;  // reuse, close later
     Map<u64, ChunkFileHandle> chunk_handles_;   // add to back, evict from front
 
 public:
@@ -191,7 +192,7 @@ private:
     DWORD OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_out);
 
     // done using the handle from the pool
-    DWORD CloseChunk(u64 chunk_idx);
+    DWORD CloseChunk(u64 chunk_idx, bool is_write);
 
     // refresh chunk state after it's unmapped
     DWORD RefreshChunk(u64 chunk_idx);
