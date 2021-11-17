@@ -377,7 +377,7 @@ DWORD StopWorkers(ChunkDisk& cdisk, DWORD timeout_ms = INFINITE)
             handles.reserve(cdisk.workers.size());
             for (auto& worker : cdisk.workers)
             {
-                HANDLE h;
+                auto h = HANDLE();
                 auto err = worker->StopAsync(h);
                 if (err != ERROR_SUCCESS) return err;
                 handles.push_back(h);

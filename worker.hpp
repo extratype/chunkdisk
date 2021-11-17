@@ -77,7 +77,7 @@ struct ChunkOpState
 {
     OVERLAPPED ovl = {};            // specify file offset
     ChunkWork* owner;
-    ChunkOpKind kind;
+    ChunkOpKind kind;               // don't reset
     ChunkOpStep step = OP_READY;
     u64 idx;                        // chunk_idx or page_idx
     u64 start_off;                  // offset in chunk or page

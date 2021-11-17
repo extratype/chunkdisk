@@ -930,23 +930,24 @@ DWORD ChunkDiskWorker::PostOp(ChunkOpState& state)
 
 void ChunkDiskWorker::CompleteIO(ChunkOpState& state, DWORD error, DWORD bytes_transferred)
 {
-    if (state.kind == READ_CHUNK || state.kind == WRITE_CHUNK)
+    auto kind = state.kind;
+    if (kind == READ_CHUNK || kind == WRITE_CHUNK)
     {
         CompleteChunkOp(state, error, bytes_transferred);
     }
-    else if (state.kind == READ_PAGE)
+    else if (kind == READ_PAGE)
     {
         CompleteReadPage(state, error, bytes_transferred);
     }
-    else if (state.kind == WRITE_PAGE_PARTIAL && state.step == OP_READY)
+    else if (kind == WRITE_PAGE_PARTIAL && state.step == OP_READY)
     {
         CompleteWritePartialReadPage(state, error, bytes_transferred);
     }
-    else if (state.kind == WRITE_PAGE_PARTIAL || state.kind == WRITE_PAGE)
+    else if (kind == WRITE_PAGE_PARTIAL || kind == WRITE_PAGE)
     {
         CompleteWritePage(state, error, bytes_transferred);
     }
-    else if (state.kind == REFRESH_CHUNK)
+    else if (kind == REFRESH_CHUNK)
     {
         ReportOpResult(state);
     }
@@ -1242,12 +1243,13 @@ DWORD ChunkDiskWorker::FlushPagesAsync(ChunkOpState& state, const PageRange& r)
 
 DWORD ChunkDiskWorker::CheckAsyncEOF(ChunkOpState& state)
 {
-    if (state.kind != READ_CHUNK && state.kind != READ_PAGE && state.kind != WRITE_PAGE_PARTIAL)
+    auto kind = state.kind;
+    if (kind != READ_CHUNK && kind != READ_PAGE && kind != WRITE_PAGE_PARTIAL)
     {
         return ERROR_INVALID_FUNCTION;
     }
     auto& params = service_.params;
-    auto chunk_idx = (state.kind == READ_CHUNK)
+    auto chunk_idx = (kind == READ_CHUNK)
         ? state.idx : params.BlockChunkRange(params.PageBlocks(state.idx), 0).start_idx;
 
     auto h = HANDLE(INVALID_HANDLE_VALUE);
@@ -1355,16 +1357,17 @@ DWORD ChunkDiskWorker::PostWriteChunk(ChunkOpState& state)
 
 void ChunkDiskWorker::CompleteChunkOp(ChunkOpState& state, DWORD error, DWORD bytes_transferred)
 {
+    auto kind = state.kind;
     auto length_bytes = service_.params.BlockBytes(state.end_off - state.start_off);
     // ignore bytes_transferred for DeviceIoControl() in partial UNMAP_CHUNK
     if (error == ERROR_SUCCESS
         && bytes_transferred != length_bytes
-        && !(state.kind == READ_CHUNK && bytes_transferred == u32(-1))
-        && !(state.kind == WRITE_CHUNK && state.buffer == nullptr))
+        && !(kind == READ_CHUNK && bytes_transferred == u32(-1))
+        && !(kind == WRITE_CHUNK && state.buffer == nullptr))
     {
         error = ERROR_INVALID_DATA;
     }
-    if (error == ERROR_HANDLE_EOF && state.kind == READ_CHUNK && bytes_transferred == 0)
+    if (error == ERROR_HANDLE_EOF && kind == READ_CHUNK && bytes_transferred == 0)
     {
         if (CheckAsyncEOF(state) == ERROR_SUCCESS)
         {
@@ -1372,13 +1375,13 @@ void ChunkDiskWorker::CompleteChunkOp(ChunkOpState& state, DWORD error, DWORD by
             error = ERROR_SUCCESS;
         }
     }
-    if (!(state.kind == READ_CHUNK && bytes_transferred == u32(-1)))
+    if (!(kind == READ_CHUNK && bytes_transferred == u32(-1)))
     {
-        CloseChunk(state.idx, state.kind == WRITE_CHUNK);
+        CloseChunk(state.idx, kind == WRITE_CHUNK);
     }
     ReportOpResult(state, error);
 
-    if (state.kind == WRITE_CHUNK && state.buffer == nullptr)
+    if (kind == WRITE_CHUNK && state.buffer == nullptr)
     {
         if (error != ERROR_SUCCESS)
         {
@@ -1386,7 +1389,7 @@ void ChunkDiskWorker::CompleteChunkOp(ChunkOpState& state, DWORD error, DWORD by
         }
         else
         {
-            SRWLock lk;
+            auto lk = SRWLock();
             if (service_.UnmapRange(lk, state.idx, state.start_off, state.end_off) == ERROR_SUCCESS)
             {
                 // whole chunk unmapped
@@ -1576,7 +1579,7 @@ void ChunkDiskWorker::CompleteWritePage(ChunkOpState& state, DWORD error, DWORD 
 {
     auto& params = service_.params;
     if (error == ERROR_SUCCESS && bytes_transferred != params.PageBytes(1)) error = ERROR_INVALID_DATA;
-    auto r = params.BlockChunkRange(params.PageBlocks(state.idx), state.end_off - state.start_off);
+    const auto r = params.BlockChunkRange(params.PageBlocks(state.idx), state.end_off - state.start_off);
     auto chunk_idx = r.start_idx;
     CloseChunk(chunk_idx, true);
     FreePageAsync(state, state.idx, error != ERROR_SUCCESS);
@@ -1590,7 +1593,7 @@ void ChunkDiskWorker::CompleteWritePage(ChunkOpState& state, DWORD error, DWORD 
         }
         else
         {
-            SRWLock lk;
+            auto lk = SRWLock();
             if (service_.UnmapRange(lk, chunk_idx, r.start_off, r.end_off) == ERROR_SUCCESS)
             {
                 // whole chunk unmapped
