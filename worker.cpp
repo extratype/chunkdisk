@@ -931,9 +931,13 @@ DWORD ChunkDiskWorker::PostOp(ChunkOpState& state)
 void ChunkDiskWorker::CompleteIO(ChunkOpState& state, DWORD error, DWORD bytes_transferred)
 {
     auto kind = state.kind;
-    if (kind == READ_CHUNK || kind == WRITE_CHUNK)
+    if (kind == READ_CHUNK)
     {
-        CompleteChunkOp(state, error, bytes_transferred);
+        CompleteReadChunk(state, error, bytes_transferred);
+    }
+    else if (kind == WRITE_CHUNK)
+    {
+        CompleteWriteChunk(state, error, bytes_transferred);
     }
     else if (kind == READ_PAGE)
     {
@@ -1320,33 +1324,110 @@ DWORD ChunkDiskWorker::PostReadChunk(ChunkOpState& state)
     return ERROR_SUCCESS;
 }
 
+void ChunkDiskWorker::CompleteReadChunk(ChunkOpState& state, DWORD error, DWORD bytes_transferred)
+{
+    auto length_bytes = service_.params.BlockBytes(state.end_off - state.start_off);
+    if (error == ERROR_SUCCESS
+        && bytes_transferred != length_bytes
+        && bytes_transferred != u32(-1))
+    {
+        error = ERROR_INVALID_DATA;
+    }
+    if (error == ERROR_HANDLE_EOF && bytes_transferred == 0)
+    {
+        if (CheckAsyncEOF(state) == ERROR_SUCCESS)
+        {
+            memset(state.buffer, 0, length_bytes);
+            error = ERROR_SUCCESS;
+        }
+    }
+    if (bytes_transferred != u32(-1))
+    {
+        CloseChunk(state.idx, false);
+    }
+    ReportOpResult(state, error);
+}
+
+DWORD ChunkDiskWorker::PrepareZeroChunk(ChunkWork* work)
+{
+    if (work->buffer) return ERROR_SUCCESS;
+
+    auto& params = service_.params;
+    auto max_length = service_.MaxTransferLength();
+    auto buffer_size = u64(0);
+    for (auto& op : work->ops)
+    {
+        if (op.kind != WRITE_CHUNK) continue;
+        auto length_bytes = params.BlockBytes(op.end_off - op.start_off);
+        buffer_size = max(buffer_size, length_bytes);
+        if (buffer_size > max_length) break;
+    }
+    buffer_size = min(buffer_size, max_length);
+
+    auto err = GetBuffer(work->buffer);
+    if (err != ERROR_SUCCESS) return err;
+    memset(work->buffer.get(), 0, buffer_size);
+    return ERROR_SUCCESS;
+}
+
 DWORD ChunkDiskWorker::PostWriteChunk(ChunkOpState& state)
 {
-    // aligned to page
-    // Windows caches disk
     auto& params = service_.params;
-    auto err = FlushPagesAsync(state, params.BlockPageRange(state.idx, state.start_off, state.end_off));
-    if (err != ERROR_SUCCESS) return err;
+    auto err = DWORD(ERROR_SUCCESS);
 
-    auto h = HANDLE(INVALID_HANDLE_VALUE);
-    err = OpenChunk(state.idx, true, h);
-    if (err != ERROR_SUCCESS) return err;
-
-    if (state.buffer != nullptr)
+    if (state.step != OP_ZERO_CHUNK)
     {
-        auto length_bytes = params.BlockBytes(state.end_off - state.start_off);
-        err = WriteFile(h, state.buffer, DWORD(length_bytes), nullptr, &state.ovl) ? ERROR_SUCCESS : GetLastError();
+        // aligned to page
+        // Windows caches disk
+        err = FlushPagesAsync(state, params.BlockPageRange(state.idx, state.start_off, state.end_off));
+        if (err != ERROR_SUCCESS) return err;
+
+        auto h = HANDLE(INVALID_HANDLE_VALUE);
+        err = OpenChunk(state.idx, true, h);
+        if (err != ERROR_SUCCESS) return err;
+
+        if (state.buffer != nullptr)
+        {
+            auto length_bytes = params.BlockBytes(state.end_off - state.start_off);
+            err = WriteFile(h, state.buffer, DWORD(length_bytes), nullptr, &state.ovl)
+                ? ERROR_SUCCESS : GetLastError();
+        }
+        else
+        {
+            FILE_ZERO_DATA_INFORMATION zero_info;
+            zero_info.FileOffset.QuadPart = LONGLONG(params.BlockBytes(state.start_off));
+            zero_info.BeyondFinalZero.QuadPart = LONGLONG(params.BlockBytes(state.end_off));
+
+            err = DeviceIoControl(
+                h, FSCTL_SET_ZERO_DATA, &zero_info, sizeof(zero_info),
+                nullptr, 0, nullptr, &state.ovl) ? ERROR_SUCCESS : GetLastError();
+            if (err == ERROR_INVALID_FUNCTION
+                || err == ERROR_NOT_SUPPORTED
+                || err == ERROR_INVALID_PARAMETER)
+            {
+                // the file system does not support FSCTL_SET_ZERO_DATA
+                state.step = OP_ZERO_CHUNK;
+                err = PrepareZeroChunk(state.owner);
+                // leave h open, reuse h while writing
+                if (err == ERROR_SUCCESS) err = PostWriteChunk(state);
+            }
+        }
     }
     else
     {
-        FILE_ZERO_DATA_INFORMATION zero_info;
-        zero_info.FileOffset.QuadPart = LONGLONG(params.BlockBytes(state.start_off));
-        zero_info.BeyondFinalZero.QuadPart = LONGLONG(params.BlockBytes(state.end_off));
+        // start/continue writing...
+        auto h = HANDLE(INVALID_HANDLE_VALUE);
+        err = OpenChunk(state.idx, true, h);
+        if (err != ERROR_SUCCESS) return err;
 
-        err = DeviceIoControl(
-            h, FSCTL_SET_ZERO_DATA, &zero_info, sizeof(zero_info),
-            nullptr, 0, nullptr, &state.ovl) ? ERROR_SUCCESS : GetLastError();
+        // track progress with OVERLAPPED
+        auto file_off = LARGE_INTEGER{.LowPart = state.ovl.Offset, .HighPart = LONG(state.ovl.OffsetHigh)}.QuadPart;
+        auto start_off = params.ByteBlock(file_off).first;
+        auto length_bytes = min(params.BlockBytes(state.end_off - start_off), service_.MaxTransferLength());
+        err = WriteFile(h, state.owner->buffer.get(), DWORD(length_bytes), nullptr, &state.ovl)
+            ? ERROR_SUCCESS : GetLastError();
     }
+
     if (err != ERROR_SUCCESS && err != ERROR_IO_PENDING)
     {
         CloseChunk(state.idx, true);
@@ -1355,48 +1436,71 @@ DWORD ChunkDiskWorker::PostWriteChunk(ChunkOpState& state)
     return ERROR_SUCCESS;
 }
 
-void ChunkDiskWorker::CompleteChunkOp(ChunkOpState& state, DWORD error, DWORD bytes_transferred)
+void ChunkDiskWorker::CompleteWriteChunk(ChunkOpState& state, DWORD error, DWORD bytes_transferred)
 {
-    auto kind = state.kind;
-    auto length_bytes = service_.params.BlockBytes(state.end_off - state.start_off);
+    auto& params = service_.params;
+    auto length_bytes = u64(0);
+    auto next_off = u64(0);
+    if (state.step != OP_ZERO_CHUNK)
+    {
+        length_bytes = params.BlockBytes(state.end_off - state.start_off);
+    }
+    else
+    {
+        auto file_off = LARGE_INTEGER{.LowPart = state.ovl.Offset, .HighPart = LONG(state.ovl.OffsetHigh)}.QuadPart;
+        auto start_off = params.ByteBlock(file_off).first;
+        length_bytes = min(params.BlockBytes(state.end_off - start_off), service_.MaxTransferLength());
+        next_off = file_off + length_bytes;
+    }
+
     // ignore bytes_transferred for DeviceIoControl() in partial UNMAP_CHUNK
     if (error == ERROR_SUCCESS
         && bytes_transferred != length_bytes
-        && !(kind == READ_CHUNK && bytes_transferred == u32(-1))
-        && !(kind == WRITE_CHUNK && state.buffer == nullptr))
+        && !(state.buffer == nullptr && state.step != OP_ZERO_CHUNK))
     {
         error = ERROR_INVALID_DATA;
     }
-    if (error == ERROR_HANDLE_EOF && kind == READ_CHUNK && bytes_transferred == 0)
+    CloseChunk(state.idx, true);
+    if (state.buffer != nullptr)
     {
-        if (CheckAsyncEOF(state) == ERROR_SUCCESS)
-        {
-            memset(state.buffer, 0, length_bytes);
-            error = ERROR_SUCCESS;
-        }
+        ReportOpResult(state, error);
+        return;
     }
-    if (!(kind == READ_CHUNK && bytes_transferred == u32(-1)))
-    {
-        CloseChunk(state.idx, kind == WRITE_CHUNK);
-    }
-    ReportOpResult(state, error);
 
-    if (kind == WRITE_CHUNK && state.buffer == nullptr)
+    // partial UNMAP_CHUNK
+    if (error != ERROR_SUCCESS)
     {
+        if (state.step == OP_ZERO_CHUNK) CloseChunk(state.idx, true);   // close the handle left open
+        ReportOpResult(state, error);
+        service_.FlushUnmapRanges(state.idx);
+        return;
+    }
+
+    if (state.step == OP_ZERO_CHUNK && params.ByteBlock(next_off).first < state.end_off)
+    {
+        // continue writing...
+        auto li = LARGE_INTEGER{.QuadPart = LONGLONG(next_off)};
+        // reset OVERLAPPED except offset (Windows does not update them)
+        state.ovl = OVERLAPPED{.Offset = li.LowPart, .OffsetHigh = DWORD(li.HighPart)};
+        error = PostOp(state);
         if (error != ERROR_SUCCESS)
         {
+            // error already reported by PostOp()
+            CloseChunk(state.idx, true);    // close the handle left open
             service_.FlushUnmapRanges(state.idx);
         }
-        else
-        {
-            auto lk = SRWLock();
-            if (service_.UnmapRange(lk, state.idx, state.start_off, state.end_off) == ERROR_SUCCESS)
-            {
-                // whole chunk unmapped
-                auto err = service_.UnmapChunk(state.idx);
-                if (err == ERROR_SUCCESS) PostRefreshChunk(state.idx);
-            }
-        }
+        return;
+    }
+
+    // done
+    if (state.step == OP_ZERO_CHUNK) CloseChunk(state.idx, true);   // close the handle left open
+    ReportOpResult(state, error);
+    auto lk = SRWLock();
+    if (service_.UnmapRange(lk, state.idx, state.start_off, state.end_off) == ERROR_SUCCESS)
+    {
+        // whole chunk unmapped
+        auto err = service_.UnmapChunk(state.idx);
+        if (err == ERROR_SUCCESS) PostRefreshChunk(state.idx);
     }
 }
 

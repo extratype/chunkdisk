@@ -104,7 +104,7 @@ ChunkDiskWorker:
             * partial unmap:
                 becomes write operation with buffer nullptr
                 partial unmap if and only if write operation with buffer nullptr
-                zero-fill using FSCTL_SET_ZERO_DATA
+                zero-fill using FSCTL_SET_ZERO_DATA (see below)
 
     Event loop using IOCP:
         1. PostWork() in the dispatcher thread
@@ -195,6 +195,10 @@ Asynchronous I/O:
 Unmap():
     whole chunk: service.UnmapChunk()
     partial: zero-fill
+        DeviceIoControl(FSCTL_SET_ZERO_DATA) not supported?
+            set owner ChunkWork buffer from pool
+            zero-fill buffer
+            WriteFile()...
 
     Merge unmap ranges:
         in a single request:

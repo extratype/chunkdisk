@@ -36,7 +36,9 @@ enum ChunkOpStep : u32
 {
     OP_READY = 0,       // op created
     OP_DONE,            // completed, with or without error
-    OP_READ_PAGE        // for WRITE_PAGE_PARTIAL, page has been read and will be written
+    OP_READ_PAGE,       // for WRITE_PAGE_PARTIAL, page has been read and will be written
+    OP_ZERO_CHUNK,      // for WRITE_CHUNK with nullptr buffer,
+                        // FSCTL_SET_ZERO_DATA is not supported
 };
 
 struct ChunkOpState;
@@ -88,7 +90,7 @@ struct ChunkOpState
     ChunkOpState(ChunkWork* owner, ChunkOpKind kind, u64 idx, u64 start_off, u64 end_off, LONGLONG file_off, PVOID buffer)
         : owner(owner), kind(kind), idx(idx), start_off(start_off), end_off(end_off), buffer(buffer)
     {
-        LARGE_INTEGER li{.QuadPart = file_off};
+        auto li = LARGE_INTEGER{.QuadPart = file_off};
         ovl.Offset = li.LowPart;
         ovl.OffsetHigh = li.HighPart;
     }
@@ -271,10 +273,15 @@ private:
 
     DWORD PostReadChunk(ChunkOpState& state);
 
+    void CompleteReadChunk(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
+
+    // prepare zero-filled buffer shared by WRITE_CHUNK ops
+    DWORD PrepareZeroChunk(ChunkWork* work);
+
     // zero-fill if buffer is nullptr
     DWORD PostWriteChunk(ChunkOpState& state);
 
-    void CompleteChunkOp(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
+    void CompleteWriteChunk(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
 
     // used by READ_PAGE and WRITE_PAGE_PARTIAL
     DWORD PostReadPage(ChunkOpState& state);
