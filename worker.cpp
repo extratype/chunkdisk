@@ -1670,7 +1670,7 @@ void ChunkDiskWorker::CompleteWritePartialReadPage(ChunkOpState& state, DWORD er
         // reset OVERLAPPED except offset (Windows does not update them)
         state.ovl = OVERLAPPED{.Offset = state.ovl.Offset, .OffsetHigh=state.ovl.OffsetHigh};
         state.step = OP_READ_PAGE;
-        if (PostOp(state) != ERROR_SUCCESS) CompleteWork(state.owner);
+        PostOp(state);
     }
     else
     {
