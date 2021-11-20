@@ -10,13 +10,13 @@
 #include "worker.hpp"
 #include <memory>
 #include <numeric>
+#include <atomic>
 #include <filesystem>
 
 using std::bad_alloc;
 using std::unique_ptr;
 using std::wstring;
 using std::vector;
-using std::shared_mutex;
 
 namespace fs = std::filesystem;
 
@@ -42,8 +42,8 @@ struct ChunkDisk
     ChunkDiskService service;                       // not movable
     vector<unique_ptr<ChunkDiskWorker>> workers;
 
-    shared_mutex mutex_assigned;                    // not movable
-    u32 workers_assigned = 0;
+    // not movable, increment only
+    std::atomic<u32> workers_assigned = 0;
 
     explicit ChunkDisk(ChunkDiskParams params, SPD_STORAGE_UNIT* storage_unit)
         : service(std::move(params), storage_unit, MAX_PAGES) {}
@@ -159,9 +159,8 @@ ChunkDiskWorker* GetAssignedWorker(SPD_STORAGE_UNIT* StorageUnit)
     if (worker == nullptr)
     {
         auto* cdisk = StorageUnitChunkDisk(StorageUnit);
-        auto lk = SRWLock(cdisk->mutex_assigned, true);
-        worker = cdisk->workers[cdisk->workers_assigned].get();
-        ++cdisk->workers_assigned;
+        auto idx = cdisk->workers_assigned.fetch_add(1, std::memory_order_acq_rel);
+        worker = cdisk->workers[idx].get();
     }
     return worker;
 }
