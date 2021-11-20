@@ -536,7 +536,7 @@ DWORD ChunkDiskWorker::PreparePageOps(ChunkWork& work, bool is_write, u64 page_i
 
     try
     {
-        auto it = ops.emplace(ops.end(), &work, kind, page_idx, start_off, end_off, file_off, buffer);
+        auto& op = ops.emplace_back(&work, kind, page_idx, start_off, end_off, file_off, buffer);
         file_off += LONGLONG(params.PageBytes(1));
         if (!(is_write && buffer == nullptr)) buffer = recast<u8*>(buffer) + params.BlockBytes(end_off - start_off);
 
@@ -547,9 +547,9 @@ DWORD ChunkDiskWorker::PreparePageOps(ChunkWork& work, bool is_write, u64 page_i
             auto page = service_.PeekPage(page_idx);
             if (page.error == ERROR_SUCCESS)
             {
-                auto size = params.BlockBytes(it->end_off - it->start_off);
-                memcpy(it->buffer, recast<u8*>(page.ptr) + params.BlockBytes(it->start_off), size);
-                ReportOpResult(*it);
+                auto size = params.BlockBytes(op.end_off - op.start_off);
+                memcpy(op.buffer, recast<u8*>(page.ptr) + params.BlockBytes(op.start_off), size);
+                ReportOpResult(op);
                 return ERROR_SUCCESS;
             }
         }
@@ -578,12 +578,12 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
                 service_.FlushUnmapRanges(chunk_idx);
 
                 // buffer is nullptr
-                auto it = ops.emplace(ops.end(), &work, kind, chunk_idx, start_off, end_off, 0, buffer);
+                auto& op = ops.emplace_back(&work, kind, chunk_idx, start_off, end_off, 0, buffer);
                 auto err = service_.UnmapChunk(chunk_idx);
                 auto need_refresh = err == ERROR_SUCCESS;
                 if (err == ERROR_FILE_NOT_FOUND) err = ERROR_SUCCESS;
 
-                ReportOpResult(*it, err);
+                ReportOpResult(op, err);
                 if (need_refresh) PostRefreshChunk(chunk_idx);
                 return err;
             }
@@ -601,15 +601,15 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
             try
             {
                 // nothing to zero-fill if UNMAP_CHUNK
-                auto it = ops.emplace(ops.end(), &work, kind, chunk_idx, start_off, end_off,
-                                      LONGLONG(params.BlockBytes(start_off)), buffer);
+                auto& op = ops.emplace_back(&work, kind, chunk_idx, start_off, end_off,
+                                            LONGLONG(params.BlockBytes(start_off)), buffer);
                 if (buffer != nullptr)
                 {
                     // zero-fill if READ_CHUNK
                     memset(buffer, 0, params.BlockBytes(end_off - start_off));
                     buffer = recast<u8*>(buffer) + params.BlockBytes(end_off - start_off);
                 }
-                ReportOpResult(*it);
+                ReportOpResult(op);
                 return ERROR_SUCCESS;
             }
             catch (const bad_alloc&)
@@ -633,7 +633,7 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
     {
         try
         {
-            ops.emplace(ops.end(), &work, kind, chunk_idx, start_off, end_off, 0, buffer);
+            ops.emplace_back(&work, kind, chunk_idx, start_off, end_off, 0, buffer);
             return ERROR_SUCCESS;
         }
         catch (const bad_alloc&)
