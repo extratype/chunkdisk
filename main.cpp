@@ -42,7 +42,7 @@ struct ChunkDisk
     ChunkDiskService service;                       // not movable
     vector<unique_ptr<ChunkDiskWorker>> workers;
 
-    std::unique_ptr<shared_mutex> lock_assigned;
+    shared_mutex mutex_assigned;                    // not movable
     u32 workers_assigned = 0;
 
     explicit ChunkDisk(ChunkDiskParams params, SPD_STORAGE_UNIT* storage_unit)
@@ -159,7 +159,7 @@ ChunkDiskWorker* GetAssignedWorker(SPD_STORAGE_UNIT* StorageUnit)
     if (worker == nullptr)
     {
         auto* cdisk = StorageUnitChunkDisk(StorageUnit);
-        auto lk = SRWLock(*cdisk->lock_assigned, true);
+        auto lk = SRWLock(cdisk->mutex_assigned, true);
         worker = cdisk->workers[cdisk->workers_assigned].get();
         ++cdisk->workers_assigned;
     }
@@ -346,8 +346,6 @@ DWORD CreateStorageUnit(PWSTR chunkdisk_file, BOOLEAN write_protected, PWSTR pip
     {
         // unit will be deleted when cdisk is deleted
         cdisk = std::make_unique<ChunkDisk>(std::move(params), unit);
-        cdisk->lock_assigned = std::make_unique<shared_mutex>();
-
         unit->UserContext = cdisk.get();
     }
     catch (const bad_alloc&)

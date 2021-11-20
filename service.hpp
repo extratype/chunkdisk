@@ -109,23 +109,22 @@ class ChunkDiskService
 {
     std::vector<FileHandle> part_lock_;             // part index -> .lock
 
-    std::unique_ptr<std::shared_mutex> mutex_parts_;
+    std::shared_mutex mutex_parts_;                 // not movable
     std::vector<u64> part_current_;                 // part index -> # of chunks
     size_t part_current_new_ = 0;                   // part index for new chunks
     std::unordered_map<u64, size_t> chunk_parts_;   // chunk index -> part index
 
-    std::unique_ptr<std::shared_mutex> mutex_pages_;
+    std::shared_mutex mutex_pages_;                 // not movable
     // BLOCK_SIZE -> PAGE_SIZE access
     // read cache, write through
     // add to back, evict from front
     Map<u64, PageEntry> cached_pages_;
 
-    std::unique_ptr<std::shared_mutex> mutex_unmapped_;
+    std::shared_mutex mutex_unmapped_;              // not movable
     // chunk index -> [start_off, end_off)
     std::unordered_map<u64, std::map<u64, u64>> chunk_unmapped_;
 
-    // not movable
-    std::atomic<u64> post_ft_ = 0;
+    std::atomic<u64> post_ft_ = 0;                  // not movable
 
 public:
     const ChunkDiskParams params;

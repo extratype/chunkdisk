@@ -20,18 +20,6 @@ namespace chunkdisk
 
 DWORD ChunkDiskService::Start()
 {
-    try
-    {
-        // make class movable
-        mutex_parts_ = make_unique<shared_mutex>();
-        mutex_pages_ = make_unique<shared_mutex>();
-        mutex_unmapped_ = make_unique<shared_mutex>();
-    }
-    catch (const bad_alloc&)
-    {
-        return ERROR_NOT_ENOUGH_MEMORY;
-    }
-
     auto err = DWORD(ERROR_SUCCESS);
 
     // put a lock file to prevent accidental double use
@@ -143,7 +131,7 @@ DWORD ChunkDiskService::CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool 
     try
     {
         // check existence
-        auto lk = SRWLock(*mutex_parts_, true);
+        auto lk = SRWLock(mutex_parts_, true);
 
         // assign part if not found
         auto part_it = chunk_parts_.find(chunk_idx);
@@ -250,7 +238,7 @@ DWORD ChunkDiskService::CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool 
 
 DWORD ChunkDiskService::UnmapChunk(u64 chunk_idx)
 {
-    auto lkp = SRWLock(*mutex_parts_, false);
+    auto lkp = SRWLock(mutex_parts_, false);
 
     auto part_it = chunk_parts_.find(chunk_idx);
     if (part_it == chunk_parts_.end()) return ERROR_FILE_NOT_FOUND;
@@ -272,7 +260,7 @@ DWORD ChunkDiskService::UnmapChunk(u64 chunk_idx)
 
 PageResult ChunkDiskService::PeekPage(u64 page_idx)
 {
-    auto lk = SRWLock(*mutex_pages_, true);
+    auto lk = SRWLock(mutex_pages_, true);
     auto it = cached_pages_.find(page_idx);
     if (it == cached_pages_.end()) return PageResult{ERROR_NOT_FOUND};
     auto* entry = &((*it).second);
@@ -311,7 +299,7 @@ PageResult ChunkDiskService::PeekPage(u64 page_idx)
 
 PageResult ChunkDiskService::LockPage(u64 page_idx)
 {
-    auto lk = SRWLock(*mutex_pages_, true);
+    auto lk = SRWLock(mutex_pages_, true);
 
     // entry to lock
     auto it = cached_pages_.find(page_idx);
@@ -456,7 +444,7 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
 
 PageResult ChunkDiskService::ClaimPage(u64 page_idx)
 {
-    auto lk = SRWLock(*mutex_pages_, false);
+    auto lk = SRWLock(mutex_pages_, false);
     auto it = cached_pages_.find(page_idx);
     if (it == cached_pages_.end()) return PageResult{ERROR_NOT_FOUND};
 
@@ -514,7 +502,7 @@ DWORD ChunkDiskService::RemovePageEntry(SRWLock& lk, Map<u64, PageEntry>::iterat
 
 DWORD ChunkDiskService::FreePage(u64 page_idx, bool remove)
 {
-    auto lk = SRWLock(*mutex_pages_, false);
+    auto lk = SRWLock(mutex_pages_, false);
     auto it = cached_pages_.find(page_idx);
     if (it == cached_pages_.end()) return ERROR_NOT_FOUND;
 
@@ -527,7 +515,7 @@ DWORD ChunkDiskService::FreePage(u64 page_idx, bool remove)
 
 PageResult ChunkDiskService::FlushPages(const PageRange& r)
 {
-    auto g = SRWLock(*mutex_pages_, false);
+    auto g = SRWLock(mutex_pages_, false);
 
     for (auto i = r.start_idx; i <= r.end_idx; ++i)
     {
@@ -554,7 +542,7 @@ PageResult ChunkDiskService::FlushPages(const PageRange& r)
 
 DWORD ChunkDiskService::FlushPages()
 {
-    auto g = SRWLock(*mutex_pages_, false);
+    auto g = SRWLock(mutex_pages_, false);
     auto err = DWORD(ERROR_SUCCESS);
 
     while (!cached_pages_.empty())
@@ -588,7 +576,7 @@ DWORD ChunkDiskService::UnmapRange(SRWLock& lk, u64 chunk_idx, u64 start_off, u6
     if (start_off >= end_off) return ERROR_INVALID_PARAMETER;
     if (end_off > params.chunk_length) return ERROR_INVALID_PARAMETER;
 
-    lk = SRWLock(*mutex_unmapped_, true);
+    lk = SRWLock(mutex_unmapped_, true);
     auto rit = chunk_unmapped_.try_emplace(chunk_idx).first;
     auto& ranges = rit->second;
 
@@ -647,7 +635,7 @@ DWORD ChunkDiskService::UnmapRange(SRWLock& lk, u64 chunk_idx, u64 start_off, u6
 
 void ChunkDiskService::FlushUnmapRanges(u64 chunk_idx)
 {
-    auto lk = SRWLock(*mutex_unmapped_, false);
+    auto lk = SRWLock(mutex_unmapped_, false);
     if (chunk_unmapped_.empty()) return;
     if (chunk_unmapped_.find(chunk_idx) == chunk_unmapped_.end()) return;
 
@@ -659,7 +647,7 @@ void ChunkDiskService::FlushUnmapRanges(u64 chunk_idx)
 
 void ChunkDiskService::FlushUnmapRanges()
 {
-    auto lk = SRWLock(*mutex_unmapped_, true);
+    auto lk = SRWLock(mutex_unmapped_, true);
     chunk_unmapped_.clear();
 }
 
