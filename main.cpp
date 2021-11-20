@@ -40,7 +40,7 @@ static constexpr auto MAX_WORKERS = u32(MAXIMUM_WAIT_OBJECTS);
 struct ChunkDisk
 {
     ChunkDiskService service;                       // not movable
-    vector<unique_ptr<ChunkDiskWorker>> workers;
+    vector<ChunkDiskWorker> workers;
 
     // not movable, increment only
     std::atomic<u32> workers_assigned = 0;
@@ -160,7 +160,7 @@ ChunkDiskWorker* GetAssignedWorker(SPD_STORAGE_UNIT* StorageUnit)
     {
         auto* cdisk = StorageUnitChunkDisk(StorageUnit);
         auto idx = cdisk->workers_assigned.fetch_add(1, std::memory_order_acq_rel);
-        worker = cdisk->workers[idx].get();
+        worker = &cdisk->workers[idx];
     }
     return worker;
 }
@@ -375,7 +375,7 @@ DWORD StopWorkers(ChunkDisk& cdisk, DWORD timeout_ms = INFINITE)
             for (auto& worker : cdisk.workers)
             {
                 auto h = HANDLE();
-                auto err = worker->StopAsync(h);
+                auto err = worker.StopAsync(h);
                 if (err != ERROR_SUCCESS) return err;
                 handles.push_back(h);
             }
@@ -404,8 +404,8 @@ DWORD StartWorkers(ChunkDisk& cdisk, u32 num_workers)
         workers.reserve(num_workers);
         for (u32 i = 0; i < num_workers; ++i)
         {
-            auto it = workers.emplace(workers.end(), new ChunkDiskWorker(cdisk.service));
-            err = (*it)->Start();
+            auto& worker = workers.emplace_back(cdisk.service);
+            err = worker.Start();
             if (err != ERROR_SUCCESS) break;
         }
     }
@@ -418,7 +418,7 @@ DWORD StartWorkers(ChunkDisk& cdisk, u32 num_workers)
     return err;
 }
 
-vector<unique_ptr<ChunkDiskWorker>>& GetWorkers(SPD_STORAGE_UNIT* StorageUnit)
+vector<ChunkDiskWorker>& GetWorkers(SPD_STORAGE_UNIT* StorageUnit)
 {
     return StorageUnitChunkDisk(StorageUnit)->workers;
 }

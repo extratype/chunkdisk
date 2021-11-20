@@ -12,7 +12,7 @@ using std::shared_mutex;
 namespace chunkdisk
 {
 
-extern std::vector<std::unique_ptr<ChunkDiskWorker>>& GetWorkers(SPD_STORAGE_UNIT* StorageUnit);
+extern std::vector<ChunkDiskWorker>& GetWorkers(SPD_STORAGE_UNIT* StorageUnit);
 
 static constexpr auto STANDBY_MS = u32(60000);
 static constexpr auto LOW_LOAD_THRESHOLD = u32(4);
@@ -802,7 +802,7 @@ DWORD ChunkDiskWorker::PostRefreshChunk(u64 chunk_idx)
             continue;
         }
 
-        err1 = worker->PostMsg(std::move(msg)); // invalidates ChunkOpState::owner
+        err1 = worker.PostMsg(std::move(msg)); // invalidates ChunkOpState::owner
         if (err1 != ERROR_IO_PENDING) err = err1;
     }
 
