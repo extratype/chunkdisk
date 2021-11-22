@@ -228,7 +228,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
     {
         // buffer is nullptr for UNMAP_CHUNK
         auto* descs = recast<SPD_UNMAP_DESCRIPTOR*>(ctx_buffer);
-        for (u32 i = 0; i < count; ++i)
+        for (auto i = u32(0); i < count; ++i)
         {
             auto ops_buffer = PVOID(nullptr);
             err = PrepareOps(work, op_kind, descs[i].BlockAddress, descs[i].BlockCount, ops_buffer);

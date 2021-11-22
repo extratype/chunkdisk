@@ -402,7 +402,7 @@ DWORD StartWorkers(ChunkDisk& cdisk, u32 num_workers)
     try
     {
         workers.reserve(num_workers);
-        for (u32 i = 0; i < num_workers; ++i)
+        for (auto i = u32(0); i < num_workers; ++i)
         {
             auto& worker = workers.emplace_back(cdisk.service);
             err = worker.Start();

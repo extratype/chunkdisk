@@ -138,7 +138,7 @@ DWORD ChunkDiskService::CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool 
         auto part_found = part_it != chunk_parts_.end();
         auto part_idx = part_found ? part_it->second : ([this]() -> size_t
             {
-                // chunks are not deleted (truncated when unmapped) so remember the last result
+                // chunks are not removed (truncated when unmapped) so remember the last result
                 auto num_parts = params.part_dirname.size();
                 for (auto new_part = part_current_new_; new_part < num_parts; ++new_part)
                 {

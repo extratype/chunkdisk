@@ -107,6 +107,16 @@ struct PageResult
 
 class ChunkDiskService
 {
+public:
+    const ChunkDiskParams params;
+
+    SPD_STORAGE_UNIT* const storage_unit;
+
+    // must be positive
+    // may exceed temporarily when pages are being used for I/O
+    const u32 max_pages;
+
+private:
     std::vector<FileHandle> part_lock_;             // part index -> .lock
 
     std::shared_mutex mutex_parts_;                 // not movable
@@ -127,14 +137,6 @@ class ChunkDiskService
     std::atomic<u64> post_ft_ = 0;                  // not movable
 
 public:
-    const ChunkDiskParams params;
-
-    SPD_STORAGE_UNIT* const storage_unit;
-
-    // must be positive
-    // may exceed temporarily when pages are being used for I/O
-    const u32 max_pages;
-
     ChunkDiskService(ChunkDiskParams params, SPD_STORAGE_UNIT* storage_unit, u32 max_pages)
         : params(std::move(params)), storage_unit(storage_unit), max_pages(max_pages) {}
 
