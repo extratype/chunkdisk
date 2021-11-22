@@ -1,17 +1,19 @@
 /**
- * @file params.hpp
+ * @file base.hpp
  *
  * @copyright 2021 extratype
  *
- * Parameters and conversions for chunkdisk.
+ * Parameters, conversions, chunks
  */
 
-#ifndef CHUNKDISK_PARAMS_HPP_
-#define CHUNKDISK_PARAMS_HPP_
+#ifndef CHUNKDISK_BASE_HPP_
+#define CHUNKDISK_BASE_HPP_
 
 #include <vector>
 #include <string>
+#include <shared_mutex>
 #include "types.hpp"
+#include "utils.hpp"
 
 namespace chunkdisk
 {
@@ -37,16 +39,29 @@ struct PageRange
     u32 end_off;
 };
 
-struct ChunkDiskParams
+class ChunkDiskBase
 {
-    u32 block_size = 0;             // in bytes
-    u32 page_length = 0;            // in blocks
-    u64 chunk_length = 0;           // in blocks
-    u64 block_count = 0;            // disk size = block_count * block_size
-    u64 chunk_count = 0;            // disk size = chunk_count * chunk_length * block_size
-    std::vector<u64> part_max;                  // part index -> max. # of chunks
-    std::vector<std::wstring> part_dirname;     // part index -> chunk directory
+public:
+    // parameters
 
+    const u32 block_size;                           // in bytes
+    const u32 page_length;                          // in blocks
+    const u64 chunk_length;                         // in blocks
+    const u64 block_count;                          // disk size = block_count * block_size
+    const u64 chunk_count;                          // disk size = chunk_count * chunk_length * block_size
+    const std::vector<u64> part_max;                // part index -> max. # of chunks
+    const std::vector<std::wstring> part_dirname;   // part index -> chunk directory
+    const bool read_only;
+
+private:
+    std::vector<FileHandle> part_lock_;             // part index -> .lock
+
+    std::shared_mutex mutex_parts_;                 // not movable
+    std::vector<u64> part_current_;                 // part index -> # of chunks
+    size_t part_current_new_ = 0;                   // part index for new chunks
+    std::unordered_map<u64, size_t> chunk_parts_;   // chunk index -> part index
+
+public:
     // unit conversions
 
     u64 BlockBytes(u64 count) const { return block_size * count; }
@@ -75,6 +90,12 @@ struct ChunkDiskParams
         return start_off == 0 && end_off == page_length &&
             (buffer == nullptr || recast<size_t>(buffer) % PageBytes(1) == 0);
     }
+
+    // chunks
+
+    DWORD Start();
+
+    DWORD CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool is_write, bool is_locked = false);
 };
 
 }

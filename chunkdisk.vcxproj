@@ -160,7 +160,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="main.cpp" />
-    <ClCompile Include="params.cpp" />
+    <ClCompile Include="base.cpp" />
     <ClCompile Include="service.cpp" />
     <ClCompile Include="worker.cpp" />
     <ClCompile Include="utils.cpp" />

@@ -8,12 +8,7 @@
 #include <unordered_set>
 #include <filesystem>
 
-namespace fs = std::filesystem;
-
 using std::bad_alloc;
-using std::make_unique;
-using std::unordered_map;
-using std::shared_mutex;
 
 namespace chunkdisk
 {
@@ -167,12 +162,12 @@ DWORD ChunkDiskService::CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool 
         // https://docs.microsoft.com/en-us/windows/win32/fileio/file-security-and-access-rights
         const auto desired_access = GENERIC_READ | ((is_write || fix_size) ? GENERIC_WRITE : 0);
         // the file may be used (shared) by multiple threads
-        const auto shared_mode = FILE_SHARE_READ | FILE_SHARE_WRITE;
+        const auto share_mode = FILE_SHARE_READ | FILE_SHARE_WRITE;
         // unbuffered asynchronous I/O
         const auto flags_attrs = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED;
 
         auto h = FileHandle(CreateFileW(
-            path.data(), desired_access, shared_mode, nullptr,
+            path.data(), desired_access, share_mode, nullptr,
             OPEN_EXISTING, flags_attrs, nullptr));
         if (part_found != bool(h))
         {
@@ -185,7 +180,7 @@ DWORD ChunkDiskService::CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool 
         {
             // create a new chunk file
             h.reset(CreateFileW(
-                path.data(), desired_access, shared_mode, nullptr,
+                path.data(), desired_access, share_mode, nullptr,
                 CREATE_NEW, flags_attrs, nullptr));
             if (!h) return GetLastError();
 
@@ -402,11 +397,11 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
             // page miss
             try
             {
-                auto user = make_unique<u64>();
+                auto user = std::make_unique<u64>();
                 auto ptr = Pages(VirtualAlloc(nullptr, params.PageBytes(1),
                                               MEM_COMMIT, PAGE_READWRITE));
                 if (ptr == nullptr) return PageResult{ERROR_NOT_ENOUGH_MEMORY};
-                auto mutex = std::make_shared<shared_mutex>();
+                auto mutex = std::make_shared<std::shared_mutex>();
 
                 mutex->lock();
                 try

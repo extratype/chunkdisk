@@ -14,7 +14,7 @@
 #include <unordered_map>
 #include <atomic>
 #include "utils.hpp"
-#include "params.hpp"
+#include "base.hpp"
 
 namespace chunkdisk
 {
@@ -108,6 +108,7 @@ struct PageResult
 class ChunkDiskService
 {
 public:
+    // FIXME base
     const ChunkDiskParams params;
 
     SPD_STORAGE_UNIT* const storage_unit;
@@ -117,13 +118,6 @@ public:
     const u32 max_pages;
 
 private:
-    std::vector<FileHandle> part_lock_;             // part index -> .lock
-
-    std::shared_mutex mutex_parts_;                 // not movable
-    std::vector<u64> part_current_;                 // part index -> # of chunks
-    size_t part_current_new_ = 0;                   // part index for new chunks
-    std::unordered_map<u64, size_t> chunk_parts_;   // chunk index -> part index
-
     std::shared_mutex mutex_pages_;                 // not movable
     // BLOCK_SIZE -> PAGE_SIZE access
     // read cache, write through

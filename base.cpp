@@ -1,15 +1,19 @@
 /**
- * @file params.cpp
+ * @file base.cpp
  *
  * @copyright 2021 extratype
  */
 
-#include "params.hpp"
+#include "base.hpp"
+#include <unordered_set>
+#include <filesystem>
+
+using std::bad_alloc;
 
 namespace chunkdisk
 {
 
-ChunkRange ChunkDiskParams::BlockChunkRange(u64 block_addr, u32 count) const
+ChunkRange ChunkDiskBase::BlockChunkRange(u64 block_addr, u32 count) const
 {
     auto start_idx = block_addr / chunk_length;
     auto start_off = block_addr % chunk_length;
@@ -33,7 +37,7 @@ ChunkRange ChunkDiskParams::BlockChunkRange(u64 block_addr, u32 count) const
     return ChunkRange{ start_idx, start_off, end_idx, end_off };
 }
 
-PageRange ChunkDiskParams::BlockPageRange(u64 chunk_idx, u64 start_off, u64 end_off) const
+PageRange ChunkDiskBase::BlockPageRange(u64 chunk_idx, u64 start_off, u64 end_off) const
 {
     auto base_idx = chunk_idx * (chunk_length / page_length);
     auto count = end_off - start_off;

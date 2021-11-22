@@ -5,7 +5,7 @@
  */
 
 #include "utils.hpp"
-#include "params.hpp"
+// FIXME #include "base.hpp"
 #include "service.hpp"
 #include "worker.hpp"
 #include <memory>
