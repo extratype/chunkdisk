@@ -362,4 +362,14 @@ DWORD ChunkDiskBase::CreateChunk(u64 chunk_idx, FileHandle& handle_out, const bo
     return ERROR_SUCCESS;
 }
 
+void ChunkDiskBase::RemoveChunkLocked(u64 chunk_idx, FileHandle handle)
+{
+    auto lk = SRWLock(*mutex_parts_, true);
+    auto part_it = chunk_parts_.find(chunk_idx);
+    if (part_it == chunk_parts_.end()) return;
+    chunk_parts_.erase(part_it);
+    --part_current_[part_it->second];
+    handle.reset();
+}
+
 }

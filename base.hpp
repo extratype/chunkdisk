@@ -109,6 +109,12 @@ public:
      * Subsequent CreateChunk() with !is_write may succeed if !is_write.
      */
     DWORD CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool is_write, bool is_locked = false);
+
+    /*
+     * Cancel creating the chunk which has been marked for removal.
+     * handle: returned by CreateChunk(chunk_idx, handle, true, true)
+     */
+    void RemoveChunkLocked(u64 chunk_idx, FileHandle handle);
 };
 
 }
