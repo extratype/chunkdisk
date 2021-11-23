@@ -138,17 +138,6 @@ public:
 
     DWORD Start();
 
-    /*
-     * Open a chunk for unbuffered asynchronous I/O.
-     *
-     * Open as read-write if is_write and read-only otherwise.
-     * Return an empty handle with ERROR_SUCCESS if !is_write and the chunk is empty or does not exist.
-     * Create the chunk if is_write and it does not exist.
-     * Error if the chunk is inconsistent with internal state: its existence and size.
-     * Open as read-write and extend its size if fix_size and the chunk is not empty.
-     */
-    DWORD CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool is_write, bool fix_size = false);
-
     // make chunk empty (truncate)
     DWORD UnmapChunk(u64 chunk_idx);
 

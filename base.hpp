@@ -3,7 +3,7 @@
  *
  * @copyright 2021 extratype
  *
- * Parameters, conversions, chunks
+ * Parameters, unit conversions, chunks
  */
 
 #ifndef CHUNKDISK_BASE_HPP_
@@ -44,22 +44,22 @@ class ChunkDiskBase
 public:
     // parameters
 
-    const u32 block_size;                           // in bytes
-    const u32 page_length;                          // in blocks
-    const u64 chunk_length;                         // in blocks
-    const u64 block_count;                          // disk size = block_count * block_size
-    const u64 chunk_count;                          // disk size = chunk_count * chunk_length * block_size
-    const std::vector<u64> part_max;                // part index -> max. # of chunks
-    const std::vector<std::wstring> part_dirname;   // part index -> chunk directory
-    const bool read_only;
+    const u32 block_size;                               // in bytes
+    const u32 page_length;                              // in blocks
+    const u64 chunk_length;                             // in blocks
+    const u64 block_count;                              // disk size = block_count * block_size
+    const u64 chunk_count;                              // disk size = chunk_count * chunk_length * block_size
+    const std::vector<u64> part_max;                    // part index -> max. # of chunks
+    const std::vector<std::wstring> part_dirname;       // part index -> chunk directory
+    const bool read_only;                               // allow only read access
 
 private:
-    std::vector<FileHandle> part_lock_;             // part index -> .lock
+    std::vector<FileHandle> part_lock_;                 // part index -> .lock
 
-    std::shared_mutex mutex_parts_;                 // not movable
-    std::vector<u64> part_current_;                 // part index -> # of chunks
-    size_t part_current_new_ = 0;                   // part index for new chunks
-    std::unordered_map<u64, size_t> chunk_parts_;   // chunk index -> part index
+    std::unique_ptr<std::shared_mutex> mutex_parts_;
+    std::vector<u64> part_current_;                     // part index -> # of chunks
+    size_t part_current_new_ = 0;                       // part index for new chunks
+    std::unordered_map<u64, size_t> chunk_parts_;       // chunk index -> part index
 
 public:
     // unit conversions
@@ -95,6 +95,19 @@ public:
 
     DWORD Start();
 
+    /*
+     * FIXME design.txt
+     * Open an FileHandle to access a chunk.
+     *
+     * Open as read-write if is_write and read-only otherwise.
+     * Return an empty handle with ERROR_SUCCESS if !is_write and the chunk is empty or does not exist.
+     * Create the chunk if is_write and it does not exist.
+     * Unbuffered, asynchronous I/O unless is_locked.
+     *
+     * Buffered, synchronous I/O if is_locked.
+     * Subsequent CreateChunk() will fail if is_write.
+     * Subsequent CreateChunk() with !is_write may succeed if !is_write.
+     */
     DWORD CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool is_write, bool is_locked = false);
 };
 

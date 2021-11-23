@@ -64,4 +64,302 @@ PageRange ChunkDiskBase::BlockPageRange(u64 chunk_idx, u64 start_off, u64 end_of
     return PageRange{ base_idx, sidx, soff, eidx, eoff };
 }
 
+DWORD ChunkDiskBase::Start()
+{
+    auto err = DWORD(ERROR_SUCCESS);
+
+    try
+    {
+        // make class movable
+        mutex_parts_ = std::make_unique<std::shared_mutex>();
+    }
+    catch (const bad_alloc&)
+    {
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+    /*
+     * FIXME design.txt
+        as base disk
+        base changed -> invalid differential
+            persistent .lock
+            .lock: FILE_SHARE_READ
+        ERROR_SHARING_VIOLATION occurs if read-only & write
+     */
+    // put a lock file to prevent accidental double use
+    err = [this]() -> DWORD
+    {
+        const auto num_parts = part_dirname.size();
+
+        try
+        {
+            const auto desired_access = GENERIC_READ | (read_only ? 0 : GENERIC_WRITE);
+            const auto share_mode = read_only ? FILE_SHARE_READ : 0;
+            const auto cr_disp = read_only ? OPEN_ALWAYS : CREATE_NEW;
+            const auto flags_attrs = FILE_ATTRIBUTE_NORMAL | (read_only ? 0 : FILE_FLAG_DELETE_ON_CLOSE);
+
+            for (auto i = size_t(0); i < num_parts; ++i)
+            {
+                auto path = part_dirname[i] + L"\\.lock";
+                auto h = FileHandle(CreateFileW(
+                    path.data(), desired_access, share_mode, nullptr,
+                    cr_disp, flags_attrs, nullptr));
+                if (!h) return GetLastError();
+                part_lock_.emplace_back(std::move(h));
+            }
+        }
+        catch (const bad_alloc&)
+        {
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+        return ERROR_SUCCESS;
+    }();
+    if (err != ERROR_SUCCESS) return err;
+
+    // read parts and chunks, check consistency
+    err = [this]() -> DWORD
+    {
+        // from params.part_max, params.part_dirname...
+        auto num_parts = part_dirname.size();
+
+        try
+        {
+            // make sure parts exist, no dups
+            auto part_ids = std::unordered_set<std::pair<u32, u64>, pair_hash>();
+            for (auto i = size_t(0); i < num_parts; ++i)
+            {
+                auto h = FileHandle(CreateFileW(
+                    (part_dirname[i] + L'\\').data(),
+                    FILE_READ_ATTRIBUTES, 0, nullptr,
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+                if (!h) return GetLastError();
+
+                auto file_info = BY_HANDLE_FILE_INFORMATION();
+                if (!GetFileInformationByHandle(h.get(), &file_info)) return GetLastError();
+
+                if (!part_ids.emplace(std::make_pair(
+                        file_info.dwVolumeSerialNumber,
+                        file_info.nFileIndexLow + (u64(file_info.nFileIndexHigh) << 32))).second)
+                {
+                    return ERROR_INVALID_PARAMETER; // dup found
+                }
+            }
+            part_ids.clear();
+
+            // read parts
+            auto part_current = std::vector<u64>(num_parts, 0);
+            auto chunk_parts = std::unordered_map<u64, size_t>();
+            for (auto i = size_t(0); i < num_parts; ++i)
+            {
+                for (auto& p : std::filesystem::directory_iterator(part_dirname[i] + L'\\'))
+                {
+                    auto fname = p.path().filename().wstring();
+                    if (_wcsnicmp(fname.data(), L"chunk", 5) != 0) continue;
+
+                    auto* endp = PWSTR();
+                    auto idx = wcstoull(fname.data() + 5, &endp, 10);
+                    if (fname.data() + 5 == endp || *endp != L'\0'
+                        || errno == ERANGE || idx >= chunk_count)
+                    {
+                        continue;
+                    }
+
+                    if (!chunk_parts.emplace(idx, i).second) return ERROR_FILE_EXISTS;
+                    if (++part_current[i] > part_max[i]) return ERROR_PARAMETER_QUOTA_EXCEEDED;
+                }
+            }
+
+            // done
+            part_current_ = std::move(part_current);
+            chunk_parts_ = std::move(chunk_parts);
+        }
+        catch (const std::system_error& e)
+        {
+            return e.code().value();
+        }
+        catch (const bad_alloc&)
+        {
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+
+        return ERROR_SUCCESS;
+    }();
+    if (err != ERROR_SUCCESS) return err;
+
+    return ERROR_SUCCESS;
+}
+
+DWORD ChunkDiskBase::CreateChunk(u64 chunk_idx, FileHandle& handle_out, const bool is_write, const bool is_locked)
+{
+    if (read_only && is_write) return ERROR_ACCESS_DENIED;
+
+    auto lk = SRWLock(*mutex_parts_, false);
+    auto part_it = chunk_parts_.find(chunk_idx);
+    auto part_idx = size_t(0);
+
+    if (part_it != chunk_parts_.end())
+    {
+        part_idx = part_it->second;
+    }
+    else if (is_write)
+    {
+        // assign part, will create chunk file
+        lk.switch_lock();
+        part_it = chunk_parts_.find(chunk_idx);
+        if (part_it != chunk_parts_.end())
+        {
+            part_idx = part_it->second;
+        }
+        else
+        {
+            part_idx = [this]()
+            {
+                // chunks are not removed (truncated when unmapped) so remember the last result
+                auto num_parts = part_dirname.size();
+                for (auto new_part = part_current_new_; new_part < num_parts; ++new_part)
+                {
+                    if (part_current_[new_part] < part_max[new_part])
+                    {
+                        part_current_new_ = new_part;
+                        return new_part;
+                    }
+                }
+                // the following code is not reachable because
+                // part_current_new_ is initially zero,
+                // ReadChunkDiskParams() checks total part_max,
+                // FIXME comment: WinSpd checks requested addresses
+                for (auto new_part = size_t(0); new_part < part_current_new_; ++new_part)
+                {
+                    if (part_current_[new_part] < part_max[new_part])
+                    {
+                        part_current_new_ = new_part;
+                        return new_part;
+                    }
+                }
+                return num_parts - 1;
+            }();
+        }
+    }
+
+    // FIXME comment: check existence when starting I/O
+    const auto part_found = (part_it != chunk_parts_.end());
+    if (!is_write && !part_found)
+    {
+        // not present -> empty handle
+        handle_out = FileHandle();
+        return ERROR_SUCCESS;
+    }
+
+    // !is_write -> part_found
+    // is_write -> part_found or assigned
+    const auto path = part_dirname[part_idx] + L"\\chunk" + std::to_wstring(chunk_idx);
+
+    // GENERIC_READ  means FILE_GENERIC_READ
+    // GENERIC_WRITE means FILE_GENERIC_WRITE | FILE_READ_ATTRIBUTES
+    // Note that a file can still be extended with FILE_APPEND_DATA flag unset
+    // https://docs.microsoft.com/en-us/windows/win32/fileio/file-security-and-access-rights
+    //
+    // FIXME is_locked
+    const auto desired_access = GENERIC_READ | (is_write ? GENERIC_WRITE : 0)
+        | ((is_write && is_locked) ? DELETE : 0);
+
+    // exclusive if is_locked and is_write
+    // may be shared by multiple threads if not is_locked
+    const auto share_mode = is_locked ? (is_write ? 0 : FILE_SHARE_READ)
+        : (FILE_SHARE_READ | FILE_SHARE_WRITE);
+
+    // unbuffered asynchronous I/O if not is_locked
+    // buffered synchronous I/O if is_locked
+    const auto flags_attrs = FILE_ATTRIBUTE_NORMAL |
+        (!is_locked ? (FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED) : 0);
+
+    // chunk file size in bytes
+    const auto chunk_bytes = LARGE_INTEGER{.QuadPart = LONGLONG(BlockBytes(ChunkBlocks(1)))};
+
+    if (is_write && !part_found)
+    {
+        // FIXME comment: create non-empty chunk file or nothing
+        auto h_locked = FileHandle(CreateFileW(
+            path.data(), desired_access | DELETE, 0, nullptr,
+            CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (h_locked) return GetLastError();
+
+        auto err = DWORD(ERROR_SUCCESS);
+        // This just reserves disk space and sets file length on NTFS.
+        // Writing to the file actually extends the physical data, but synchronously.
+        // See https://devblogs.microsoft.com/oldnewthing/20150710-00/?p=45171.
+        err = SetFilePointerEx(h_locked.get(), chunk_bytes, nullptr, FILE_BEGIN)
+            ? ERROR_SUCCESS : GetLastError();
+        if (err == ERROR_SUCCESS) err = SetEndOfFile(h_locked.get()) ? ERROR_SUCCESS : GetLastError();
+        if (err == ERROR_SUCCESS)
+        {
+            try
+            {
+                // lk switched to exclusive
+                chunk_parts_[chunk_idx] = part_idx;
+                ++part_current_[part_idx];
+            }
+            catch (const bad_alloc&)
+            {
+                err = ERROR_NOT_ENOUGH_MEMORY;
+            }
+        }
+        if (err != ERROR_SUCCESS)
+        {
+            auto disp = FILE_DISPOSITION_INFO{TRUE};
+            SetFileInformationByHandle(h_locked.get(), FileDispositionInfo, &disp, sizeof(disp));
+            h_locked.reset();  // will remove the file
+            handle_out = FileHandle();
+            return err;
+        }
+        if (is_locked)
+        {
+            if (SetFilePointerEx(h_locked.get(), LARGE_INTEGER{.QuadPart = 0}, nullptr, FILE_BEGIN))
+            {
+                // same argument for CreateFileW()
+                handle_out = std::move(h_locked);
+                return ERROR_SUCCESS;
+            }
+        }
+    }
+
+    auto h = FileHandle(CreateFileW(
+        path.data(), desired_access, share_mode, nullptr,
+        OPEN_EXISTING, flags_attrs, nullptr));
+    if (!h) return GetLastError();
+
+    if (!(is_write && !part_found))
+    {
+        // check existing chunk file
+        auto file_size = LARGE_INTEGER();
+        if (!GetFileSizeEx(h.get(), &file_size)) return GetLastError();
+        if (!is_write && file_size.QuadPart == 0)
+        {
+            // empty chunk, nothing to read -> return empty handle
+            h.reset();
+        }
+        else
+        {
+            if (file_size.QuadPart != 0 && file_size.QuadPart != chunk_bytes.QuadPart)
+            {
+                return ERROR_INCORRECT_SIZE;
+            }
+            if (is_write && file_size.QuadPart == 0)
+            {
+                // chunk will be non-empty, extend size
+                if (!SetFilePointerEx(h.get(), chunk_bytes, nullptr, FILE_BEGIN)) return GetLastError();
+                // This just reserves disk space and sets file length on NTFS.
+                if (!SetEndOfFile(h.get())) return GetLastError();
+                if (!SetFilePointerEx(h.get(), LARGE_INTEGER{.QuadPart = 0}, nullptr, FILE_BEGIN))
+                {
+                    return GetLastError();
+                }
+            }
+        }
+    }
+
+    handle_out = std::move(h);
+    return ERROR_SUCCESS;
+}
+
 }
