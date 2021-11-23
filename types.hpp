@@ -30,16 +30,19 @@ static constexpr T recast(U arg)
     return reinterpret_cast<T>(arg);
 }
 
-struct pair_hash
+// https://github.com/boostorg/container_hash/blob/master/include/boost/container_hash/hash.hpp
+// hash_combine_impl<64>
+static u64 hash_combine_64(u64 h, u64 k)
 {
-    template <class T1, class T2>
-    size_t operator() (std::pair<T1, T2> const& p) const
-    {
-        size_t h1 = std::hash<T1>()(p.first);
-        size_t h2 = std::hash<T2>()(p.second);
-        return h1 ^ h2;
-    }
-};
+    auto m = (u64(0xca4a793) << 32) + 0x5bd1e995;
+    k *= m;
+    k ^= k >> 47;
+    k *= m;
+    h ^= k;
+    h *= m;
+    h += 0xe6546b64;
+    return h;
+}
 
 // unordered_map
 // keep the insertion order

@@ -13,6 +13,31 @@ using std::bad_alloc;
 namespace chunkdisk
 {
 
+namespace
+{
+
+struct FileIdInfoHash
+{
+    u64 operator()(const FILE_ID_INFO& id_info) const
+    {
+        auto h = u64(0);
+        h = hash_combine_64(h, u64(id_info.VolumeSerialNumber));
+        h = hash_combine_64(h, *(u64*)(&id_info.FileId.Identifier[0]));
+        h = hash_combine_64(h, *(u64*)(&id_info.FileId.Identifier[8]));
+        return h;
+    }
+};
+
+struct FileIdInfoEqual
+{
+    bool operator()(const FILE_ID_INFO& a, const FILE_ID_INFO& b) const
+    {
+        return memcmp(&a, &b, sizeof(FILE_ID_INFO)) == 0;
+    }
+};
+
+}
+
 ChunkRange ChunkDiskBase::BlockChunkRange(u64 block_addr, u32 count) const
 {
     auto start_idx = block_addr / chunk_length;
@@ -118,13 +143,13 @@ DWORD ChunkDiskBase::Start()
     // read parts and chunks, check consistency
     err = [this]() -> DWORD
     {
-        // from params.part_max, params.part_dirname...
+        // from part_max, part_dirname...
         auto num_parts = part_dirname.size();
 
         try
         {
             // make sure parts exist, no dups
-            auto part_ids = std::unordered_set<std::pair<u32, u64>, pair_hash>();
+            auto part_ids = std::unordered_set<FILE_ID_INFO, FileIdInfoHash, FileIdInfoEqual>();
             for (auto i = size_t(0); i < num_parts; ++i)
             {
                 auto h = FileHandle(CreateFileW(
@@ -134,12 +159,12 @@ DWORD ChunkDiskBase::Start()
                     FILE_FLAG_BACKUP_SEMANTICS, nullptr));
                 if (!h) return GetLastError();
 
-                auto file_info = BY_HANDLE_FILE_INFORMATION();
-                if (!GetFileInformationByHandle(h.get(), &file_info)) return GetLastError();
-
-                if (!part_ids.emplace(std::make_pair(
-                        file_info.dwVolumeSerialNumber,
-                        file_info.nFileIndexLow + (u64(file_info.nFileIndexHigh) << 32))).second)
+                auto id_info = FILE_ID_INFO();
+                if (!GetFileInformationByHandleEx(h.get(), FileIdInfo, &id_info, sizeof(id_info)))
+                {
+                    return GetLastError();
+                }
+                if (!part_ids.emplace(id_info).second)
                 {
                     return ERROR_INVALID_PARAMETER; // dup found
                 }
