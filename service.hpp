@@ -143,7 +143,7 @@ public:
     DWORD Start();
 
     // CheckChunk() from current to parents, return bases.size() if all false.
-    size_t CheckChunk(u64 chunk_idx);
+    size_t FindChunk(u64 chunk_idx);
 
     // Open a chunk file handle for I/O.
     // FIXME comment

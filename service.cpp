@@ -26,7 +26,7 @@ DWORD ChunkDiskService::Start()
     return ERROR_SUCCESS;
 }
 
-size_t ChunkDiskService::CheckChunk(u64 chunk_idx)
+size_t ChunkDiskService::FindChunk(u64 chunk_idx)
 {
     auto i = size_t(0);
     for (; i < bases.size(); ++i)
@@ -45,7 +45,7 @@ DWORD ChunkDiskService::CreateChunk(const u64 chunk_idx, FileHandle& handle_out,
     else
     {
         // FIXME comment race
-        auto i = CheckChunk(chunk_idx);
+        auto i = FindChunk(chunk_idx);
         if (i == bases.size())
         {
             handle_out = FileHandle();
