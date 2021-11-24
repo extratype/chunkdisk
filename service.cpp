@@ -13,6 +13,35 @@ using std::bad_alloc;
 namespace chunkdisk
 {
 
+size_t ChunkDiskService::FindChunk(u64 chunk_idx)
+{
+    auto i = size_t(0);
+    for (; i < bases.size(); ++i)
+    {
+        if (bases[i].CheckChunk(chunk_idx)) break;
+    }
+    return i;
+}
+
+DWORD ChunkDiskService::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, const bool is_write, const bool is_locked)
+{
+    if (is_write)
+    {
+        return bases[0].CreateChunk(chunk_idx, handle_out, is_write, is_locked);
+    }
+    else
+    {
+        // FIXME comment race
+        auto i = FindChunk(chunk_idx);
+        if (i == bases.size())
+        {
+            handle_out = FileHandle();
+            return ERROR_SUCCESS;
+        }
+        return bases[i].CreateChunk(chunk_idx, handle_out, is_write, is_locked);
+    }
+}
+
 DWORD ChunkDiskService::Start()
 {
     if (bases.empty()) return ERROR_INVALID_PARAMETER;
@@ -53,35 +82,6 @@ void ChunkDiskService::UnlockChunk(u64 chunk_idx)
 {
     auto lk = SRWLock(mutex_chunk_lock_, true);
     chunk_lock_.erase(chunk_idx);
-}
-
-size_t ChunkDiskService::FindChunk(u64 chunk_idx)
-{
-    auto i = size_t(0);
-    for (; i < bases.size(); ++i)
-    {
-        if (bases[i].CheckChunk(chunk_idx)) break;
-    }
-    return i;
-}
-
-DWORD ChunkDiskService::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, const bool is_write, const bool is_locked)
-{
-    if (is_write)
-    {
-        return bases[0].CreateChunk(chunk_idx, handle_out, is_write, is_locked);
-    }
-    else
-    {
-        // FIXME comment race
-        auto i = FindChunk(chunk_idx);
-        if (i == bases.size())
-        {
-            handle_out = FileHandle();
-            return ERROR_SUCCESS;
-        }
-        return bases[i].CreateChunk(chunk_idx, handle_out, is_write, is_locked);
-    }
 }
 
 DWORD ChunkDiskService::UnmapChunk(u64 chunk_idx)

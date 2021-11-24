@@ -145,19 +145,19 @@ public:
     // start bases
     DWORD Start();
 
-    DWORD LockChunk(u64 chunk_idx, size_t user);
-
-    // FIXME not optional?
-    bool CheckChunkLocked(u64 chunk_idx, size_t* user = nullptr);
-
-    void UnlockChunk(u64 chunk_idx);
-
     // CheckChunk() from current to parents, return bases.size() if all false.
     size_t FindChunk(u64 chunk_idx);
 
     // Open a chunk file handle for I/O.
     // FIXME comment
     DWORD CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool is_write, bool is_locked = false);
+
+    DWORD LockChunk(u64 chunk_idx, size_t user);
+
+    // FIXME not optional?
+    bool CheckChunkLocked(u64 chunk_idx, size_t* user = nullptr);
+
+    void UnlockChunk(u64 chunk_idx);
 
     // FIXME unmap
     // make chunk empty (truncate)
