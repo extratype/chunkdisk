@@ -110,6 +110,7 @@ class ChunkDiskService
 public:
     // FIXME params -> bases[0]
     // FIXME from ReadChunkDiskBases()
+    // FIXME comment read-only?
     // current: bases[0], parent: bases[1] and so on, if any
     std::vector<ChunkDiskBase> bases;
 
@@ -140,6 +141,13 @@ public:
 
     // start bases
     DWORD Start();
+
+    // CheckChunk() from current to parents, return bases.size() if all false.
+    size_t CheckChunk(u64 chunk_idx);
+
+    // Open a chunk file handle for I/O.
+    // FIXME comment
+    DWORD CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool is_write, bool is_locked = false);
 
     // make chunk empty (truncate)
     DWORD UnmapChunk(u64 chunk_idx);

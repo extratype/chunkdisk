@@ -154,6 +154,12 @@ DWORD ChunkDiskBase::Start()
     return ERROR_SUCCESS;
 }
 
+bool ChunkDiskBase::CheckChunk(u64 chunk_idx)
+{
+    auto lk = SRWLock(*mutex_parts_, false);
+    return chunk_parts_.find(chunk_idx) != chunk_parts_.end();
+}
+
 DWORD ChunkDiskBase::CreateChunk(u64 chunk_idx, FileHandle& handle_out, const bool is_write, const bool is_locked)
 {
     if (read_only && is_write) return ERROR_ACCESS_DENIED;

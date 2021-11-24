@@ -39,6 +39,7 @@ struct PageRange
     u32 end_off;
 };
 
+// FIXME comment thread safety
 class ChunkDiskBase
 {
 public:
@@ -100,6 +101,9 @@ public:
     // chunks
 
     DWORD Start();
+
+    // false if a chunk file will be created for writing
+    bool CheckChunk(u64 chunk_idx);
 
     /*
      * FIXME design.txt
