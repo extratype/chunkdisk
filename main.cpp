@@ -10,6 +10,7 @@
 #include "worker.hpp"
 #include <memory>
 #include <numeric>
+#include <unordered_set>
 #include <atomic>
 #include <filesystem>
 
@@ -18,24 +19,47 @@ using std::unique_ptr;
 using std::wstring;
 using std::vector;
 
-namespace fs = std::filesystem;
-
 namespace chunkdisk
 {
 
+namespace
+{
+
 // sector size, 512 or 4096
-static constexpr auto BLOCK_SIZE = u32(512);
+constexpr auto BLOCK_SIZE = u32(512);
 
 // align with the underlying hardware, 4096 will work
-static constexpr auto PAGE_SIZE = u32(4096);
+constexpr auto PAGE_SIZE = u32(4096);
 
 // must be a multiple of PAGE_SIZE
-static constexpr auto MAX_TRANSFER_LENGTH = u32(1024 * 1024);
+constexpr auto MAX_TRANSFER_LENGTH = u32(1024 * 1024);
 
 // maximum number of cached pages (write through)
-static constexpr auto MAX_PAGES = u32(2048);
+constexpr auto MAX_PAGES = u32(2048);
 
-static constexpr auto MAX_WORKERS = u32(MAXIMUM_WAIT_OBJECTS);
+constexpr auto MAX_WORKERS = u32(MAXIMUM_WAIT_OBJECTS);
+
+struct FileIdInfoHash
+{
+    u64 operator()(const FILE_ID_INFO& id_info) const
+    {
+        auto h = u64(0);
+        h = hash_combine_64(h, u64(id_info.VolumeSerialNumber));
+        h = hash_combine_64(h, *(u64*)(&id_info.FileId.Identifier[0]));
+        h = hash_combine_64(h, *(u64*)(&id_info.FileId.Identifier[8]));
+        return h;
+    }
+};
+
+struct FileIdInfoEqual
+{
+    bool operator()(const FILE_ID_INFO& a, const FILE_ID_INFO& b) const
+    {
+        return memcmp(&a, &b, sizeof(FILE_ID_INFO)) == 0;
+    }
+};
+
+}
 
 struct ChunkDisk
 {
@@ -129,7 +153,7 @@ DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, bool read_only, unique_ptr<ChunkD
             if (!dirname.empty() && dirname[dirname.size() - 1] == L'\r') dirname.erase(dirname.size() - 1);
             if (!dirname.empty() && dirname[dirname.size() - 1] == L'\\') dirname.erase(dirname.size() - 1);
             if (!dirname.empty() && dirname[dirname.size() - 1] == L'/')  dirname.erase(dirname.size() - 1);
-            auto dirpath = fs::path(std::move(dirname));
+            auto dirpath = std::filesystem::path(std::move(dirname));
             if (!dirpath.is_absolute()) return ERROR_INVALID_PARAMETER;
 
             part_max.push_back(pmax);
@@ -162,6 +186,95 @@ DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, bool read_only, unique_ptr<ChunkD
         return ERROR_NOT_ENOUGH_MEMORY;
     }
     return ERROR_SUCCESS;
+}
+
+/*
+ * Read .chunkdisk file (bases[0]) and its parents (bases[1] and so on, if any).
+ * bases[0].read_only == true if read_only.
+ * FIXME test
+ */
+DWORD ReadChunkDiskBases(PCWSTR chunkdisk_file, bool read_only, vector<ChunkDiskBase>& bases)
+{
+    auto part_ids = std::unordered_set<FILE_ID_INFO, FileIdInfoHash, FileIdInfoEqual>();
+
+    auto base = unique_ptr<ChunkDiskBase>();
+    auto parent = wstring();
+    auto err = ReadChunkDiskFile(chunkdisk_file, read_only, base, parent);
+    if (err != ERROR_SUCCESS) return err;
+
+    // read parents and add to bases
+    while (true)
+    {
+        try
+        {
+            if (!bases.empty())
+            {
+                // same geometry
+                if (bases[0].block_size != base->block_size
+                    || bases[0].page_length != base->page_length
+                    || bases[0].chunk_length != base->chunk_length
+                    || bases[0].block_count != base->block_count
+                    || bases[0].chunk_count != base->chunk_count)
+                {
+                    err = ERROR_INVALID_PARAMETER;
+                    break;
+                }
+            }
+
+            // make sure parts exist, no dups
+            for (auto i = size_t(0); i < base->part_dirname.size(); ++i)
+            {
+                auto h = FileHandle(CreateFileW(
+                    (base->part_dirname[i] + L'\\').data(),
+                    FILE_READ_ATTRIBUTES, 0, nullptr,
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+                if (!h)
+                {
+                    err = GetLastError();
+                    break;
+                }
+
+                auto id_info = FILE_ID_INFO();
+                if (!GetFileInformationByHandleEx(h.get(), FileIdInfo, &id_info, sizeof(id_info)))
+                {
+                    err = GetLastError();
+                    break;
+                }
+                if (!part_ids.emplace(id_info).second)
+                {
+                    err = ERROR_INVALID_PARAMETER; // dup found
+                    break;
+                }
+            }
+
+            // base ok
+            bases.emplace_back(std::move(*base));
+            base.reset();
+        }
+        catch (const bad_alloc&)
+        {
+            err = ERROR_NOT_ENOUGH_MEMORY;
+            break;
+        }
+
+        if (parent.empty())
+        {
+            err = ERROR_SUCCESS;
+            break;
+        }
+        // parents are always read_only
+        err = ReadChunkDiskFile(parent.data(), true, base, parent);
+        if (err != ERROR_SUCCESS) break;
+    }
+
+    if (err != ERROR_SUCCESS)
+    {
+        bases.clear();
+        return err;
+    }
+    return ERROR_SUCCESS;
+    // FIXME start bases in service
 }
 
 ChunkDisk* StorageUnitChunkDisk(SPD_STORAGE_UNIT* StorageUnit)
@@ -306,7 +419,7 @@ DWORD CreateStorageUnit(PWSTR chunkdisk_file, BOOLEAN write_protected, PWSTR pip
 {
     // read chunkdisk file
     auto params = ChunkDiskParams();
-    auto err = ReadChunkDiskParams(chunkdisk_file, params);
+    auto err = ReadChunkDiskFile(chunkdisk_file, params);
     if (err != ERROR_SUCCESS)
     {
         SpdLogErr(L"error: parsing failed with error %lu", err);
@@ -359,7 +472,7 @@ DWORD CreateStorageUnit(PWSTR chunkdisk_file, BOOLEAN write_protected, PWSTR pip
     auto cdisk = unique_ptr<ChunkDisk>();
     try
     {
-        // unit will be deleted when cdisk is deleted
+        // unit is deleted when cdisk is deleted
         cdisk = std::make_unique<ChunkDisk>(std::move(params), unit);
         unit->UserContext = cdisk.get();
     }

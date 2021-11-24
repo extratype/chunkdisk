@@ -5,38 +5,12 @@
  */
 
 #include "base.hpp"
-#include <unordered_set>
 #include <filesystem>
 
 using std::bad_alloc;
 
 namespace chunkdisk
 {
-
-namespace
-{
-
-struct FileIdInfoHash
-{
-    u64 operator()(const FILE_ID_INFO& id_info) const
-    {
-        auto h = u64(0);
-        h = hash_combine_64(h, u64(id_info.VolumeSerialNumber));
-        h = hash_combine_64(h, *(u64*)(&id_info.FileId.Identifier[0]));
-        h = hash_combine_64(h, *(u64*)(&id_info.FileId.Identifier[8]));
-        return h;
-    }
-};
-
-struct FileIdInfoEqual
-{
-    bool operator()(const FILE_ID_INFO& a, const FILE_ID_INFO& b) const
-    {
-        return memcmp(&a, &b, sizeof(FILE_ID_INFO)) == 0;
-    }
-};
-
-}
 
 ChunkRange ChunkDiskBase::BlockChunkRange(u64 block_addr, u32 count) const
 {
@@ -102,6 +76,7 @@ DWORD ChunkDiskBase::Start()
     {
         return ERROR_NOT_ENOUGH_MEMORY;
     }
+
     /*
      * FIXME design.txt
         as base disk
@@ -110,106 +85,71 @@ DWORD ChunkDiskBase::Start()
             .lock: FILE_SHARE_READ
         ERROR_SHARING_VIOLATION occurs if read-only & write
      */
+    const auto num_parts = part_dirname.size();
+
+    // FIXME remove locks if fail
     // put a lock file to prevent accidental double use
-    err = [this]() -> DWORD
+    try
     {
-        const auto num_parts = part_dirname.size();
+        const auto desired_access = GENERIC_READ | (read_only ? 0 : GENERIC_WRITE);
+        const auto share_mode = read_only ? FILE_SHARE_READ : 0;
+        const auto cr_disp = read_only ? OPEN_ALWAYS : CREATE_NEW;
+        const auto flags_attrs = FILE_ATTRIBUTE_NORMAL | (read_only ? 0 : FILE_FLAG_DELETE_ON_CLOSE);
 
-        try
+        for (auto i = size_t(0); i < num_parts; ++i)
         {
-            const auto desired_access = GENERIC_READ | (read_only ? 0 : GENERIC_WRITE);
-            const auto share_mode = read_only ? FILE_SHARE_READ : 0;
-            const auto cr_disp = read_only ? OPEN_ALWAYS : CREATE_NEW;
-            const auto flags_attrs = FILE_ATTRIBUTE_NORMAL | (read_only ? 0 : FILE_FLAG_DELETE_ON_CLOSE);
-
-            for (auto i = size_t(0); i < num_parts; ++i)
-            {
-                auto path = part_dirname[i] + L"\\.lock";
-                auto h = FileHandle(CreateFileW(
-                    path.data(), desired_access, share_mode, nullptr,
-                    cr_disp, flags_attrs, nullptr));
-                if (!h) return GetLastError();
-                part_lock_.emplace_back(std::move(h));
-            }
+            auto path = part_dirname[i] + L"\\.lock";
+            auto h = FileHandle(CreateFileW(
+                path.data(), desired_access, share_mode, nullptr,
+                cr_disp, flags_attrs, nullptr));
+            if (!h) return GetLastError();
+            part_lock_.emplace_back(std::move(h));
         }
-        catch (const bad_alloc&)
-        {
-            return ERROR_NOT_ENOUGH_MEMORY;
-        }
-        return ERROR_SUCCESS;
-    }();
-    if (err != ERROR_SUCCESS) return err;
+    }
+    catch (const bad_alloc&)
+    {
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
 
     // read parts and chunks, check consistency
-    err = [this]() -> DWORD
+    // FIXME reset if fail
+    try
     {
-        // from part_max, part_dirname...
-        auto num_parts = part_dirname.size();
-
-        try
+        // read parts
+        auto part_current = std::vector<u64>(num_parts, 0);
+        auto chunk_parts = std::unordered_map<u64, size_t>();
+        for (auto i = size_t(0); i < num_parts; ++i)
         {
-            // make sure parts exist, no dups
-            auto part_ids = std::unordered_set<FILE_ID_INFO, FileIdInfoHash, FileIdInfoEqual>();
-            for (auto i = size_t(0); i < num_parts; ++i)
+            for (auto& p : std::filesystem::directory_iterator(part_dirname[i] + L'\\'))
             {
-                auto h = FileHandle(CreateFileW(
-                    (part_dirname[i] + L'\\').data(),
-                    FILE_READ_ATTRIBUTES, 0, nullptr,
-                    OPEN_EXISTING,
-                    FILE_FLAG_BACKUP_SEMANTICS, nullptr));
-                if (!h) return GetLastError();
+                auto fname = p.path().filename().wstring();
+                if (_wcsnicmp(fname.data(), L"chunk", 5) != 0) continue;
 
-                auto id_info = FILE_ID_INFO();
-                if (!GetFileInformationByHandleEx(h.get(), FileIdInfo, &id_info, sizeof(id_info)))
+                auto* endp = PWSTR();
+                auto idx = wcstoull(fname.data() + 5, &endp, 10);
+                if (fname.data() + 5 == endp || *endp != L'\0'
+                    || errno == ERANGE || idx >= chunk_count)
                 {
-                    return GetLastError();
+                    continue;
                 }
-                if (!part_ids.emplace(id_info).second)
-                {
-                    return ERROR_INVALID_PARAMETER; // dup found
-                }
+
+                if (!chunk_parts.emplace(idx, i).second) return ERROR_FILE_EXISTS;
+                if (++part_current[i] > part_max[i]) return ERROR_PARAMETER_QUOTA_EXCEEDED;
             }
-            part_ids.clear();
-
-            // read parts
-            auto part_current = std::vector<u64>(num_parts, 0);
-            auto chunk_parts = std::unordered_map<u64, size_t>();
-            for (auto i = size_t(0); i < num_parts; ++i)
-            {
-                for (auto& p : std::filesystem::directory_iterator(part_dirname[i] + L'\\'))
-                {
-                    auto fname = p.path().filename().wstring();
-                    if (_wcsnicmp(fname.data(), L"chunk", 5) != 0) continue;
-
-                    auto* endp = PWSTR();
-                    auto idx = wcstoull(fname.data() + 5, &endp, 10);
-                    if (fname.data() + 5 == endp || *endp != L'\0'
-                        || errno == ERANGE || idx >= chunk_count)
-                    {
-                        continue;
-                    }
-
-                    if (!chunk_parts.emplace(idx, i).second) return ERROR_FILE_EXISTS;
-                    if (++part_current[i] > part_max[i]) return ERROR_PARAMETER_QUOTA_EXCEEDED;
-                }
-            }
-
-            // done
-            part_current_ = std::move(part_current);
-            chunk_parts_ = std::move(chunk_parts);
-        }
-        catch (const std::system_error& e)
-        {
-            return e.code().value();
-        }
-        catch (const bad_alloc&)
-        {
-            return ERROR_NOT_ENOUGH_MEMORY;
         }
 
-        return ERROR_SUCCESS;
-    }();
-    if (err != ERROR_SUCCESS) return err;
+        // done
+        part_current_ = std::move(part_current);
+        chunk_parts_ = std::move(chunk_parts);
+    }
+    catch (const std::system_error& e)
+    {
+        return e.code().value();
+    }
+    catch (const bad_alloc&)
+    {
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
 
     return ERROR_SUCCESS;
 }
