@@ -160,7 +160,7 @@ public:
     PageResult PeekPage(u64 page_idx);
 
     // acquire exclusive lock for creating/updating a page
-    // persistent use, empty PageResult::lock, the calling thread must FreePage() later
+    // persistent use, empty PageResult::lock, the calling thread must UnlockPage() later
     // PageResult::error is ERROR_LOCK_FAILED if the page is locked by the current thread
     // PageResult::user valid for ERROR_SUCCESS and ERROR_LOCK_FAILED
     PageResult LockPage(u64 page_idx);
@@ -171,7 +171,7 @@ public:
 
     // release the lock and optionally remove the page
     // return ERROR_SUCCESS if the calling thread have successfully called LockPage()
-    DWORD FreePage(u64 page_idx, bool remove = false);
+    DWORD UnlockPage(u64 page_idx, bool remove = false);
 
     // remove cached pages in range
     // if one of them is locked by the current thread,

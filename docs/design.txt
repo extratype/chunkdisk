@@ -190,7 +190,7 @@ Asynchronous I/O:
         copy/zero-fill page
         WriteFile()... from page
         CloseChunk()
-        service.FreePage()
+        service.UnlockPage()
 
 Unmap():
     whole chunk: service.UnmapChunk()

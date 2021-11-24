@@ -1229,7 +1229,7 @@ DWORD ChunkDiskWorker::FreePageAsync(ChunkOpState& state, u64 page_idx, bool rem
     auto* next = state.next;
     state.next = nullptr;
 
-    auto err = service_.FreePage(page_idx, remove);
+    auto err = service_.UnlockPage(page_idx, remove);
     if (err != ERROR_SUCCESS) return err;
     if (next != nullptr)
     {

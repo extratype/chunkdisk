@@ -319,7 +319,7 @@ DWORD ChunkDiskService::RemovePageEntry(SRWLock& lk, Map<u64, PageEntry>::iterat
     return ERROR_SUCCESS;
 }
 
-DWORD ChunkDiskService::FreePage(u64 page_idx, bool remove)
+DWORD ChunkDiskService::UnlockPage(u64 page_idx, bool remove)
 {
     auto lk = SRWLock(mutex_pages_, false);
     auto it = cached_pages_.find(page_idx);
