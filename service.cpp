@@ -222,7 +222,7 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
             try
             {
                 auto user = std::make_unique<u64>();
-                auto ptr = Pages(VirtualAlloc(nullptr, params.PageBytes(1),
+                auto ptr = Pages(VirtualAlloc(nullptr, bases[0].PageBytes(1),
                                               MEM_COMMIT, PAGE_READWRITE));
                 if (ptr == nullptr) return PageResult{ERROR_NOT_ENOUGH_MEMORY};
                 auto mutex = std::make_shared<std::shared_mutex>();
@@ -393,7 +393,7 @@ DWORD ChunkDiskService::UnmapRange(SRWLock& lk, u64 chunk_idx, u64 start_off, u6
 {
     if (lk) return ERROR_INVALID_PARAMETER;
     if (start_off >= end_off) return ERROR_INVALID_PARAMETER;
-    if (end_off > params.chunk_length) return ERROR_INVALID_PARAMETER;
+    if (end_off > bases[0].chunk_length) return ERROR_INVALID_PARAMETER;
 
     lk = SRWLock(mutex_unmapped_, true);
     auto rit = chunk_unmapped_.try_emplace(chunk_idx).first;
@@ -447,7 +447,7 @@ DWORD ChunkDiskService::UnmapRange(SRWLock& lk, u64 chunk_idx, u64 start_off, u6
     }
 
     if (ranges.size() != 1) return ERROR_IO_PENDING;
-    if (!params.IsWholeChunk(ranges.begin()->first, ranges.begin()->second)) return ERROR_IO_PENDING;
+    if (!bases[0].IsWholeChunk(ranges.begin()->first, ranges.begin()->second)) return ERROR_IO_PENDING;
     chunk_unmapped_.erase(rit);
     return ERROR_SUCCESS;
 }

@@ -102,7 +102,7 @@ public:
 
     DWORD Start();
 
-    // false if a chunk file will be created for writing
+    // false if a chunk file will be created when writing
     bool CheckChunk(u64 chunk_idx);
 
     /*
