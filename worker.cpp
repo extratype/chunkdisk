@@ -161,7 +161,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
 
     // prepare work
     auto* ctx_buffer = context->DataBuffer;
-    auto& params = service_.params;
+    auto& base = service_.bases[0];
     auto work = ChunkWork();
     auto err = DWORD(ERROR_SUCCESS);
 
@@ -179,35 +179,35 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
         // whole disk as pages
         // r.start_idx, r.end_idx: page index
         // r.start_off, r.end_off: block offset in page
-        const auto r = params.BlockPageRange(0, block_addr, block_addr + count);
+        const auto r = base.BlockPageRange(0, block_addr, block_addr + count);
 
-        if (params.IsWholePages(r.start_off, r.end_off) || r.start_idx == r.end_idx)
+        if (base.IsWholePages(r.start_off, r.end_off) || r.start_idx == r.end_idx)
         {
             // no need to page align buffer
             auto ops_buffer = work.buffer.get();
-            if (op_kind == WRITE_CHUNK) memcpy(ops_buffer, ctx_buffer, params.BlockBytes(count));
+            if (op_kind == WRITE_CHUNK) memcpy(ops_buffer, ctx_buffer, base.BlockBytes(count));
             err = PrepareOps(work, op_kind, block_addr, count, ops_buffer);
         }
         else
         {
             // page align buffer to the next page
             // GetBuffer() provides margin of one page
-            auto ops_buffer = PVOID(recast<u8*>(work.buffer.get()) + params.BlockBytes(r.start_off));
-            if (op_kind == WRITE_CHUNK) memcpy(ops_buffer, ctx_buffer, params.BlockBytes(count));
+            auto ops_buffer = PVOID(recast<u8*>(work.buffer.get()) + base.BlockBytes(r.start_off));
+            if (op_kind == WRITE_CHUNK) memcpy(ops_buffer, ctx_buffer, base.BlockBytes(count));
 
             while (true)
             {
                 // head
                 if (r.start_off != 0)
                 {
-                    err = PrepareOps(work, op_kind, block_addr, params.page_length - r.start_off, ops_buffer);
+                    err = PrepareOps(work, op_kind, block_addr, base.page_length - r.start_off, ops_buffer);
                     if (err != ERROR_SUCCESS) break;
                 }
 
                 // aligned to page
                 // [start_idx, end_idx] -> [saddr, eaddr)
-                auto saddr = params.PageBlocks(r.start_idx) + ((r.start_off != 0) ? params.page_length : 0);
-                auto eaddr = params.PageBlocks(r.end_idx) + ((r.end_off != params.page_length) ? 0 : params.page_length);
+                auto saddr = base.PageBlocks(r.start_idx) + ((r.start_off != 0) ? base.page_length : 0);
+                auto eaddr = base.PageBlocks(r.end_idx) + ((r.end_off != base.page_length) ? 0 : base.page_length);
                 if (saddr != eaddr)
                 {
                     err = PrepareOps(work, op_kind, saddr, eaddr - saddr, ops_buffer);
@@ -215,9 +215,9 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
                 }
 
                 // tail
-                if (r.end_off != params.page_length)
+                if (r.end_off != base.page_length)
                 {
-                    err = PrepareOps(work, op_kind, params.PageBlocks(r.end_idx), r.end_off, ops_buffer);
+                    err = PrepareOps(work, op_kind, base.PageBlocks(r.end_idx), r.end_off, ops_buffer);
                     if (err != ERROR_SUCCESS) break;
                 }
                 break;
@@ -260,7 +260,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
     if (work.num_completed == work.ops.size())
     {
         // read all done immediately
-        if (op_kind == READ_CHUNK) memcpy(ctx_buffer, work.ops[0].buffer, params.BlockBytes(count));
+        if (op_kind == READ_CHUNK) memcpy(ctx_buffer, work.ops[0].buffer, base.BlockBytes(count));
         ReturnBuffer(std::move(work.buffer));
         service_.SetPostFileTime(GetSystemFileTime());
         return ERROR_SUCCESS;
@@ -309,7 +309,7 @@ DWORD ChunkDiskWorker::GetBuffer(Pages& buffer)
 
         // align buffer to pages
         // additional page for unaligned requests
-        auto buffer_size = service_.MaxTransferLength() + u32(service_.params.PageBytes(1));
+        auto buffer_size = service_.MaxTransferLength() + u32(service_.bases[0].PageBytes(1));
         auto new_buffer = Pages(VirtualAlloc(nullptr, buffer_size, MEM_COMMIT, PAGE_READWRITE));
         if (!new_buffer)
         {
@@ -529,16 +529,16 @@ DWORD ChunkDiskWorker::RefreshChunk(u64 chunk_idx)
 DWORD ChunkDiskWorker::PreparePageOps(ChunkWork& work, bool is_write, u64 page_idx,
                                       u32 start_off, u32 end_off, LONGLONG& file_off, PVOID& buffer)
 {
-    auto& params = service_.params;
+    auto& base = service_.bases[0];
     auto& ops = work.ops;
     auto kind = is_write ? WRITE_PAGE : READ_PAGE;
-    if (is_write && !params.IsWholePages(start_off, end_off)) kind = WRITE_PAGE_PARTIAL;
+    if (is_write && !base.IsWholePages(start_off, end_off)) kind = WRITE_PAGE_PARTIAL;
 
     try
     {
         auto& op = ops.emplace_back(&work, kind, page_idx, start_off, end_off, file_off, buffer);
-        file_off += LONGLONG(params.PageBytes(1));
-        if (!(is_write && buffer == nullptr)) buffer = recast<u8*>(buffer) + params.BlockBytes(end_off - start_off);
+        file_off += LONGLONG(base.PageBytes(1));
+        if (!(is_write && buffer == nullptr)) buffer = recast<u8*>(buffer) + base.BlockBytes(end_off - start_off);
 
         // try to complete immediately
         // work is not queued, we can't lock or wait for a page here so READ_PAGE only
@@ -547,8 +547,8 @@ DWORD ChunkDiskWorker::PreparePageOps(ChunkWork& work, bool is_write, u64 page_i
             auto page = service_.PeekPage(page_idx);
             if (page.error == ERROR_SUCCESS)
             {
-                auto size = params.BlockBytes(op.end_off - op.start_off);
-                memcpy(op.buffer, recast<u8*>(page.ptr) + params.BlockBytes(op.start_off), size);
+                auto size = base.BlockBytes(op.end_off - op.start_off);
+                memcpy(op.buffer, recast<u8*>(page.ptr) + base.BlockBytes(op.start_off), size);
                 ReportOpResult(op);
                 return ERROR_SUCCESS;
             }
@@ -565,13 +565,13 @@ DWORD ChunkDiskWorker::PreparePageOps(ChunkWork& work, bool is_write, u64 page_i
 DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 chunk_idx,
                                        u64 start_off, u64 end_off, PVOID& buffer)
 {
-    auto& params = service_.params;
+    auto& base = service_.bases[0];
     auto& ops = work.ops;
 
     // try to complete immediately
     if (kind == READ_CHUNK || kind == UNMAP_CHUNK)
     {
-        if (kind == UNMAP_CHUNK && params.IsWholeChunk(start_off, end_off))
+        if (kind == UNMAP_CHUNK && base.IsWholeChunk(start_off, end_off))
         {
             try
             {
@@ -602,12 +602,12 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
             {
                 // nothing to zero-fill if UNMAP_CHUNK
                 auto& op = ops.emplace_back(&work, kind, chunk_idx, start_off, end_off,
-                                            LONGLONG(params.BlockBytes(start_off)), buffer);
+                                            LONGLONG(base.BlockBytes(start_off)), buffer);
                 if (buffer != nullptr)
                 {
                     // zero-fill if READ_CHUNK
-                    memset(buffer, 0, params.BlockBytes(end_off - start_off));
-                    buffer = recast<u8*>(buffer) + params.BlockBytes(end_off - start_off);
+                    memset(buffer, 0, base.BlockBytes(end_off - start_off));
+                    buffer = recast<u8*>(buffer) + base.BlockBytes(end_off - start_off);
                 }
                 ReportOpResult(op);
                 return ERROR_SUCCESS;
@@ -648,18 +648,18 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
 
     // prepare asynchronous I/O
     auto is_write = (kind == WRITE_CHUNK);
-    const auto r = params.BlockPageRange(chunk_idx, start_off, end_off);
+    const auto r = base.BlockPageRange(chunk_idx, start_off, end_off);
 
     // write operation, invalidate all ranges for simplicity
     if (is_write && buffer != nullptr) service_.FlushUnmapRanges(chunk_idx);
 
-    if (params.IsWholePages(r.start_off, r.end_off, buffer))
+    if (base.IsWholePages(r.start_off, r.end_off, buffer))
     {
         // aligned to page
         try
         {
-            ops.emplace_back(&work, kind, chunk_idx, start_off, end_off, LONGLONG(params.BlockBytes(start_off)), buffer);
-            if (!(is_write && buffer == nullptr)) buffer = recast<u8*>(buffer) + params.BlockBytes(end_off - start_off);
+            ops.emplace_back(&work, kind, chunk_idx, start_off, end_off, LONGLONG(base.BlockBytes(start_off)), buffer);
+            if (!(is_write && buffer == nullptr)) buffer = recast<u8*>(buffer) + base.BlockBytes(end_off - start_off);
         }
         catch (const bad_alloc&)
         {
@@ -669,14 +669,14 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
     else if (buffer == nullptr && r.start_idx != r.end_idx)
     {
         // align to the next page
-        auto file_off = LONGLONG(params.PageBytes(r.start_idx));
+        auto file_off = LONGLONG(base.PageBytes(r.start_idx));
         auto err = DWORD(ERROR_SUCCESS);
 
         // head
         if (r.start_off != 0)
         {
             err = PreparePageOps(work, is_write, r.base_idx + r.start_idx,
-                                 r.start_off, params.page_length, file_off, buffer);
+                                 r.start_off, base.page_length, file_off, buffer);
             if (err != ERROR_SUCCESS) return err;
         }
 
@@ -684,8 +684,8 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
         try
         {
             // [start_idx, end_idx] -> [soff, eoff)
-            auto soff = params.PageBlocks(r.start_idx) + ((r.start_off != 0) ? params.page_length : 0);
-            auto eoff = params.PageBlocks(r.end_idx) + ((r.end_off != params.page_length) ? 0 : params.page_length);
+            auto soff = base.PageBlocks(r.start_idx) + ((r.start_off != 0) ? base.page_length : 0);
+            auto eoff = base.PageBlocks(r.end_idx) + ((r.end_off != base.page_length) ? 0 : base.page_length);
             if (soff != eoff)
             {
                 ops.emplace_back(&work, kind, chunk_idx, soff, eoff, file_off, buffer);
@@ -698,9 +698,9 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
         }
 
         // tail
-        if (r.end_off != params.page_length)
+        if (r.end_off != base.page_length)
         {
-            file_off = LONGLONG(params.PageBytes(r.end_idx));
+            file_off = LONGLONG(base.PageBytes(r.end_idx));
             err = PreparePageOps(work, is_write, r.base_idx + r.end_idx, 0, r.end_off, file_off, buffer);
             if (err != ERROR_SUCCESS) return err;
         }
@@ -708,16 +708,16 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
     else
     {
         // unaligned to page
-        auto file_off = LONGLONG(params.PageBytes(r.start_idx));
+        auto file_off = LONGLONG(base.PageBytes(r.start_idx));
 
         auto err = PreparePageOps(work, is_write, r.base_idx + r.start_idx, r.start_off,
-                                  (r.start_idx == r.end_idx) ? r.end_off : params.page_length, file_off, buffer);
+                                  (r.start_idx == r.end_idx) ? r.end_off : base.page_length, file_off, buffer);
         if (err != ERROR_SUCCESS) return err;
         if (r.start_idx != r.end_idx)
         {
             for (auto i = r.start_idx + 1; i < r.end_idx; ++i)
             {
-                err = PreparePageOps(work, is_write, r.base_idx + i, 0, params.page_length, file_off, buffer);
+                err = PreparePageOps(work, is_write, r.base_idx + i, 0, base.page_length, file_off, buffer);
                 if (err != ERROR_SUCCESS) return err;
             }
             err = PreparePageOps(work, is_write, r.base_idx + r.end_idx, 0, r.end_off, file_off, buffer);
@@ -730,17 +730,17 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
 
 DWORD ChunkDiskWorker::PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_addr, u32 count, PVOID& buffer)
 {
-    auto& params = service_.params;
-    const auto r = params.BlockChunkRange(block_addr, count);
+    auto& base = service_.bases[0];
+    const auto r = base.BlockChunkRange(block_addr, count);
 
     auto err = PrepareChunkOps(work, kind, r.start_idx, r.start_off,
-                               (r.start_idx == r.end_idx) ? r.end_off : params.chunk_length, buffer);
+                               (r.start_idx == r.end_idx) ? r.end_off : base.chunk_length, buffer);
     if (err != ERROR_SUCCESS) return err;
     if (r.start_idx != r.end_idx)
     {
         for (auto i = r.start_idx + 1; i < r.end_idx; ++i)
         {
-            err = PrepareChunkOps(work, kind, i, 0, params.chunk_length, buffer);
+            err = PrepareChunkOps(work, kind, i, 0, base.chunk_length, buffer);
             if (err != ERROR_SUCCESS) return err;
         }
         err = PrepareChunkOps(work, kind, r.end_idx, 0, r.end_off, buffer);
@@ -795,7 +795,8 @@ DWORD ChunkDiskWorker::PostRefreshChunk(u64 chunk_idx)
         // start_off and end_off are zero
         auto msg = ChunkWork();
         auto msg_buf = PVOID(nullptr);
-        auto err1 = PrepareOps(msg, REFRESH_CHUNK, service_.params.ChunkBlocks(chunk_idx), 0, msg_buf);
+        auto err1 = PrepareOps(msg, REFRESH_CHUNK,
+                               service_.bases[0].ChunkBlocks(chunk_idx), 0, msg_buf);
         if (err1 != ERROR_SUCCESS)
         {
             err = err1;
@@ -1252,9 +1253,9 @@ DWORD ChunkDiskWorker::CheckAsyncEOF(ChunkOpState& state)
     {
         return ERROR_INVALID_FUNCTION;
     }
-    auto& params = service_.params;
+    auto& base = service_.bases[0];
     auto chunk_idx = (kind == READ_CHUNK)
-        ? state.idx : params.BlockChunkRange(params.PageBlocks(state.idx), 0).start_idx;
+        ? state.idx : base.BlockChunkRange(base.PageBlocks(state.idx), 0).start_idx;
 
     auto h = HANDLE(INVALID_HANDLE_VALUE);
     auto err = OpenChunk(chunk_idx, false, h);
@@ -1272,15 +1273,15 @@ DWORD ChunkDiskWorker::PostReadChunk(ChunkOpState& state)
 {
     // aligned to page
     // Windows caches disk
-    auto& params = service_.params;
-    auto err = FlushPagesAsync(state, params.BlockPageRange(state.idx, state.start_off, state.end_off));
+    auto& base = service_.bases[0];
+    auto err = FlushPagesAsync(state, base.BlockPageRange(state.idx, state.start_off, state.end_off));
     if (err != ERROR_SUCCESS) return err;
 
     auto h = HANDLE(INVALID_HANDLE_VALUE);
     err = OpenChunk(state.idx, false, h);
     if (err != ERROR_SUCCESS) return err;
 
-    auto length_bytes = params.BlockBytes(state.end_off - state.start_off);
+    auto length_bytes = base.BlockBytes(state.end_off - state.start_off);
     if (h != INVALID_HANDLE_VALUE)
     {
         auto bytes_read = DWORD();
@@ -1326,7 +1327,7 @@ DWORD ChunkDiskWorker::PostReadChunk(ChunkOpState& state)
 
 void ChunkDiskWorker::CompleteReadChunk(ChunkOpState& state, DWORD error, DWORD bytes_transferred)
 {
-    auto length_bytes = service_.params.BlockBytes(state.end_off - state.start_off);
+    auto length_bytes = service_.bases[0].BlockBytes(state.end_off - state.start_off);
     if (error == ERROR_SUCCESS
         && bytes_transferred != length_bytes
         && bytes_transferred != u32(-1))
@@ -1352,13 +1353,12 @@ DWORD ChunkDiskWorker::PrepareZeroChunk(ChunkWork* work)
 {
     if (work->buffer) return ERROR_SUCCESS;
 
-    auto& params = service_.params;
     auto max_length = service_.MaxTransferLength();
     auto buffer_size = u64(0);
     for (auto& op : work->ops)
     {
         if (op.kind != WRITE_CHUNK) continue;
-        auto length_bytes = params.BlockBytes(op.end_off - op.start_off);
+        auto length_bytes = service_.bases[0].BlockBytes(op.end_off - op.start_off);
         buffer_size = max(buffer_size, length_bytes);
         if (buffer_size > max_length) break;
     }
@@ -1372,14 +1372,14 @@ DWORD ChunkDiskWorker::PrepareZeroChunk(ChunkWork* work)
 
 DWORD ChunkDiskWorker::PostWriteChunk(ChunkOpState& state)
 {
-    auto& params = service_.params;
+    auto& base = service_.bases[0];
     auto err = DWORD(ERROR_SUCCESS);
 
     if (state.step != OP_ZERO_CHUNK)
     {
         // aligned to page
         // Windows caches disk
-        err = FlushPagesAsync(state, params.BlockPageRange(state.idx, state.start_off, state.end_off));
+        err = FlushPagesAsync(state, base.BlockPageRange(state.idx, state.start_off, state.end_off));
         if (err != ERROR_SUCCESS) return err;
 
         auto h = HANDLE(INVALID_HANDLE_VALUE);
@@ -1388,15 +1388,15 @@ DWORD ChunkDiskWorker::PostWriteChunk(ChunkOpState& state)
 
         if (state.buffer != nullptr)
         {
-            auto length_bytes = params.BlockBytes(state.end_off - state.start_off);
+            auto length_bytes = base.BlockBytes(state.end_off - state.start_off);
             err = WriteFile(h, state.buffer, DWORD(length_bytes), nullptr, &state.ovl)
                 ? ERROR_SUCCESS : GetLastError();
         }
         else
         {
             FILE_ZERO_DATA_INFORMATION zero_info;
-            zero_info.FileOffset.QuadPart = LONGLONG(params.BlockBytes(state.start_off));
-            zero_info.BeyondFinalZero.QuadPart = LONGLONG(params.BlockBytes(state.end_off));
+            zero_info.FileOffset.QuadPart = LONGLONG(base.BlockBytes(state.start_off));
+            zero_info.BeyondFinalZero.QuadPart = LONGLONG(base.BlockBytes(state.end_off));
 
             err = DeviceIoControl(
                 h, FSCTL_SET_ZERO_DATA, &zero_info, sizeof(zero_info),
@@ -1422,8 +1422,8 @@ DWORD ChunkDiskWorker::PostWriteChunk(ChunkOpState& state)
 
         // track progress with OVERLAPPED
         auto file_off = LARGE_INTEGER{.LowPart = state.ovl.Offset, .HighPart = LONG(state.ovl.OffsetHigh)}.QuadPart;
-        auto start_off = params.ByteBlock(file_off).first;
-        auto length_bytes = min(params.BlockBytes(state.end_off - start_off), service_.MaxTransferLength());
+        auto start_off = base.ByteBlock(file_off).first;
+        auto length_bytes = min(base.BlockBytes(state.end_off - start_off), service_.MaxTransferLength());
         err = WriteFile(h, state.owner->buffer.get(), DWORD(length_bytes), nullptr, &state.ovl)
             ? ERROR_SUCCESS : GetLastError();
     }
@@ -1438,18 +1438,18 @@ DWORD ChunkDiskWorker::PostWriteChunk(ChunkOpState& state)
 
 void ChunkDiskWorker::CompleteWriteChunk(ChunkOpState& state, DWORD error, DWORD bytes_transferred)
 {
-    auto& params = service_.params;
+    auto& base = service_.bases[0];
     auto length_bytes = u64(0);
     auto next_off = u64(0);
     if (state.step != OP_ZERO_CHUNK)
     {
-        length_bytes = params.BlockBytes(state.end_off - state.start_off);
+        length_bytes = base.BlockBytes(state.end_off - state.start_off);
     }
     else
     {
         auto file_off = LARGE_INTEGER{.LowPart = state.ovl.Offset, .HighPart = LONG(state.ovl.OffsetHigh)}.QuadPart;
-        auto start_off = params.ByteBlock(file_off).first;
-        length_bytes = min(params.BlockBytes(state.end_off - start_off), service_.MaxTransferLength());
+        auto start_off = base.ByteBlock(file_off).first;
+        length_bytes = min(base.BlockBytes(state.end_off - start_off), service_.MaxTransferLength());
         next_off = file_off + length_bytes;
     }
 
@@ -1476,7 +1476,7 @@ void ChunkDiskWorker::CompleteWriteChunk(ChunkOpState& state, DWORD error, DWORD
         return;
     }
 
-    if (state.step == OP_ZERO_CHUNK && params.ByteBlock(next_off).first < state.end_off)
+    if (state.step == OP_ZERO_CHUNK && base.ByteBlock(next_off).first < state.end_off)
     {
         // continue writing...
         auto li = LARGE_INTEGER{.QuadPart = LONGLONG(next_off)};
@@ -1506,7 +1506,7 @@ void ChunkDiskWorker::CompleteWriteChunk(ChunkOpState& state, DWORD error, DWORD
 
 DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
 {
-    auto& params = service_.params;
+    auto& base = service_.bases[0];
     // always lock page because
     // READ_PAGE: PeekPage() was called in PreparePageOps()
     // WRITE_PAGE_PARTIAL: write followed by read, lock required
@@ -1515,7 +1515,7 @@ DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
 
     if (!page.is_hit)
     {
-        auto chunk_idx = params.BlockChunkRange(params.PageBlocks(state.idx), 0).start_idx;
+        auto chunk_idx = base.BlockChunkRange(base.PageBlocks(state.idx), 0).start_idx;
         auto h = HANDLE(INVALID_HANDLE_VALUE);
         auto err = OpenChunk(chunk_idx, false, h);
         if (err != ERROR_SUCCESS)
@@ -1527,7 +1527,7 @@ DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
         if (h != INVALID_HANDLE_VALUE)
         {
             auto bytes_read = DWORD();
-            err = ReadFile(h, page.ptr, u32(params.PageBytes(1)), &bytes_read, &state.ovl)
+            err = ReadFile(h, page.ptr, u32(base.PageBytes(1)), &bytes_read, &state.ovl)
                 ? ERROR_SUCCESS : GetLastError();
             if (err != ERROR_SUCCESS && err != ERROR_IO_PENDING)
             {
@@ -1539,7 +1539,7 @@ DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
                     // simulate ReadFile()
                     // page already zero-filled
                     err = PostQueuedCompletionStatus(
-                        iocp_.get(), u32(params.PageBytes(1)),
+                        iocp_.get(), u32(base.PageBytes(1)),
                         CK_IO, &state.ovl) ? ERROR_SUCCESS : GetLastError();
                     if (err != ERROR_SUCCESS)
                     {
@@ -1576,9 +1576,9 @@ DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
 
 void ChunkDiskWorker::CompleteReadPage(ChunkOpState& state, DWORD error, DWORD bytes_transferred)
 {
-    auto& params = service_.params;
+    auto& base = service_.bases[0];
     if (error == ERROR_SUCCESS
-        && bytes_transferred != params.PageBytes(1)
+        && bytes_transferred != base.PageBytes(1)
         && bytes_transferred != u32(-1))
     {
         error = ERROR_INVALID_DATA;
@@ -1590,14 +1590,14 @@ void ChunkDiskWorker::CompleteReadPage(ChunkOpState& state, DWORD error, DWORD b
     // OpenChunk() not called if page hit
     if (bytes_transferred != u32(-1))
     {
-        auto chunk_idx = params.BlockChunkRange(params.PageBlocks(state.idx), 0).start_idx;
+        auto chunk_idx = base.BlockChunkRange(base.PageBlocks(state.idx), 0).start_idx;
         CloseChunk(chunk_idx, false);
     }
     if (error == ERROR_SUCCESS)
     {
         auto page = service_.ClaimPage(state.idx);
-        auto length_bytes = params.BlockBytes(state.end_off - state.start_off);
-        memcpy(state.buffer, recast<u8*>(page.ptr) + params.BlockBytes(state.start_off), length_bytes);
+        auto length_bytes = base.BlockBytes(state.end_off - state.start_off);
+        memcpy(state.buffer, recast<u8*>(page.ptr) + base.BlockBytes(state.start_off), length_bytes);
     }
     FreePageAsync(state, state.idx, error != ERROR_SUCCESS);
     ReportOpResult(state, error);
@@ -1612,8 +1612,8 @@ DWORD ChunkDiskWorker::PostWritePage(ChunkOpState& state)
     auto page = (state.kind == WRITE_PAGE_PARTIAL) ? service_.ClaimPage(state.idx) : LockPageAsync(state, state.idx);
     if (page.error != ERROR_SUCCESS) return page.error;
 
-    auto& params = service_.params;
-    auto chunk_idx = params.BlockChunkRange(params.PageBlocks(state.idx), 0).start_idx;
+    auto& base = service_.bases[0];
+    auto chunk_idx = base.BlockChunkRange(base.PageBlocks(state.idx), 0).start_idx;
     auto h = HANDLE(INVALID_HANDLE_VALUE);
     auto err = OpenChunk(chunk_idx, true, h);
     if (err != ERROR_SUCCESS)
@@ -1622,18 +1622,18 @@ DWORD ChunkDiskWorker::PostWritePage(ChunkOpState& state)
         return err;
     }
 
-    auto size = params.BlockBytes(state.end_off - state.start_off);
+    auto size = base.BlockBytes(state.end_off - state.start_off);
     if (state.buffer != nullptr)
     {
-        memcpy(recast<u8*>(page.ptr) + params.BlockBytes(state.start_off), state.buffer, size);
+        memcpy(recast<u8*>(page.ptr) + base.BlockBytes(state.start_off), state.buffer, size);
     }
     else
     {
-        memset(recast<u8*>(page.ptr) + params.BlockBytes(state.start_off), 0, size);
+        memset(recast<u8*>(page.ptr) + base.BlockBytes(state.start_off), 0, size);
     }
 
     // write through
-    err = WriteFile(h, page.ptr, u32(params.PageBytes(1)), nullptr, &state.ovl)
+    err = WriteFile(h, page.ptr, u32(base.PageBytes(1)), nullptr, &state.ovl)
         ? ERROR_SUCCESS : GetLastError();
     if (err != ERROR_SUCCESS && err != ERROR_IO_PENDING)
     {
@@ -1646,9 +1646,9 @@ DWORD ChunkDiskWorker::PostWritePage(ChunkOpState& state)
 
 void ChunkDiskWorker::CompleteWritePartialReadPage(ChunkOpState& state, DWORD error, DWORD bytes_transferred)
 {
-    auto& params = service_.params;
+    auto& base = service_.bases[0];
     if (error == ERROR_SUCCESS
-        && bytes_transferred != params.PageBytes(1)
+        && bytes_transferred != base.PageBytes(1)
         && bytes_transferred != u32(-1))
     {
         error = ERROR_INVALID_DATA;
@@ -1660,7 +1660,7 @@ void ChunkDiskWorker::CompleteWritePartialReadPage(ChunkOpState& state, DWORD er
     // OpenChunk() not called if page hit
     if (bytes_transferred != u32(-1))
     {
-        auto chunk_idx = params.BlockChunkRange(params.PageBlocks(state.idx), 0).start_idx;
+        auto chunk_idx = base.BlockChunkRange(base.PageBlocks(state.idx), 0).start_idx;
         CloseChunk(chunk_idx, false);
     }
     if (error == ERROR_SUCCESS)
@@ -1681,9 +1681,9 @@ void ChunkDiskWorker::CompleteWritePartialReadPage(ChunkOpState& state, DWORD er
 
 void ChunkDiskWorker::CompleteWritePage(ChunkOpState& state, DWORD error, DWORD bytes_transferred)
 {
-    auto& params = service_.params;
-    if (error == ERROR_SUCCESS && bytes_transferred != params.PageBytes(1)) error = ERROR_INVALID_DATA;
-    const auto r = params.BlockChunkRange(params.PageBlocks(state.idx), state.end_off - state.start_off);
+    auto& base = service_.bases[0];
+    if (error == ERROR_SUCCESS && bytes_transferred != base.PageBytes(1)) error = ERROR_INVALID_DATA;
+    const auto r = base.BlockChunkRange(base.PageBlocks(state.idx), state.end_off - state.start_off);
     auto chunk_idx = r.start_idx;
     CloseChunk(chunk_idx, true);
     FreePageAsync(state, state.idx, error != ERROR_SUCCESS);
@@ -1757,11 +1757,11 @@ void ChunkDiskWorker::ReportOpResult(ChunkOpState& state, DWORD error)
             auto info = u64();
             if (kind == READ_PAGE || kind == WRITE_PAGE || kind == WRITE_PAGE_PARTIAL)
             {
-                info = service_.params.PageBlocks(state.idx) + state.start_off;
+                info = service_.bases[0].PageBlocks(state.idx) + state.start_off;
             }
             else
             {
-                info = service_.params.ChunkBlocks(state.idx) + state.start_off;
+                info = service_.bases[0].ChunkBlocks(state.idx) + state.start_off;
             }
             ++state.owner->num_errors;
             state.owner->SetErrorChecked(SCSI_SENSE_MEDIUM_ERROR, asc, info);
