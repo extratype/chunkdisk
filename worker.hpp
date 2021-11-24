@@ -28,6 +28,7 @@ enum ChunkOpKind : u32
     WRITE_PAGE_PARTIAL,     // not page aligned, read then write in pages
     UNMAP_CHUNK,            // become WRITE_CHUNK if partial
 
+    // FIXME unmap
     // for PostMsg()
     REFRESH_CHUNK           // refresh chunk state for an unmapped chunk
 };
@@ -107,7 +108,7 @@ struct ChunkFileHandle
     FileHandle handle_rw;   // read-write, for is_write
     u32 refs_ro = 0;        // close later if zero
     u32 refs_rw = 0;        // close later if zero
-    bool pending = false;   // pending to be refreshed
+    bool pending = false;   // pending to be refreshed FIXME unmap
 };
 
 // single worker per single dispatcher
@@ -202,6 +203,7 @@ private:
     // done using the handle from the pool
     DWORD CloseChunk(u64 chunk_idx, bool is_write);
 
+    // FIXME unmap
     // refresh chunk state after it's unmapped
     DWORD RefreshChunk(u64 chunk_idx);
 

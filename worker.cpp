@@ -358,12 +358,14 @@ DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_ou
         chunk_handles_.reinsert_back(it);
         auto& cfh = (*it).second;
 
+        // FIXME unmap
         if (cfh.pending)
         {
             // chunk was unmapped, refresh chunk state
             // update CreateChunk() result
             // fix chunk size when unmap then write
             auto h = FileHandle();
+            // FIXME fix_size == true
             auto err = service_.CreateChunk(chunk_idx, h, is_write, true);
             if (err != ERROR_SUCCESS) return err;
             if (!h)
@@ -492,12 +494,14 @@ DWORD ChunkDiskWorker::CloseChunk(u64 chunk_idx, bool is_write)
     }
     // handles closed in OpenChunk() or PeriodicCheck()
 
+    // FIXME unmap
     if (cfh.pending && cfh.refs_ro == 0 && cfh.refs_rw == 0)
     {
         // CancelIo() called, all refs to be freed
         if (cfh.handle_rw)
         {
             auto h = FileHandle();
+            // FIXME fix_size == true
             service_.CreateChunk(chunk_idx, h, false, true);
         }
         // REFRESH_CHUNK done
@@ -520,7 +524,7 @@ DWORD ChunkDiskWorker::RefreshChunk(u64 chunk_idx)
     auto& cfh = (*it).second;
     if (cfh.handle_ro) CancelIo(cfh.handle_ro.get());
     if (cfh.handle_rw) CancelIo(cfh.handle_rw.get());
-    // lazily refresh chunk state
+    // lazily refresh chunk state FIXME unmap
     cfh.pending = true;
 
     return ERROR_SUCCESS;
@@ -575,6 +579,7 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
         {
             try
             {
+                // FIXME unmap
                 service_.FlushUnmapRanges(chunk_idx);
 
                 // buffer is nullptr
@@ -1246,6 +1251,7 @@ DWORD ChunkDiskWorker::FlushPagesAsync(ChunkOpState& state, const PageRange& r)
     return ERROR_LOCK_FAILED;
 }
 
+// FIXME unmap
 DWORD ChunkDiskWorker::CheckAsyncEOF(ChunkOpState& state)
 {
     auto kind = state.kind;
@@ -1370,6 +1376,7 @@ DWORD ChunkDiskWorker::PrepareZeroChunk(ChunkWork* work)
     return ERROR_SUCCESS;
 }
 
+// FIXME write
 DWORD ChunkDiskWorker::PostWriteChunk(ChunkOpState& state)
 {
     auto& base = service_.bases[0];
@@ -1603,6 +1610,7 @@ void ChunkDiskWorker::CompleteReadPage(ChunkOpState& state, DWORD error, DWORD b
     ReportOpResult(state, error);
 }
 
+// FIXME write
 DWORD ChunkDiskWorker::PostWritePage(ChunkOpState& state)
 {
     if (state.kind == WRITE_PAGE_PARTIAL && state.step == OP_READY) return PostReadPage(state);

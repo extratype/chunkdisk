@@ -149,6 +149,7 @@ public:
     // FIXME comment
     DWORD CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool is_write, bool is_locked = false);
 
+    // FIXME unmap
     // make chunk empty (truncate)
     DWORD UnmapChunk(u64 chunk_idx);
 
