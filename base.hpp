@@ -51,7 +51,13 @@ public:
     const u64 chunk_count;                              // disk size = chunk_count * chunk_length * block_size
     const std::vector<u64> part_max;                    // part index -> max. # of chunks
     const std::vector<std::wstring> part_dirname;       // part index -> chunk directory
-    const bool read_only;                               // allow only read access
+    const bool read_only;                               // allow only read access FIXME comment
+
+    ChunkDiskBase(u32 block_size, u32 page_length, u64 chunk_length, u64 block_count, u64 chunk_count,
+                  std::vector<u64> part_max, std::vector<std::wstring> part_dirname, bool read_only)
+        : block_size(block_size), page_length(page_length), chunk_length(chunk_length), block_count(block_count),
+          chunk_count(chunk_count), part_max(std::move(part_max)), part_dirname(std::move(part_dirname)),
+          read_only(read_only) {}
 
 private:
     std::vector<FileHandle> part_lock_;                 // part index -> .lock

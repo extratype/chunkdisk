@@ -5,7 +5,7 @@
  */
 
 #include "utils.hpp"
-// FIXME #include "base.hpp"
+#include "base.hpp"
 #include "service.hpp"
 #include "worker.hpp"
 #include <memory>
@@ -54,11 +54,12 @@ struct ChunkDisk
 /*
  * read .chunkdisk file
  *
+ * parent: optional, path to parent .chunkdisk file
  * disk size in bytes: must be a multiple of PAGE_SIZE
  * chunk size in bytes: must be a multiple of PAGE_SIZE
  * number path/to/dir...: max. # of chunks in part directory
  */
-DWORD ReadChunkDiskParams(PCWSTR chunkdisk_file, ChunkDiskParams& params)
+DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, bool read_only, unique_ptr<ChunkDiskBase>& base, wstring& parent)
 {
     try
     {
@@ -84,13 +85,29 @@ DWORD ReadChunkDiskParams(PCWSTR chunkdisk_file, ChunkDiskParams& params)
         // parse .chunkdisk
         buf.reset();
 
-        // disk size
+        // FIXME test
         auto* state = PWSTR();
         auto* token = wcstok_s(wbuf.data(), L"\n", &state);
         auto* endp = PWSTR();
         if (!token) return ERROR_INVALID_PARAMETER;
         auto disk_size = wcstoull(token, &endp, 10);
-        if (token == endp || (*endp != L'\r' && *endp != L'\0') || errno == ERANGE) return ERROR_INVALID_PARAMETER;
+        if (token == endp || (*endp != L'\r' && *endp != L'\0') || errno == ERANGE)
+        {
+            // parent
+            parent = wstring(token);
+            if (!parent.empty() && parent[parent.size() - 1] == L'\r') parent.erase(parent.size() - 1);
+
+            // disk size
+            token = wcstok_s(nullptr, L"\n", &state);
+            if (!token) return ERROR_INVALID_PARAMETER;
+            disk_size = wcstoull(token, &endp, 10);
+            if (token == endp || (*endp != L'\r' && *endp != L'\0') || errno == ERANGE) return ERROR_INVALID_PARAMETER;
+        }
+        else
+        {
+            // no parent
+            parent = L"";
+        }
 
         // chunk size
         token = wcstok_s(nullptr, L"\n", &state);
@@ -120,26 +137,25 @@ DWORD ReadChunkDiskParams(PCWSTR chunkdisk_file, ChunkDiskParams& params)
         }
 
         // check parameters
-        if (disk_size == 0 || chunk_size == 0) return ERROR_INVALID_PARAMETER;
-        if (disk_size % BLOCK_SIZE || chunk_size > disk_size) return ERROR_INVALID_PARAMETER;
-        if (chunk_size % BLOCK_SIZE) return ERROR_INVALID_PARAMETER;
-
-        auto chunk_count = (disk_size + (chunk_size - 1)) / chunk_size;
-        if (chunk_count == 0) return ERROR_INVALID_PARAMETER;
-        if (chunk_count > std::accumulate(part_max.begin(), part_max.end(), 0ull)) return ERROR_INVALID_PARAMETER;
-        auto chunk_length = chunk_size / BLOCK_SIZE;
-
-        if (disk_size % PAGE_SIZE) return ERROR_INVALID_PARAMETER;
-        if (chunk_size % PAGE_SIZE) return ERROR_INVALID_PARAMETER;
+        if (disk_size == 0 || chunk_size == 0 || chunk_size > disk_size) return ERROR_INVALID_PARAMETER;
+        if (LONGLONG(chunk_size) <= 0) return ERROR_INVALID_PARAMETER;  // overflow in file offset
+        if (disk_size % BLOCK_SIZE || disk_size % PAGE_SIZE) return ERROR_INVALID_PARAMETER;
+        if (chunk_size % BLOCK_SIZE || chunk_size % PAGE_SIZE) return ERROR_INVALID_PARAMETER;
         // if (PAGE_SIZE % BLOCK_SIZE) return ERROR_INVALID_PARAMETER;
 
-        params.block_size = BLOCK_SIZE;
-        params.page_length = PAGE_SIZE / BLOCK_SIZE;
-        params.block_count = disk_size / BLOCK_SIZE;
-        params.chunk_length = chunk_length;
-        params.chunk_count = chunk_count;
-        params.part_max = std::move(part_max);
-        params.part_dirname = std::move(part_dirname);
+        auto chunk_count = (disk_size + (chunk_size - 1)) / chunk_size;
+        if (chunk_count == 0 || disk_size > chunk_size * chunk_count) return ERROR_INVALID_PARAMETER;
+        if (chunk_count > std::accumulate(part_max.begin(), part_max.end(), 0ull)) return ERROR_INVALID_PARAMETER;
+
+        base = std::make_unique<ChunkDiskBase>(
+            BLOCK_SIZE,
+            PAGE_SIZE / BLOCK_SIZE,
+            chunk_size / BLOCK_SIZE,
+            disk_size / BLOCK_SIZE,
+            chunk_count,
+            std::move(part_max),
+            std::move(part_dirname),
+            read_only);
     }
     catch (const bad_alloc&)
     {

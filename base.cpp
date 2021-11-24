@@ -251,7 +251,7 @@ DWORD ChunkDiskBase::CreateChunk(u64 chunk_idx, FileHandle& handle_out, const bo
                 }
                 // the following code is not reachable because
                 // part_current_new_ is initially zero,
-                // ReadChunkDiskParams() checks total part_max,
+                // ReadChunkDiskFile() checks total part_max,
                 // FIXME comment: WinSpd checks requested addresses
                 for (auto new_part = size_t(0); new_part < part_current_new_; ++new_part)
                 {
