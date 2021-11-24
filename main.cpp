@@ -69,8 +69,8 @@ struct ChunkDisk
     // not movable, increment only
     std::atomic<u32> workers_assigned = 0;
 
-    explicit ChunkDisk(ChunkDiskParams params, SPD_STORAGE_UNIT* storage_unit)
-        : service(std::move(params), storage_unit, MAX_PAGES) {}
+    explicit ChunkDisk(vector<ChunkDiskBase> bases, SPD_STORAGE_UNIT* storage_unit)
+        : service(std::move(bases), storage_unit, MAX_PAGES) {}
 
     ~ChunkDisk() { SpdStorageUnitDelete(service.storage_unit); }
 };
@@ -274,7 +274,6 @@ DWORD ReadChunkDiskBases(PCWSTR chunkdisk_file, bool read_only, vector<ChunkDisk
         return err;
     }
     return ERROR_SUCCESS;
-    // FIXME start bases in service
 }
 
 ChunkDisk* StorageUnitChunkDisk(SPD_STORAGE_UNIT* StorageUnit)
@@ -418,25 +417,26 @@ static SPD_STORAGE_UNIT_INTERFACE CHUNK_DISK_INTERFACE =
 DWORD CreateStorageUnit(PWSTR chunkdisk_file, BOOLEAN write_protected, PWSTR pipe_name, unique_ptr<ChunkDisk>& cdisk_out)
 {
     // read chunkdisk file
-    auto params = ChunkDiskParams();
-    auto err = ReadChunkDiskFile(chunkdisk_file, params);
+    auto bases = vector<ChunkDiskBase>();
+    auto err = ReadChunkDiskBases(chunkdisk_file, write_protected, bases);
     if (err != ERROR_SUCCESS)
     {
+        // FIXME detail log
         SpdLogErr(L"error: parsing failed with error %lu", err);
         return err;
     }
 
     // create WinSpd unit
     SPD_STORAGE_UNIT* unit = nullptr;
-    err = [&params, write_protected, pipe_name, &unit]() -> DWORD
+    err = [&bases, write_protected, pipe_name, &unit]() -> DWORD
     {
         constexpr wchar_t ProductId[] = L"ChunkDisk";
         constexpr wchar_t ProductRevision[] = L"1.0";
         auto unit_params = SPD_STORAGE_UNIT_PARAMS();
 
         UuidCreate(&unit_params.Guid);
-        unit_params.BlockCount = params.block_count;
-        unit_params.BlockLength = params.block_size;
+        unit_params.BlockCount = bases[0].block_count;
+        unit_params.BlockLength = bases[0].block_size;
         unit_params.MaxTransferLength = MAX_TRANSFER_LENGTH;
         if (WideCharToMultiByte(
                 CP_UTF8, 0,
@@ -473,7 +473,7 @@ DWORD CreateStorageUnit(PWSTR chunkdisk_file, BOOLEAN write_protected, PWSTR pip
     try
     {
         // unit is deleted when cdisk is deleted
-        cdisk = std::make_unique<ChunkDisk>(std::move(params), unit);
+        cdisk = std::make_unique<ChunkDisk>(std::move(bases), unit);
         unit->UserContext = cdisk.get();
     }
     catch (const bad_alloc&)

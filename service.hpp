@@ -108,8 +108,10 @@ struct PageResult
 class ChunkDiskService
 {
 public:
-    // FIXME base
-    const ChunkDiskParams params;
+    // FIXME params -> bases[0]
+    // FIXME from ReadChunkDiskBases()
+    // current: bases[0], parent: bases[1] and so on, if any
+    std::vector<ChunkDiskBase> bases;
 
     SPD_STORAGE_UNIT* const storage_unit;
 
@@ -131,11 +133,12 @@ private:
     std::atomic<u64> post_ft_ = 0;                  // not movable
 
 public:
-    ChunkDiskService(ChunkDiskParams params, SPD_STORAGE_UNIT* storage_unit, u32 max_pages)
-        : params(std::move(params)), storage_unit(storage_unit), max_pages(max_pages) {}
+    ChunkDiskService(std::vector<ChunkDiskBase> bases, SPD_STORAGE_UNIT* storage_unit, u32 max_pages)
+        : bases(std::move(bases)), storage_unit(storage_unit), max_pages(max_pages) {}
 
     u32 MaxTransferLength() const { return storage_unit->StorageUnitParams.MaxTransferLength; }
 
+    // start bases
     DWORD Start();
 
     // make chunk empty (truncate)

@@ -15,8 +15,14 @@ namespace chunkdisk
 
 DWORD ChunkDiskService::Start()
 {
-    // FIXME implement
-    auto err = DWORD(ERROR_SUCCESS);
+    if (bases.empty()) return ERROR_INVALID_PARAMETER;
+    for (auto i = bases.size(); i > 0; --i)
+    {
+        auto& base = bases[i - 1];
+        // FIXME log
+        auto err = base.Start();
+        if (err != ERROR_SUCCESS) return err;
+    }
     return ERROR_SUCCESS;
 }
 
