@@ -121,6 +121,9 @@ public:
     const u32 max_pages;
 
 private:
+    std::shared_mutex mutex_chunk_lock_;            // not movable
+    std::unordered_map<u64, size_t> chunk_lock_;    // chunk index -> user FIXME ChunkDiskWorker*
+
     std::shared_mutex mutex_pages_;                 // not movable
     // BLOCK_SIZE -> PAGE_SIZE access
     // read cache, write through
@@ -141,6 +144,13 @@ public:
 
     // start bases
     DWORD Start();
+
+    DWORD LockChunk(u64 chunk_idx, size_t user);
+
+    // FIXME not optional?
+    bool CheckChunkLocked(u64 chunk_idx, size_t* user = nullptr);
+
+    void UnlockChunk(u64 chunk_idx);
 
     // CheckChunk() from current to parents, return bases.size() if all false.
     size_t FindChunk(u64 chunk_idx);

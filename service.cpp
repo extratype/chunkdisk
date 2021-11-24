@@ -26,6 +26,35 @@ DWORD ChunkDiskService::Start()
     return ERROR_SUCCESS;
 }
 
+DWORD ChunkDiskService::LockChunk(u64 chunk_idx, size_t user)
+{
+    auto lk = SRWLock(mutex_chunk_lock_, true);
+    auto emplaced = chunk_lock_.emplace(chunk_idx, user).second;
+    return emplaced ? ERROR_SUCCESS : ERROR_LOCK_FAILED;
+}
+
+bool ChunkDiskService::CheckChunkLocked(u64 chunk_idx, size_t* user)
+{
+    auto lk = SRWLock(mutex_chunk_lock_, false);
+    if (chunk_lock_.empty()) return false;
+    auto it = chunk_lock_.find(chunk_idx);
+    if (it == chunk_lock_.end())
+    {
+        return false;
+    }
+    else
+    {
+        if (user != nullptr) *user = it->second;
+        return true;
+    }
+}
+
+void ChunkDiskService::UnlockChunk(u64 chunk_idx)
+{
+    auto lk = SRWLock(mutex_chunk_lock_, true);
+    chunk_lock_.erase(chunk_idx);
+}
+
 size_t ChunkDiskService::FindChunk(u64 chunk_idx)
 {
     auto i = size_t(0);
