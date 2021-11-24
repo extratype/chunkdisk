@@ -169,7 +169,7 @@
     <ResourceCompile Include="chunkdisk.rc" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="params.hpp" />
+    <ClInclude Include="base.hpp" />
     <ClInclude Include="service.hpp" />
     <ClInclude Include="worker.hpp" />
     <ClInclude Include="types.hpp" />

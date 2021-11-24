@@ -43,13 +43,13 @@
     <ClInclude Include="utils.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="params.hpp">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="worker.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="service.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="base.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
