@@ -140,7 +140,7 @@ PageResult ChunkDiskService::PeekPage(u64 page_idx)
         return PageResult{
             ERROR_SUCCESS,
             true,
-            PageLock(*entry, false, std::adopt_lock),
+            SRWLock(*m, false, std::adopt_lock),
             entry->ptr.get()};
     }
 }
@@ -241,7 +241,7 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
             return PageResult{
                 ERROR_SUCCESS,
                 true,
-                PageLock(),
+                SRWLock(),
                 entry->ptr.get(),
                 recast<void**>(entry->user.get())};
         }
@@ -273,7 +273,7 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
                 auto result = PageResult{
                     ERROR_SUCCESS,
                     false,
-                    PageLock(),
+                    SRWLock(),
                     entry->ptr.get(),
                     recast<void**>(entry->user.get())};
 
@@ -301,7 +301,7 @@ PageResult ChunkDiskService::ClaimPage(u64 page_idx)
     return PageResult{
         ERROR_SUCCESS,
         true,
-        PageLock(),
+        SRWLock(),
         entry->ptr.get(),
         recast<void**>(entry->user.get())};
 }

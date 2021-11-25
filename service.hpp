@@ -67,40 +67,13 @@ struct PageEntry
     void clear_owner() { owner.store(0, std::memory_order_release); }
 };
 
-class PageLock : public SRWLockBase<PageLock>
-{
-    PageEntry* entry_;
-
-public:
-    PageLock() : SRWLockBase(), entry_(nullptr) {}
-
-    PageLock(PageEntry& entry, bool is_exclusive)
-        : SRWLockBase(*entry.mutex, is_exclusive), entry_(&entry) {}
-
-    PageLock(PageEntry& entry, bool is_exclusive, std::defer_lock_t t)
-        : SRWLockBase(*entry.mutex, is_exclusive, t), entry_(&entry) {}
-
-    PageLock(PageEntry& entry, bool is_exclusive, std::adopt_lock_t t)
-        : SRWLockBase(*entry.mutex, is_exclusive, t), entry_(&entry) {}
-
-    void on_locked(bool is_exclusive)
-    {
-        if (is_exclusive) entry_->set_owner();
-    }
-
-    void on_unlock(bool is_exclusive)
-    {
-        if (is_exclusive) entry_->clear_owner();
-    }
-};
-
 // operation result, only for current thread
 // assign as a local variable
 struct PageResult
 {
     DWORD error;                    // page invalid if not ERROR_SUCCESS
     bool is_hit = false;            // true if page hit
-    PageLock lock;                  // hold while using ptr and user
+    SRWLock lock;                   // hold while reading ptr
     LPVOID ptr = nullptr;           // PageEntry::ptr
     void** user = nullptr;          // PageEntry::user
 };
