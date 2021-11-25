@@ -278,6 +278,19 @@ DWORD ChunkDiskService::LockPage(u64 page_idx, LPVOID& ptr, LPVOID& user)
     }
 }
 
+DWORD ChunkDiskService::ClaimPage(u64 page_idx, LPVOID& ptr)
+{
+    auto lk = SRWLock(mutex_pages_, false);
+    auto it = cached_pages_.find(page_idx);
+    if (it == cached_pages_.end()) return ERROR_NOT_FOUND;
+
+    auto* entry = &((*it).second);
+    if (!entry->is_owned()) return ERROR_INVALID_STATE;
+
+    ptr = entry->ptr.get();
+    return ERROR_SUCCESS;
+}
+
 DWORD ChunkDiskService::ClaimPage(u64 page_idx, LPVOID& ptr, LPVOID& user)
 {
     auto lk = SRWLock(mutex_pages_, false);

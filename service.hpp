@@ -140,6 +140,10 @@ public:
     DWORD LockPage(u64 page_idx, LPVOID& ptr, LPVOID& user);
 
     // for the thread that have called LockPage()
+    // ERROR_SUCCESS: ptr returned
+    DWORD ClaimPage(u64 page_idx, LPVOID& ptr);
+
+    // for the thread that have called LockPage()
     // ERROR_SUCCESS: ptr and user returned
     DWORD ClaimPage(u64 page_idx, LPVOID& ptr, LPVOID& user);
 

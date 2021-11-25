@@ -1594,8 +1594,7 @@ void ChunkDiskWorker::CompleteReadPage(ChunkOpState& state, DWORD error, DWORD b
     if (error == ERROR_SUCCESS)
     {
         auto* ptr = LPVOID();
-        auto* user = LPVOID();
-        auto page = service_.ClaimPage(state.idx, ptr, user);
+        auto page = service_.ClaimPage(state.idx, ptr);
         auto length_bytes = base.BlockBytes(state.end_off - state.start_off);
         memcpy(state.buffer, recast<u8*>(ptr) + base.BlockBytes(state.start_off), length_bytes);
     }
@@ -1614,8 +1613,7 @@ DWORD ChunkDiskWorker::PostWritePage(ChunkOpState& state)
     auto* ptr = LPVOID();
     if (state.kind == WRITE_PAGE_PARTIAL)
     {
-        auto* user = LPVOID();
-        err = service_.ClaimPage(state.idx, ptr, user);
+        err = service_.ClaimPage(state.idx, ptr);
     }
     else
     {
