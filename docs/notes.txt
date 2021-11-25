@@ -1,6 +1,6 @@
 Trigger unmap for all unused sectors: defrag X: /L
     consolidate free space: defrag X: /X
 
-TODO check partition -> TRIM -> shrink -> delete orphan empty chunks
+TODO check partition -> TRIM -> shrink -> remove orphan empty chunks
 
 TODO consolidate $MFT, $INDEX

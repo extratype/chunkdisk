@@ -8,7 +8,7 @@ Disk metadata file: name.chunkdisk
 Create chunk:
     directory (part): choose from top to bottom
     file name: chunk###
-    file size: 0 or chunk_size; empty or full, no deletion
+    file size: 0 or chunk_size; empty or full, never removed
     sparse chunk?
         set chunk size small, or
         set sparse manually
@@ -51,7 +51,7 @@ ChunkDiskService:
     Pages:
         PeekPage(): concurrent read access
         LockPage(): exclusive write access
-        FreePage()
+        UnlockPage()
         FlushPages(range)
         FlushPages()
 
@@ -164,7 +164,7 @@ Synchronize pages:
 
             Set PageEntry::user when LockPage() succeeds
             Traverse next and set ChunkOpState::next when LockPage() fails
-            Retry when FreePage()
+            Retry when UnlockPage()
 
 Asynchronous I/O:
     Aligned read/write:
@@ -179,7 +179,7 @@ Asynchronous I/O:
         ReadFile()... to page
         CloseChunk()
         copy to buffer
-        service.FreePage()
+        service.UnlockPage()
 
     Unaligned write:
         not whole page?
