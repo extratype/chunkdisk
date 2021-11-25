@@ -269,7 +269,7 @@ private:
     void StopWorks();
 
     // ChunkDiskService::LockPage() with waiting list
-    PageResult LockPageAsync(ChunkOpState& state, u64 page_idx);
+    DWORD LockPageAsync(ChunkOpState& state, u64 page_idx, LPVOID& ptr);
 
     // ChunkDiskService::UnlockPage() and resume the waiting HEAD
     DWORD UnlockPageAsync(ChunkOpState& state, u64 page_idx, bool remove = false);

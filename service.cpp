@@ -106,46 +106,44 @@ DWORD ChunkDiskService::UnmapChunk(u64 chunk_idx)
     return ERROR_SUCCESS;
 }
 
-PageResult ChunkDiskService::PeekPage(u64 page_idx)
+DWORD ChunkDiskService::PeekPage(u64 page_idx, SRWLock& lk, LPVOID& ptr)
 {
-    auto lk = SRWLock(mutex_pages_, true);
+    auto lkx = SRWLock(mutex_pages_, true);
     auto it = cached_pages_.find(page_idx);
-    if (it == cached_pages_.end()) return PageResult{ERROR_NOT_FOUND};
+    if (it == cached_pages_.end()) return ERROR_NOT_FOUND;
     auto* entry = &((*it).second);
-    if (entry->is_owned()) return PageResult{ERROR_LOCK_FAILED};
+    if (entry->is_owned()) return ERROR_LOCK_FAILED;
 
     cached_pages_.reinsert_back(it);
     auto m = entry->mutex;
-    lk.unlock();
-    lk.switch_lock();
+    lkx.unlock();
+    lkx.switch_lock();
     auto lkp = SRWLock(*m, false, std::defer_lock);
 
     while (true)
     {
-        std::lock(lk, lkp);
+        std::lock(lkx, lkp);
         // entry may be moved or replaced
         it = cached_pages_.find(page_idx);
-        if (it == cached_pages_.end()) return PageResult{ERROR_NOT_FOUND};
+        if (it == cached_pages_.end()) return ERROR_NOT_FOUND;
         entry = &((*it).second);
         if (m != entry->mutex)
         {
             lkp.unlock();
             m = entry->mutex;
             lkp = SRWLock(*m, false, std::defer_lock);
-            lk.unlock();
+            lkx.unlock();
             continue;
         }
 
         lkp.release();
-        return PageResult{
-            ERROR_SUCCESS,
-            true,
-            SRWLock(*m, false, std::adopt_lock),
-            entry->ptr.get()};
+        lk = SRWLock(*m, false, std::adopt_lock);
+        ptr = entry->ptr.get();
+        return ERROR_SUCCESS;
     }
 }
 
-PageResult ChunkDiskService::LockPage(u64 page_idx)
+DWORD ChunkDiskService::LockPage(u64 page_idx, LPVOID& ptr, LPVOID& user)
 {
     auto lk = SRWLock(mutex_pages_, true);
 
@@ -200,9 +198,8 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
             // page hit
             if (entry->is_owned())
             {
-                return PageResult{
-                    .error = ERROR_LOCK_FAILED,
-                    .user = recast<void**>(entry->user.get())};
+                user = entry->user;
+                return ERROR_LOCK_FAILED;
             }
 
             cached_pages_.reinsert_back(it);
@@ -238,22 +235,18 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
 
             entry->set_owner();
             lkp.release();
-            return PageResult{
-                ERROR_SUCCESS,
-                true,
-                SRWLock(),
-                entry->ptr.get(),
-                recast<void**>(entry->user.get())};
+            ptr = entry->ptr.get();
+            entry->user = user;
+            return ERROR_SUCCESS;
         }
         else
         {
             // page miss
             try
             {
-                auto user = std::make_unique<size_t>();
-                auto ptr = Pages(VirtualAlloc(nullptr, bases[0].PageBytes(1),
-                                              MEM_COMMIT, PAGE_READWRITE));
-                if (ptr == nullptr) return PageResult{ERROR_NOT_ENOUGH_MEMORY};
+                auto new_ptr = Pages(VirtualAlloc(nullptr, bases[0].PageBytes(1),
+                                                  MEM_COMMIT, PAGE_READWRITE));
+                if (new_ptr == nullptr) return ERROR_NOT_ENOUGH_MEMORY;
                 auto mutex = std::make_shared<std::shared_mutex>();
 
                 mutex->lock();
@@ -268,42 +261,35 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
                 }
                 entry->mutex = std::move(mutex);
                 entry->set_owner();
-                entry->ptr = std::move(ptr);
-                entry->user = std::move(user);
-                auto result = PageResult{
-                    ERROR_SUCCESS,
-                    false,
-                    SRWLock(),
-                    entry->ptr.get(),
-                    recast<void**>(entry->user.get())};
+                entry->ptr = std::move(new_ptr);
 
+                ptr = entry->ptr.get();
+                entry->user = user;
                 // entry may be moved
                 lk.switch_lock();
                 trim_pages();
-                return result;
+                return ERROR_NOT_FOUND;
             }
             catch (const bad_alloc&)
             {
-                return PageResult{ERROR_NOT_ENOUGH_MEMORY};
+                return ERROR_NOT_ENOUGH_MEMORY;
             }
         }
     }
 }
 
-PageResult ChunkDiskService::ClaimPage(u64 page_idx)
+DWORD ChunkDiskService::ClaimPage(u64 page_idx, LPVOID& ptr, LPVOID& user)
 {
     auto lk = SRWLock(mutex_pages_, false);
     auto it = cached_pages_.find(page_idx);
-    if (it == cached_pages_.end()) return PageResult{ERROR_NOT_FOUND};
+    if (it == cached_pages_.end()) return ERROR_NOT_FOUND;
 
     auto* entry = &((*it).second);
-    if (!entry->is_owned()) return PageResult{ERROR_INVALID_STATE};
-    return PageResult{
-        ERROR_SUCCESS,
-        true,
-        SRWLock(),
-        entry->ptr.get(),
-        recast<void**>(entry->user.get())};
+    if (!entry->is_owned()) return ERROR_INVALID_STATE;
+
+    ptr = entry->ptr.get();
+    user = entry->user;
+    return ERROR_SUCCESS;
 }
 
 DWORD ChunkDiskService::RemovePageEntry(SRWLock& lk, Map<u64, PageEntry>::iterator it)
@@ -356,18 +342,19 @@ DWORD ChunkDiskService::UnlockPage(u64 page_idx, bool remove)
 
     auto* entry = &((*it).second);
     if (!entry->is_owned()) return ERROR_INVALID_STATE;
+    entry->user = nullptr;
     entry->clear_owner();
     entry->mutex->unlock();
     return remove ? RemovePageEntry(lk, it) : ERROR_SUCCESS;
 }
 
-PageResult ChunkDiskService::FlushPages(const PageRange& r)
+DWORD ChunkDiskService::FlushPages(const PageRange& r, LPVOID& user)
 {
     auto g = SRWLock(mutex_pages_, false);
 
     for (auto i = r.start_idx; i <= r.end_idx; ++i)
     {
-        if (cached_pages_.empty()) return PageResult{ERROR_SUCCESS};
+        if (cached_pages_.empty()) return ERROR_SUCCESS;
         auto it = cached_pages_.find(r.base_idx + i);
         if (it == cached_pages_.end()) continue;
 
@@ -375,17 +362,16 @@ PageResult ChunkDiskService::FlushPages(const PageRange& r)
         if (err == ERROR_LOCK_FAILED)
         {
             // g not reset if ERROR_LOCK_FAILED
-            return PageResult{
-                .error = ERROR_LOCK_FAILED,
-                .user = recast<void**>((*it).second.user.get())};
+            user = (*it).second.user;
+            return ERROR_LOCK_FAILED;
         }
         else if (err != ERROR_SUCCESS)
         {
-            return PageResult{err};
+            return err;
         }
     }
 
-    return PageResult{ERROR_SUCCESS};
+    return ERROR_SUCCESS;
 }
 
 DWORD ChunkDiskService::FlushPages()

@@ -387,6 +387,7 @@ DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_ou
     auto lk = SRWLock(*mutex_handles_, true);
 
     auto it = chunk_handles_.find(chunk_idx);
+
     if (it != chunk_handles_.end())
     {
         chunk_handles_.reinsert_back(it);
@@ -546,11 +547,13 @@ DWORD ChunkDiskWorker::PreparePageOps(ChunkWork& work, bool is_write, u64 page_i
         // work is not queued, we can't lock or wait for a page here so READ_PAGE only
         if (kind == READ_PAGE)
         {
-            auto page = service_.PeekPage(page_idx);
-            if (page.error == ERROR_SUCCESS)
+            SRWLock lk;
+            auto* ptr = LPVOID();
+            auto err = service_.PeekPage(page_idx, lk, ptr);
+            if (err == ERROR_SUCCESS)
             {
                 auto size = base.BlockBytes(op.end_off - op.start_off);
-                memcpy(op.buffer, recast<u8*>(page.ptr) + base.BlockBytes(op.start_off), size);
+                memcpy(op.buffer, recast<u8*>(ptr) + base.BlockBytes(op.start_off), size);
                 ReportOpResult(op);
                 return ERROR_SUCCESS;
             }
@@ -1139,36 +1142,31 @@ void ChunkDiskWorker::StopWorks()
     iocp_.reset();
 }
 
-PageResult ChunkDiskWorker::LockPageAsync(ChunkOpState& state, u64 page_idx)
+DWORD ChunkDiskWorker::LockPageAsync(ChunkOpState& state, u64 page_idx, LPVOID& ptr)
 {
-    auto page = service_.LockPage(page_idx);
-
-    if (page.error == ERROR_SUCCESS)
+    auto* user = LPVOID(&state);    // state in ChunkWork::ops in working_
+    auto err = service_.LockPage(page_idx, ptr, user);
+    if (err == ERROR_LOCK_FAILED)
     {
-        *page.user = &state;    // state in ChunkWork::ops in working_
-    }
-    else if (page.error == ERROR_LOCK_FAILED)
-    {
-        auto* cur = recast<ChunkOpState*>(*page.user);
+        auto* cur = recast<ChunkOpState*>(user);
         for (; cur->next != nullptr; cur = cur->next) {}
         cur->next = &state;    // state in ChunkWork::ops in working_
     }
-
-    return page;
+    return err;
 }
 
 DWORD ChunkDiskWorker::UnlockPageAsync(ChunkOpState& state, u64 page_idx, bool remove)
 {
-    auto page = service_.ClaimPage(page_idx);
-    if (page.error != ERROR_SUCCESS) return page.error;
-    if (*page.user != &state) return ERROR_INVALID_STATE;
+    auto* ptr = LPVOID();
+    auto* user = LPVOID();
+    auto err = service_.ClaimPage(page_idx, ptr, user);
+    if (err != ERROR_SUCCESS) return err;
+    if (user != &state) return ERROR_INVALID_STATE;
 
-    *page.user = nullptr;
     auto* next = state.next;
     state.next = nullptr;
+    service_.UnlockPage(page_idx, remove);  // should succeed
 
-    auto err = service_.UnlockPage(page_idx, remove);
-    if (err != ERROR_SUCCESS) return err;
     if (next != nullptr)
     {
         // will retry LockPageAsync()
@@ -1179,14 +1177,16 @@ DWORD ChunkDiskWorker::UnlockPageAsync(ChunkOpState& state, u64 page_idx, bool r
 
 DWORD ChunkDiskWorker::FlushPagesAsync(ChunkOpState& state, const PageRange& r)
 {
-    auto page = service_.FlushPages(r);
-    if (page.error == ERROR_SUCCESS) return ERROR_SUCCESS;
-    if (page.error != ERROR_LOCK_FAILED) return page.error;
-
-    auto* cur = recast<ChunkOpState*>(*page.user);
-    for (; cur->next != nullptr; cur = cur->next) {}
-    cur->next = &state;
-    return ERROR_LOCK_FAILED;
+    auto* user = LPVOID();
+    auto err = service_.FlushPages(r, user);
+    if (err == ERROR_LOCK_FAILED)
+    {
+        auto* cur = recast<ChunkOpState*>(user);
+        for (; cur->next != nullptr; cur = cur->next) {}
+        cur->next = &state;
+        return ERROR_LOCK_FAILED;
+    }
+    return err;
 }
 
 // FIXME
@@ -1507,10 +1507,11 @@ DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
     // always lock page because
     // READ_PAGE: PeekPage() was called in PreparePageOps()
     // WRITE_PAGE_PARTIAL: write followed by read, lock required
-    auto page = LockPageAsync(state, state.idx);
-    if (page.error != ERROR_SUCCESS) return page.error;
+    auto* ptr = LPVOID();
+    auto err = LockPageAsync(state, state.idx, ptr);
+    if (err != ERROR_SUCCESS && err != ERROR_NOT_FOUND) return err;
 
-    if (!page.is_hit)
+    if (err == ERROR_NOT_FOUND)
     {
         auto chunk_idx = base.BlockChunkRange(base.PageBlocks(state.idx), 0).start_idx;
         auto h = HANDLE(INVALID_HANDLE_VALUE);
@@ -1524,7 +1525,7 @@ DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
         if (h != INVALID_HANDLE_VALUE)
         {
             auto bytes_read = DWORD();
-            err = ReadFile(h, page.ptr, u32(base.PageBytes(1)), &bytes_read, &state.ovl)
+            err = ReadFile(h, ptr, u32(base.PageBytes(1)), &bytes_read, &state.ovl)
                 ? ERROR_SUCCESS : GetLastError();
             if (err != ERROR_SUCCESS && err != ERROR_IO_PENDING)
             {
@@ -1560,7 +1561,7 @@ DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
     // simulate ReadFile()
     // set bytes_transferred to -1 to indicate
     // page already zero-filled
-    auto err = PostQueuedCompletionStatus(
+    err = PostQueuedCompletionStatus(
         iocp_.get(), u32(-1), CK_IO, &state.ovl)
         ? ERROR_SUCCESS : GetLastError();
     if (err != ERROR_SUCCESS)
@@ -1592,9 +1593,11 @@ void ChunkDiskWorker::CompleteReadPage(ChunkOpState& state, DWORD error, DWORD b
     }
     if (error == ERROR_SUCCESS)
     {
-        auto page = service_.ClaimPage(state.idx);
+        auto* ptr = LPVOID();
+        auto* user = LPVOID();
+        auto page = service_.ClaimPage(state.idx, ptr, user);
         auto length_bytes = base.BlockBytes(state.end_off - state.start_off);
-        memcpy(state.buffer, recast<u8*>(page.ptr) + base.BlockBytes(state.start_off), length_bytes);
+        memcpy(state.buffer, recast<u8*>(ptr) + base.BlockBytes(state.start_off), length_bytes);
     }
     UnlockPageAsync(state, state.idx, error != ERROR_SUCCESS);
     ReportOpResult(state, error);
@@ -1607,13 +1610,24 @@ DWORD ChunkDiskWorker::PostWritePage(ChunkOpState& state)
 
     // Page was locked in PostReadPage() for WRITE_PAGE_PARTIAL
     // start WRITE_PAGE
-    auto page = (state.kind == WRITE_PAGE_PARTIAL) ? service_.ClaimPage(state.idx) : LockPageAsync(state, state.idx);
-    if (page.error != ERROR_SUCCESS) return page.error;
+    auto err = DWORD(ERROR_SUCCESS);
+    auto* ptr = LPVOID();
+    if (state.kind == WRITE_PAGE_PARTIAL)
+    {
+        auto* user = LPVOID();
+        err = service_.ClaimPage(state.idx, ptr, user);
+    }
+    else
+    {
+        err = LockPageAsync(state, state.idx, ptr);
+        if (err == ERROR_NOT_FOUND) err = ERROR_SUCCESS;
+    }
+    if (err != ERROR_SUCCESS) return err;
 
     auto& base = service_.bases[0];
     auto chunk_idx = base.BlockChunkRange(base.PageBlocks(state.idx), 0).start_idx;
     auto h = HANDLE(INVALID_HANDLE_VALUE);
-    auto err = OpenChunk(chunk_idx, true, h);
+    err = OpenChunk(chunk_idx, true, h);
     if (err != ERROR_SUCCESS)
     {
         UnlockPageAsync(state, state.idx, true);
@@ -1623,15 +1637,15 @@ DWORD ChunkDiskWorker::PostWritePage(ChunkOpState& state)
     auto size = base.BlockBytes(state.end_off - state.start_off);
     if (state.buffer != nullptr)
     {
-        memcpy(recast<u8*>(page.ptr) + base.BlockBytes(state.start_off), state.buffer, size);
+        memcpy(recast<u8*>(ptr) + base.BlockBytes(state.start_off), state.buffer, size);
     }
     else
     {
-        memset(recast<u8*>(page.ptr) + base.BlockBytes(state.start_off), 0, size);
+        memset(recast<u8*>(ptr) + base.BlockBytes(state.start_off), 0, size);
     }
 
     // write through
-    err = WriteFile(h, page.ptr, u32(base.PageBytes(1)), nullptr, &state.ovl)
+    err = WriteFile(h, ptr, u32(base.PageBytes(1)), nullptr, &state.ovl)
         ? ERROR_SUCCESS : GetLastError();
     if (err != ERROR_SUCCESS && err != ERROR_IO_PENDING)
     {

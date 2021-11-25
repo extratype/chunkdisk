@@ -36,7 +36,7 @@ struct PageEntry
     Pages ptr;
 
     // custom value for the owner thread
-    std::unique_ptr<size_t> user;
+    LPVOID user;
 
     friend void swap(PageEntry& a, PageEntry& b) noexcept
     {
@@ -65,17 +65,6 @@ struct PageEntry
     void set_owner() { owner.store(GetCurrentThreadId(), std::memory_order_release); }
 
     void clear_owner() { owner.store(0, std::memory_order_release); }
-};
-
-// operation result, only for current thread
-// assign as a local variable
-struct PageResult
-{
-    DWORD error;                    // page invalid if not ERROR_SUCCESS
-    bool is_hit = false;            // true if page hit
-    SRWLock lock;                   // hold while reading ptr
-    LPVOID ptr = nullptr;           // PageEntry::ptr
-    void** user = nullptr;          // PageEntry::user
 };
 
 class ChunkDiskService
@@ -137,29 +126,30 @@ public:
     DWORD UnmapChunk(u64 chunk_idx);
 
     // acquire shared lock for reading an existing page
-    // local use, don't call LockPage() while holding PageResult::lock
-    // PageResult::error is ERROR_LOCK_FAILED if the page is locked by the current thread
-    // PageResult::user not available
-    PageResult PeekPage(u64 page_idx);
+    // read ptr and don't call LockPage(page_idx) while holding ptr
+    // ERROR_LOCK_FAILED: the page is locked by the current thread
+    // ERROR_NOT_FOUND: the page does not exist
+    DWORD PeekPage(u64 page_idx, SRWLock& lk, LPVOID& ptr);
 
     // acquire exclusive lock for creating/updating a page
-    // persistent use, empty PageResult::lock, the calling thread must UnlockPage() later
-    // PageResult::error is ERROR_LOCK_FAILED if the page is locked by the current thread
-    // PageResult::user valid for ERROR_SUCCESS and ERROR_LOCK_FAILED
-    PageResult LockPage(u64 page_idx);
+    // the calling thread must call UnlockPage(page_idx) later
+    // user: user-defined value to associate with the page
+    // ERROR_NOT_FOUND/ERROR_SUCCESS: page created/locked, ptr returned, user set
+    // ERROR_LOCK_FAILED: the page is locked by the current thread, user returned
+    // ERROR_NOT_ENOUGH_MEMORY
+    DWORD LockPage(u64 page_idx, LPVOID& ptr, LPVOID& user);
 
-    // get PageResult again for the thread that have called LockPage()
-    // PageResult::is_hit is always true
-    PageResult ClaimPage(u64 page_idx);
+    // for the thread that have called LockPage()
+    // ERROR_SUCCESS: ptr and user returned
+    DWORD ClaimPage(u64 page_idx, LPVOID& ptr, LPVOID& user);
 
     // release the lock and optionally remove the page
     // return ERROR_SUCCESS if the calling thread have successfully called LockPage()
     DWORD UnlockPage(u64 page_idx, bool remove = false);
 
     // remove cached pages in range
-    // if one of them is locked by the current thread,
-    // PageResult::error is ERROR_LOCK_FAILED and PageResult::user available
-    PageResult FlushPages(const PageRange& r);
+    // ERROR_LOCK_FAILED: one of them is locked by the current thread, user returned
+    DWORD FlushPages(const PageRange& r, LPVOID& user);
 
     // try to remove all cached pages
     // skip pages locked by the current thread
