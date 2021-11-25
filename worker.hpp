@@ -28,15 +28,19 @@ enum ChunkOpKind : u32
     WRITE_PAGE_PARTIAL,     // not page aligned, read then write in pages
     UNMAP_CHUNK,            // become WRITE_CHUNK if partial
 
-    // FIXME unmap
     // for PostMsg()
-    REFRESH_CHUNK           // refresh chunk state for an unmapped chunk
+    LOCK_CHUNK,             // stop using and close the chunk by setting ChunkFileHandle::locked
+    WAIT_CHUNK,             // notify the chunk has been closed after LOCK_CHUNK
+    UNLOCK_CHUNK            // clear ChunkFileHandle::locked and start using the chunk
 };
 
 enum ChunkOpStep : u32
 {
     OP_READY = 0,       // op created
     OP_DONE,            // completed, with or without error
+    OP_LOCKING,         // waiting for a chunk to be closed to lock it exclusively
+    OP_LOCKED,          // locked a chunk exclusively
+    OP_WAITING,         // waiting for a chunk to be unlocked
     OP_READ_PAGE,       // for WRITE_PAGE_PARTIAL, page has been read and will be written
     OP_ZERO_CHUNK,      // for WRITE_CHUNK with nullptr buffer,
                         // FSCTL_SET_ZERO_DATA is not supported
@@ -85,10 +89,10 @@ struct ChunkOpState
     u64 idx;                        // chunk_idx or page_idx
     u64 start_off;                  // offset in chunk or page
     u64 end_off;                    // offset in chunk or page
-    PVOID buffer;
+    LPVOID buffer;
     ChunkOpState* next = nullptr;   // next op waiting on this
 
-    ChunkOpState(ChunkWork* owner, ChunkOpKind kind, u64 idx, u64 start_off, u64 end_off, LONGLONG file_off, PVOID buffer)
+    ChunkOpState(ChunkWork* owner, ChunkOpKind kind, u64 idx, u64 start_off, u64 end_off, LONGLONG file_off, LPVOID buffer)
         : owner(owner), kind(kind), idx(idx), start_off(start_off), end_off(end_off), buffer(buffer)
     {
         auto li = LARGE_INTEGER{.QuadPart = file_off};
@@ -104,11 +108,14 @@ static ChunkOpState* GetOverlappedOp(OVERLAPPED* ovl)
 
 struct ChunkFileHandle
 {
-    FileHandle handle_ro;   // read-only, for !is_write
-    FileHandle handle_rw;   // read-write, for is_write
-    u32 refs_ro = 0;        // close later if zero
-    u32 refs_rw = 0;        // close later if zero
-    bool pending = false;   // pending to be refreshed FIXME unmap
+    FileHandle handle_ro;               // read-only, for !is_write
+    FileHandle handle_rw;               // read-write, for is_write
+    u32 refs_ro = 0;                    // close later if zero
+    u32 refs_rw = 0;                    // close later if zero
+
+    // FIXME comment
+    bool locked = false;                // OP_LOCKING or OP_LOCKED somewhere
+    std::vector<ChunkOpState*> waiting; // ops waiting for !locked
 };
 
 // single worker per single dispatcher
@@ -191,48 +198,48 @@ public:
     DWORD PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, ChunkOpKind op_kind, u64 block_addr, u32 count);
 
 private:
+    // post an internal message to this worker
+    // ignore queue depth, no response
+    // FIXME currently for REFRESH_CHUNK only
+    DWORD PostMsg(ChunkWork work);
+
     // get page aligned buffer from the pool
     DWORD GetBuffer(Pages& buffer);
 
     // return buffer to the pool
     DWORD ReturnBuffer(Pages buffer);
 
+    // FIXME ChunkOpState* state = nullptr?
     // get shared chunk file handle from the pool
     DWORD OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_out);
 
     // done using the handle from the pool
     DWORD CloseChunk(u64 chunk_idx, bool is_write);
 
-    // FIXME unmap
-    // refresh chunk state after it's unmapped
-    DWORD RefreshChunk(u64 chunk_idx);
+    // lock chunk file handle for LOCK_CHUNK
+    void LockChunk(u64 chunk_idx);
+
+    // unlock chunk file handle for UNLOCK_CHUNK
+    void UnlockChunk(u64 chunk_idx);
 
     // for READ_PAGE, WRITE_PAGE, WRITE_PAGE_PARTIAL
     // start_off, end_off: block offset in page
     // file_off: offset in chunk corresponding to the page, to be updated
     // buffer: current address, to be updated
     DWORD PreparePageOps(ChunkWork& work, bool is_write, u64 page_idx,
-                         u32 start_off, u32 end_off, LONGLONG& file_off, PVOID& buffer);
+                         u32 start_off, u32 end_off, LONGLONG& file_off, LPVOID& buffer);
 
     // start_off, end_off: block offset in chunk
     // buffer: current address, to be updated
     // partial UNMAP_CHUNK becomes WRITE_CHUNK
     DWORD PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 chunk_idx,
-                          u64 start_off, u64 end_off, PVOID& buffer);
+                          u64 start_off, u64 end_off, LPVOID& buffer);
 
     // add ops to work
-    // kind: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK, REFRESH_CHUNK
+    // kind: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK, FIXME REFRESH_CHUNK
     // buffer: buffer address for ops, to be updated
     // try to complete some ops immediately (abort if one of them fails)
-    DWORD PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_addr, u32 count, PVOID& buffer);
-
-    // post an internal message to this worker
-    // ignore queue depth, no response
-    // currently for REFRESH_CHUNK only
-    DWORD PostMsg(ChunkWork work);
-
-    // post REFRESH_CHUNK to all workers including this
-    DWORD PostRefreshChunk(u64 chunk_idx);
+    DWORD PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_addr, u32 count, LPVOID& buffer);
 
     static void ThreadProc(LPVOID param);
 
@@ -269,6 +276,15 @@ private:
 
     // ChunkDiskService::FlushPages() and wait for a busy page
     DWORD FlushPagesAsync(ChunkOpState& state, const PageRange& r);
+
+    // FIXME
+    DWORD PostLockChunk(ChunkOpState& state, u64 chunk_idx);
+
+    // FIXME
+    void LockingChunk(ChunkOpState& state);
+
+    // FIXME
+    DWORD PostUnlockChunk(ChunkOpState& state, u64 chunk_idx);
 
     // handle asynchronous EOF when unmap then read
     DWORD CheckAsyncEOF(ChunkOpState& state);

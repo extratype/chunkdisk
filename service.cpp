@@ -250,7 +250,7 @@ PageResult ChunkDiskService::LockPage(u64 page_idx)
             // page miss
             try
             {
-                auto user = std::make_unique<u64>();
+                auto user = std::make_unique<size_t>();
                 auto ptr = Pages(VirtualAlloc(nullptr, bases[0].PageBytes(1),
                                               MEM_COMMIT, PAGE_READWRITE));
                 if (ptr == nullptr) return PageResult{ERROR_NOT_ENOUGH_MEMORY};

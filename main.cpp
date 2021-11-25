@@ -63,7 +63,9 @@ struct FileIdInfoEqual
 
 struct ChunkDisk
 {
-    ChunkDiskService service;                       // not movable
+    // not movable
+    ChunkDiskService service;
+    // don't insert or erase after StartWorkers()
     vector<ChunkDiskWorker> workers;
 
     // not movable, increment only
@@ -322,8 +324,8 @@ BOOLEAN PostWork(SPD_STORAGE_UNIT* StorageUnit, ChunkOpKind op_kind, u64 block_a
 }
 
 BOOLEAN Read(SPD_STORAGE_UNIT* StorageUnit,
-                    PVOID Buffer, UINT64 BlockAddress, UINT32 BlockCount, BOOLEAN FlushFlag,
-                    SPD_STORAGE_UNIT_STATUS* Status)
+             PVOID Buffer, UINT64 BlockAddress, UINT32 BlockCount, BOOLEAN FlushFlag,
+             SPD_STORAGE_UNIT_STATUS* Status)
 {
     SpdWarnOnce(StorageUnit->StorageUnitParams.CacheSupported || FlushFlag);
 
@@ -331,8 +333,8 @@ BOOLEAN Read(SPD_STORAGE_UNIT* StorageUnit,
 }
 
 BOOLEAN Write(SPD_STORAGE_UNIT* StorageUnit,
-                     PVOID Buffer, UINT64 BlockAddress, UINT32 BlockCount, BOOLEAN FlushFlag,
-                     SPD_STORAGE_UNIT_STATUS* Status)
+              PVOID Buffer, UINT64 BlockAddress, UINT32 BlockCount, BOOLEAN FlushFlag,
+              SPD_STORAGE_UNIT_STATUS* Status)
 {
     SpdWarnOnce(!StorageUnit->StorageUnitParams.WriteProtected);
     SpdWarnOnce(StorageUnit->StorageUnitParams.CacheSupported || FlushFlag);
@@ -547,6 +549,7 @@ DWORD StartWorkers(ChunkDisk& cdisk, u32 num_workers)
     return err;
 }
 
+// don't insert or erase
 vector<ChunkDiskWorker>& GetWorkers(SPD_STORAGE_UNIT* StorageUnit)
 {
     return StorageUnitChunkDisk(StorageUnit)->workers;
