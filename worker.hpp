@@ -265,7 +265,7 @@ private:
     PageResult LockPageAsync(ChunkOpState& state, u64 page_idx);
 
     // ChunkDiskService::UnlockPage() and resume the waiting HEAD
-    DWORD FreePageAsync(ChunkOpState& state, u64 page_idx, bool remove = false);
+    DWORD UnlockPageAsync(ChunkOpState& state, u64 page_idx, bool remove = false);
 
     // ChunkDiskService::FlushPages() and wait for a busy page
     DWORD FlushPagesAsync(ChunkOpState& state, const PageRange& r);
