@@ -454,13 +454,12 @@ DWORD ChunkDiskWorker::ReturnBuffer(Pages buffer)
     return ERROR_SUCCESS;
 }
 
-DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_out)
+DWORD ChunkDiskWorker::OpenChunkAsync(u64 chunk_idx, bool is_write, HANDLE& handle_out, ChunkOpState* state)
 {
     // chunk_handles_ used by the dispatcher and the worker thread
     auto lk = SRWLock(*mutex_handles_, true);
 
     auto it = chunk_handles_.find(chunk_idx);
-
     if (it != chunk_handles_.end())
     {
         chunk_handles_.reinsert_back(it);
@@ -490,8 +489,19 @@ DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_ou
         }
     }
 
+    // FIXME race?
+    if (is_write && service_.bases.size() > 1)
+    {
+        auto base_idx = service_.FindChunk(chunk_idx);
+        if (0 < base_idx && base_idx < service_.bases.size())
+        {
+            return ERROR_LOCK_FAILED;
+        }
+    }
+
     auto h = FileHandle();
     auto err = service_.CreateChunk(chunk_idx, h, is_write);
+    // FIXME ERROR_SHARING_VIOLATION
     if (err != ERROR_SUCCESS) return err;
     if (!h)
     {
@@ -559,7 +569,7 @@ DWORD ChunkDiskWorker::OpenChunk(u64 chunk_idx, bool is_write, HANDLE& handle_ou
     return ERROR_SUCCESS;
 }
 
-DWORD ChunkDiskWorker::CloseChunk(u64 chunk_idx, bool is_write)
+DWORD ChunkDiskWorker::CloseChunkAsync(u64 chunk_idx, bool is_write)
 {
     // chunk_handles_ used by the dispatcher and the worker thread
     auto lk = SRWLock(*mutex_handles_, true);
