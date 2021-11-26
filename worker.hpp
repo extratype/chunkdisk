@@ -198,6 +198,11 @@ public:
     DWORD PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, ChunkOpKind op_kind, u64 block_addr, u32 count);
 
 private:
+    static void ThreadProc(LPVOID param);
+
+    // event loop of the worker thread
+    void DoWorks();
+
     // post an internal message to this worker
     // ignore queue depth, no response
     // FIXME currently for REFRESH_CHUNK only
@@ -240,11 +245,6 @@ private:
     // buffer: buffer address for ops, to be updated
     // try to complete some ops immediately (abort if one of them fails)
     DWORD PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_addr, u32 count, LPVOID& buffer);
-
-    static void ThreadProc(LPVOID param);
-
-    // event loop of the worker thread
-    void DoWorks();
 
     // initiate async I/O to post CK_IO to IOCP
     // ReportOpResult() if failed synchronously, return error code

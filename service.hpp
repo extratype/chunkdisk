@@ -83,14 +83,14 @@ public:
     const u32 max_pages;
 
 private:
-    std::shared_mutex mutex_chunk_lock_;            // not movable
-    std::unordered_map<u64, size_t> chunk_lock_;    // chunk index -> user FIXME ChunkDiskWorker*
-
     std::shared_mutex mutex_pages_;                 // not movable
     // BLOCK_SIZE -> PAGE_SIZE access
     // read cache, write through
     // add to back, evict from front
     Map<u64, PageEntry> cached_pages_;
+
+    std::shared_mutex mutex_chunk_lock_;            // not movable
+    std::unordered_map<u64, size_t> chunk_lock_;    // chunk index -> user FIXME ChunkDiskWorker*
 
     std::shared_mutex mutex_unmapped_;              // not movable
     // chunk index -> [start_off, end_off)
@@ -106,20 +106,6 @@ public:
 
     // start bases
     DWORD Start();
-
-    // CheckChunk() from current to parents, return bases.size() if all false.
-    size_t FindChunk(u64 chunk_idx);
-
-    // Open a chunk file handle for I/O.
-    // FIXME comment
-    DWORD CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool is_write, bool is_locked = false);
-
-    DWORD LockChunk(u64 chunk_idx, size_t user);
-
-    // FIXME not optional?
-    bool CheckChunkLocked(u64 chunk_idx, size_t* user = nullptr);
-
-    void UnlockChunk(u64 chunk_idx);
 
     // FIXME unmap
     // make chunk empty (truncate)
@@ -159,6 +145,21 @@ public:
     // skip pages locked by the current thread
     // return ERROR_LOCK_FAILED if there's such one
     DWORD FlushPages();
+
+    // CheckChunk() from current to parents, return bases.size() if all false.
+    size_t FindChunk(u64 chunk_idx);
+
+    // Open a chunk file handle for I/O.
+    // FIXME comment
+    DWORD CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool is_write, bool is_locked = false);
+
+    // FIXME comment
+    DWORD LockChunk(u64 chunk_idx, size_t user);
+
+    // FIXME user not optional?
+    bool CheckChunkLocked(u64 chunk_idx, size_t* user = nullptr);
+
+    void UnlockChunk(u64 chunk_idx);
 
     // mark [start_off, end_off) unmapped
     // return ERROR_SUCCESS and reset ranges if whole, ERROR_IO_PENDING otherwise

@@ -296,6 +296,79 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, Chu
     return ERROR_IO_PENDING;
 }
 
+void ChunkDiskWorker::ThreadProc(LPVOID param)
+{
+    auto* self = recast<ChunkDiskWorker*>(param);
+    self->DoWorks();
+}
+
+void ChunkDiskWorker::DoWorks()
+{
+    auto bytes_transferred = DWORD();
+    auto ckey = u64();
+    auto* overlapped = (OVERLAPPED*)(nullptr);
+    auto next_timeout = DWORD(INFINITE);   // no resources to be freed at start
+    auto next_check_time = u64();
+
+    while (true)
+    {
+        auto err = GetQueuedCompletionStatus(
+            iocp_.get(), &bytes_transferred, &ckey, &overlapped, next_timeout)
+            ? ERROR_SUCCESS : GetLastError();
+
+        if (overlapped == nullptr)
+        {
+            if (err == WAIT_TIMEOUT)
+            {
+                next_timeout = IdleWork();
+                if (next_timeout == INFINITE) continue; // sleep
+            }
+            else
+            {
+                // err == ERROR_SUCCESS && ckey == CK_STOP
+                // err != ERROR_SUCCESS
+                StopWorks();
+                return;
+            }
+        }
+        else if (ckey == CK_POST)
+        {
+            // do work...
+            auto& work = *recast<ChunkWork*>(overlapped);
+            for (auto& op : work.ops)
+            {
+                if (PostOp(op) != ERROR_SUCCESS)
+                {
+                    if (CompleteWork(op.owner)) break;
+                }
+            }
+        }
+        else if (ckey == CK_IO)
+        {
+            auto& state = *GetOverlappedOp(overlapped);
+            CompleteIO(state, err, bytes_transferred);
+            CompleteWork(state.owner);
+        }
+
+        if (next_timeout == INFINITE)
+        {
+            // woke up
+            next_timeout = STANDBY_MS;
+            next_check_time = GetSystemFileTime() + STANDBY_MS * 10000;
+        }
+        else
+        {
+            // check only when active
+            auto check_time = GetSystemFileTime();
+            if (check_time >= next_check_time)
+            {
+                auto next_check = PeriodicCheck();
+                next_check_time  = check_time + next_check * 10000;
+            }
+        }
+    }
+}
+
 DWORD ChunkDiskWorker::PostMsg(ChunkWork work)
 {
     if (work.ops.empty()) return ERROR_INVALID_PARAMETER;
@@ -754,79 +827,6 @@ DWORD ChunkDiskWorker::PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_a
     }
 
     return ERROR_SUCCESS;
-}
-
-void ChunkDiskWorker::ThreadProc(LPVOID param)
-{
-    auto* self = recast<ChunkDiskWorker*>(param);
-    self->DoWorks();
-}
-
-void ChunkDiskWorker::DoWorks()
-{
-    auto bytes_transferred = DWORD();
-    auto ckey = u64();
-    auto* overlapped = (OVERLAPPED*)(nullptr);
-    auto next_timeout = DWORD(INFINITE);   // no resources to be freed at start
-    auto next_check_time = u64();
-
-    while (true)
-    {
-        auto err = GetQueuedCompletionStatus(
-            iocp_.get(), &bytes_transferred, &ckey, &overlapped, next_timeout)
-            ? ERROR_SUCCESS : GetLastError();
-
-        if (overlapped == nullptr)
-        {
-            if (err == WAIT_TIMEOUT)
-            {
-                next_timeout = IdleWork();
-                if (next_timeout == INFINITE) continue; // sleep
-            }
-            else
-            {
-                // err == ERROR_SUCCESS && ckey == CK_STOP
-                // err != ERROR_SUCCESS
-                StopWorks();
-                return;
-            }
-        }
-        else if (ckey == CK_POST)
-        {
-            // do work...
-            auto& work = *recast<ChunkWork*>(overlapped);
-            for (auto& op : work.ops)
-            {
-                if (PostOp(op) != ERROR_SUCCESS)
-                {
-                    if (CompleteWork(op.owner)) break;
-                }
-            }
-        }
-        else if (ckey == CK_IO)
-        {
-            auto& state = *GetOverlappedOp(overlapped);
-            CompleteIO(state, err, bytes_transferred);
-            CompleteWork(state.owner);
-        }
-
-        if (next_timeout == INFINITE)
-        {
-            // woke up
-            next_timeout = STANDBY_MS;
-            next_check_time = GetSystemFileTime() + STANDBY_MS * 10000;
-        }
-        else
-        {
-            // check only when active
-            auto check_time = GetSystemFileTime();
-            if (check_time >= next_check_time)
-            {
-                auto next_check = PeriodicCheck();
-                next_check_time  = check_time + next_check * 10000;
-            }
-        }
-    }
 }
 
 DWORD ChunkDiskWorker::PostOp(ChunkOpState& state)
