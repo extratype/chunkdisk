@@ -203,6 +203,8 @@ private:
     // event loop of the worker thread
     void DoWorks();
 
+    DWORD PrepareMsg(ChunkWork& work, ChunkOpKind kind, u64 idx, u64 start_off, u64 end_off, LPVOID buffer);
+
     // post an internal message to this worker
     // ignore queue depth, no response
     // FIXME currently for REFRESH_CHUNK only

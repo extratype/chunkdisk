@@ -341,8 +341,14 @@ DWORD ChunkDiskService::FlushPages()
         auto size = cached_pages_.size();
         auto pages = std::vector<u64>();
         pages.reserve(size);
-        for (auto&& p : cached_pages_) pages.push_back(p.first);
-
+        try
+        {
+            for (auto&& p : cached_pages_) pages.push_back(p.first);
+        }
+        catch (const bad_alloc&)
+        {
+            err = ERROR_NOT_ENOUGH_MEMORY;
+        }
         for (auto idx : pages)
         {
             auto it = cached_pages_.find(idx);
@@ -356,7 +362,7 @@ DWORD ChunkDiskService::FlushPages()
         if (size == cached_pages_.size()) break;
     }
 
-    return err;
+    return cached_pages_.empty() ? ERROR_SUCCESS : err;
 }
 
 size_t ChunkDiskService::FindChunk(u64 chunk_idx)
@@ -433,59 +439,56 @@ DWORD ChunkDiskService::UnmapRange(SRWLock& lk, u64 chunk_idx, u64 start_off, u6
     if (end_off > bases[0].chunk_length) return ERROR_INVALID_PARAMETER;
 
     lk = SRWLock(mutex_unmapped_, true);
-    auto rit = chunk_unmapped_.try_emplace(chunk_idx).first;
-    auto& ranges = rit->second;
-
-    // add range [start_off, end_off)
-    auto start = ranges.upper_bound(start_off); // start_off < start->first
-    auto end = ranges.upper_bound(end_off);     // end_off < end->first
-    auto new_start = (start == ranges.begin());
-
-    if (!new_start)
+    try
     {
-        --start;
-        // check overlap on the left
-        if (start_off <= start->second)
-        {
-            start->second = max(start->second, end_off);
-        }
-        else
-        {
-            new_start = true;
-        }
-    }
-    if (new_start)
-    {
-        try
-        {
-            start = ranges.emplace(start_off, end_off).first;
-        }
-        catch (const bad_alloc&)
-        {
-            return ERROR_NOT_ENOUGH_MEMORY;
-        }
-    }
+        auto rit = chunk_unmapped_.try_emplace(chunk_idx).first;
+        auto& ranges = rit->second;
 
-    auto it = start;
-    for (++it; it != end; ++it)
-    {
-        if (it->second > end_off) break;
-    }
-    ranges.erase(std::next(start), it);
+        // add range [start_off, end_off)
+        auto start = ranges.upper_bound(start_off); // start_off < start->first
+        auto end = ranges.upper_bound(end_off);     // end_off < end->first
+        auto new_start = (start == ranges.begin());
 
-    if (it != ranges.end())
-    {
-        // check overlap on the right
-        if (it->first <= start->second)
+        if (!new_start)
         {
-            start->second = max(start->second, it->second);
-            ranges.erase(it);
+            --start;
+            // check overlap on the left
+            if (start_off <= start->second)
+            {
+                start->second = max(start->second, end_off);
+            }
+            else
+            {
+                new_start = true;
+            }
         }
-    }
+        if (new_start) start = ranges.emplace(start_off, end_off).first;
 
-    if (ranges.size() != 1) return ERROR_IO_PENDING;
-    if (!bases[0].IsWholeChunk(ranges.begin()->first, ranges.begin()->second)) return ERROR_IO_PENDING;
-    chunk_unmapped_.erase(rit);
+        auto it = start;
+        for (++it; it != end; ++it)
+        {
+            if (it->second > end_off) break;
+        }
+        ranges.erase(std::next(start), it);
+
+        if (it != ranges.end())
+        {
+            // check overlap on the right
+            if (it->first <= start->second)
+            {
+                start->second = max(start->second, it->second);
+                ranges.erase(it);
+            }
+        }
+
+        if (ranges.size() != 1) return ERROR_IO_PENDING;
+        if (!bases[0].IsWholeChunk(ranges.begin()->first, ranges.begin()->second)) return ERROR_IO_PENDING;
+        chunk_unmapped_.erase(rit);
+    }
+    catch (const bad_alloc&)
+    {
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
     return ERROR_SUCCESS;
 }
 

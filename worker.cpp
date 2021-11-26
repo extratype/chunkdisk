@@ -369,6 +369,19 @@ void ChunkDiskWorker::DoWorks()
     }
 }
 
+DWORD ChunkDiskWorker::PrepareMsg(ChunkWork& work, ChunkOpKind kind, u64 idx, u64 start_off, u64 end_off, LPVOID buffer)
+{
+    try
+    {
+        work.ops.emplace_back(&work, kind, idx, start_off, end_off, 0, buffer);
+        return ERROR_SUCCESS;
+    }
+    catch (const bad_alloc&)
+    {
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+}
+
 DWORD ChunkDiskWorker::PostMsg(ChunkWork work)
 {
     if (work.ops.empty()) return ERROR_INVALID_PARAMETER;
