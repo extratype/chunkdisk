@@ -90,7 +90,7 @@ private:
     Map<u64, PageEntry> cached_pages_;
 
     std::shared_mutex mutex_chunk_lock_;            // not movable
-    std::unordered_map<u64, size_t> chunk_lock_;    // chunk index -> user FIXME ChunkDiskWorker*
+    std::unordered_map<u64, LPVOID> chunk_lock_;    // chunk index -> user
 
     std::shared_mutex mutex_unmapped_;              // not movable
     // chunk index -> [start_off, end_off)
@@ -154,10 +154,9 @@ public:
     DWORD CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool is_write, bool is_locked = false);
 
     // FIXME comment
-    DWORD LockChunk(u64 chunk_idx, size_t user);
+    DWORD LockChunk(u64 chunk_idx, LPVOID& user);
 
-    // FIXME user not optional?
-    bool CheckChunkLocked(u64 chunk_idx, size_t* user = nullptr);
+    bool CheckChunkLocked(u64 chunk_idx, LPVOID& user);
 
     void UnlockChunk(u64 chunk_idx);
 

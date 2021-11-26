@@ -242,7 +242,7 @@ DWORD ChunkDiskBase::CreateChunk(u64 chunk_idx, FileHandle& handle_out, const bo
     // unbuffered asynchronous I/O if not is_locked
     // buffered synchronous I/O if is_locked
     const auto flags_attrs = FILE_ATTRIBUTE_NORMAL |
-        (!is_locked ? (FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED) : 0);
+        (is_locked ? 0 : (FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED));
 
     // chunk file size in bytes
     const auto chunk_bytes = LARGE_INTEGER{.QuadPart = LONGLONG(BlockBytes(ChunkBlocks(1)))};
