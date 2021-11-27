@@ -65,8 +65,6 @@ PageRange ChunkDiskBase::BlockPageRange(u64 chunk_idx, u64 start_off, u64 end_of
 
 DWORD ChunkDiskBase::Start()
 {
-    auto err = DWORD(ERROR_SUCCESS);
-
     try
     {
         // make class movable
@@ -77,23 +75,20 @@ DWORD ChunkDiskBase::Start()
         return ERROR_NOT_ENOUGH_MEMORY;
     }
 
-    /*
-     * FIXME design.txt
-        as base disk
-        base changed -> invalid differential
-            persistent .lock
-            .lock: FILE_SHARE_READ
-        ERROR_SHARING_VIOLATION occurs if read-only & write
-     */
     const auto num_parts = part_dirname.size();
+    auto err = DWORD(ERROR_SUCCESS);
 
-    // FIXME remove locks if fail
     // put a lock file to prevent accidental double use
     try
     {
+        // base of a differential disk if read_only
+        // ERROR_SHARING_VIOLATION occurs when write access requested
         const auto desired_access = GENERIC_READ | (read_only ? 0 : GENERIC_WRITE);
+        // base may be shared with others
         const auto share_mode = read_only ? FILE_SHARE_READ : 0;
+        // .lock should be removed manually after merging
         const auto cr_disp = read_only ? OPEN_ALWAYS : CREATE_NEW;
+        // disallow writing on base until merged, persistent .lock
         const auto flags_attrs = FILE_ATTRIBUTE_NORMAL | (read_only ? 0 : FILE_FLAG_DELETE_ON_CLOSE);
 
         for (auto i = size_t(0); i < num_parts; ++i)
@@ -112,7 +107,6 @@ DWORD ChunkDiskBase::Start()
     }
 
     // read parts and chunks, check consistency
-    // FIXME reset if fail
     try
     {
         // read parts
@@ -154,13 +148,13 @@ DWORD ChunkDiskBase::Start()
     return ERROR_SUCCESS;
 }
 
-bool ChunkDiskBase::CheckChunk(u64 chunk_idx)
+bool ChunkDiskBase::CheckChunk(const u64 chunk_idx)
 {
     auto lk = SRWLock(*mutex_parts_, false);
     return chunk_parts_.find(chunk_idx) != chunk_parts_.end();
 }
 
-DWORD ChunkDiskBase::CreateChunk(u64 chunk_idx, FileHandle& handle_out, const bool is_write, const bool is_locked)
+DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, const bool is_write, const bool is_locked)
 {
     if (read_only && is_write) return ERROR_ACCESS_DENIED;
 
@@ -333,7 +327,7 @@ DWORD ChunkDiskBase::CreateChunk(u64 chunk_idx, FileHandle& handle_out, const bo
     return ERROR_SUCCESS;
 }
 
-void ChunkDiskBase::RemoveChunkLocked(u64 chunk_idx, FileHandle handle)
+void ChunkDiskBase::RemoveChunkLocked(const u64 chunk_idx, FileHandle handle)
 {
     auto lk = SRWLock(*mutex_parts_, true);
     auto part_it = chunk_parts_.find(chunk_idx);

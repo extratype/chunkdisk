@@ -36,7 +36,7 @@ struct PageEntry
     Pages ptr;
 
     // custom value for the owner thread
-    LPVOID user;
+    LPVOID user = nullptr;
 
     friend void swap(PageEntry& a, PageEntry& b) noexcept
     {
@@ -71,9 +71,8 @@ class ChunkDiskService
 {
 public:
     // FIXME params -> bases[0]
-    // FIXME from ReadChunkDiskBases()
-    // FIXME comment read-only?
     // current: bases[0], parent: bases[1] and so on, if any
+    // don't insert or erase after Start()
     std::vector<ChunkDiskBase> bases;
 
     SPD_STORAGE_UNIT* const storage_unit;
@@ -99,6 +98,7 @@ private:
     std::atomic<u64> post_ft_ = 0;                  // not movable
 
 public:
+    // bases: ReadChunkDiskBases()
     ChunkDiskService(std::vector<ChunkDiskBase> bases, SPD_STORAGE_UNIT* storage_unit, u32 max_pages)
         : bases(std::move(bases)), storage_unit(storage_unit), max_pages(max_pages) {}
 

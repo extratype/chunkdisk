@@ -7,6 +7,7 @@
 #include "service.hpp"
 #include <unordered_set>
 #include <filesystem>
+#include "utils.hpp"
 
 using std::bad_alloc;
 
@@ -19,14 +20,26 @@ DWORD ChunkDiskService::Start()
     for (auto i = bases.size(); i > 0; --i)
     {
         auto& base = bases[i - 1];
-        // FIXME log
         auto err = base.Start();
-        if (err != ERROR_SUCCESS) return err;
+        if (err != ERROR_SUCCESS)
+        {
+            if (i > 1)
+            {
+                SpdLogErr(
+                    L"error: cannot initialize disk #%llu (#1: argument, #2~: parents): error %lu",
+                    i, err);
+            }
+            else
+            {
+                SpdLogErr(L"error: cannot initialize disk: error %lu", err);
+            }
+            return err;
+        }
     }
     return ERROR_SUCCESS;
 }
 
-DWORD ChunkDiskService::UnmapChunk(u64 chunk_idx)
+DWORD ChunkDiskService::UnmapChunk(const u64 chunk_idx)
 {
     auto lkp = SRWLock(mutex_parts_, false);
 
@@ -48,7 +61,7 @@ DWORD ChunkDiskService::UnmapChunk(u64 chunk_idx)
     return ERROR_SUCCESS;
 }
 
-DWORD ChunkDiskService::PeekPage(u64 page_idx, SRWLock& lk, LPVOID& ptr)
+DWORD ChunkDiskService::PeekPage(const u64 page_idx, SRWLock& lk, LPVOID& ptr)
 {
     auto lkx = SRWLock(mutex_pages_, true);
     auto it = cached_pages_.find(page_idx);
@@ -85,7 +98,7 @@ DWORD ChunkDiskService::PeekPage(u64 page_idx, SRWLock& lk, LPVOID& ptr)
     }
 }
 
-DWORD ChunkDiskService::LockPage(u64 page_idx, LPVOID& ptr, LPVOID& user)
+DWORD ChunkDiskService::LockPage(const u64 page_idx, LPVOID& ptr, LPVOID& user)
 {
     auto lk = SRWLock(mutex_pages_, true);
 
@@ -220,7 +233,7 @@ DWORD ChunkDiskService::LockPage(u64 page_idx, LPVOID& ptr, LPVOID& user)
     }
 }
 
-DWORD ChunkDiskService::ClaimPage(u64 page_idx, LPVOID& ptr)
+DWORD ChunkDiskService::ClaimPage(const u64 page_idx, LPVOID& ptr)
 {
     auto lk = SRWLock(mutex_pages_, false);
     auto it = cached_pages_.find(page_idx);
@@ -233,7 +246,7 @@ DWORD ChunkDiskService::ClaimPage(u64 page_idx, LPVOID& ptr)
     return ERROR_SUCCESS;
 }
 
-DWORD ChunkDiskService::ClaimPage(u64 page_idx, LPVOID& ptr, LPVOID& user)
+DWORD ChunkDiskService::ClaimPage(const u64 page_idx, LPVOID& ptr, LPVOID& user)
 {
     auto lk = SRWLock(mutex_pages_, false);
     auto it = cached_pages_.find(page_idx);
@@ -289,7 +302,7 @@ DWORD ChunkDiskService::RemovePageEntry(SRWLock& lk, Map<u64, PageEntry>::iterat
     return ERROR_SUCCESS;
 }
 
-DWORD ChunkDiskService::UnlockPage(u64 page_idx, bool remove)
+DWORD ChunkDiskService::UnlockPage(const u64 page_idx, bool remove)
 {
     auto lk = SRWLock(mutex_pages_, false);
     auto it = cached_pages_.find(page_idx);
@@ -338,7 +351,7 @@ DWORD ChunkDiskService::FlushPages()
     {
         // RemovePageEntry() resets g
         // Iterating over cached_pages_ is not thread safe
-        auto size = cached_pages_.size();
+        const auto size = cached_pages_.size();
         auto pages = std::vector<u64>();
         pages.reserve(size);
         try
@@ -368,14 +381,16 @@ DWORD ChunkDiskService::FlushPages()
 size_t ChunkDiskService::FindChunk(u64 chunk_idx)
 {
     auto i = size_t(0);
-    for (; i < bases.size(); ++i)
+    const auto n = bases.size();
+    for (; i < n; ++i)
     {
         if (bases[i].CheckChunk(chunk_idx)) break;
     }
     return i;
 }
 
-DWORD ChunkDiskService::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, const bool is_write, const bool is_locked)
+DWORD ChunkDiskService::CreateChunk(
+    const u64 chunk_idx, FileHandle& handle_out, const bool is_write, const bool is_locked)
 {
     if (is_write)
     {
@@ -395,7 +410,7 @@ DWORD ChunkDiskService::CreateChunk(const u64 chunk_idx, FileHandle& handle_out,
 }
 
 
-DWORD ChunkDiskService::LockChunk(u64 chunk_idx, LPVOID& user)
+DWORD ChunkDiskService::LockChunk(const u64 chunk_idx, LPVOID& user)
 {
     auto lk = SRWLock(mutex_chunk_lock_, true);
     auto [it, emplaced] = chunk_lock_.emplace(chunk_idx, user);
@@ -410,14 +425,14 @@ DWORD ChunkDiskService::LockChunk(u64 chunk_idx, LPVOID& user)
     }
 }
 
-bool ChunkDiskService::CheckChunkLocked(u64 chunk_idx)
+bool ChunkDiskService::CheckChunkLocked(const u64 chunk_idx)
 {
     auto lk = SRWLock(mutex_chunk_lock_, false);
     if (chunk_lock_.empty()) return false;
     return chunk_lock_.find(chunk_idx) != chunk_lock_.end();
 }
 
-bool ChunkDiskService::CheckChunkLocked(u64 chunk_idx, LPVOID& user)
+bool ChunkDiskService::CheckChunkLocked(const u64 chunk_idx, LPVOID& user)
 {
     auto lk = SRWLock(mutex_chunk_lock_, false);
     if (chunk_lock_.empty()) return false;
@@ -433,13 +448,13 @@ bool ChunkDiskService::CheckChunkLocked(u64 chunk_idx, LPVOID& user)
     }
 }
 
-void ChunkDiskService::UnlockChunk(u64 chunk_idx)
+void ChunkDiskService::UnlockChunk(const u64 chunk_idx)
 {
     auto lk = SRWLock(mutex_chunk_lock_, true);
     chunk_lock_.erase(chunk_idx);
 }
 
-DWORD ChunkDiskService::UnmapRange(SRWLock& lk, u64 chunk_idx, u64 start_off, u64 end_off)
+DWORD ChunkDiskService::UnmapRange(SRWLock& lk, const u64 chunk_idx, const u64 start_off, const u64 end_off)
 {
     if (lk) return ERROR_INVALID_PARAMETER;
     if (start_off >= end_off) return ERROR_INVALID_PARAMETER;
@@ -499,7 +514,7 @@ DWORD ChunkDiskService::UnmapRange(SRWLock& lk, u64 chunk_idx, u64 start_off, u6
     return ERROR_SUCCESS;
 }
 
-void ChunkDiskService::FlushUnmapRanges(u64 chunk_idx)
+void ChunkDiskService::FlushUnmapRanges(const u64 chunk_idx)
 {
     auto lk = SRWLock(mutex_unmapped_, false);
     if (chunk_unmapped_.empty()) return;

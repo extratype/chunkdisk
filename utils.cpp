@@ -9,7 +9,7 @@
 namespace chunkdisk
 {
 
-DWORD ConvertUTF8(const u8* text, int size, std::wstring& result)
+DWORD ConvertUTF8(const u8* text, const int size, std::wstring& result)
 {
     try
     {

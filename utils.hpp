@@ -195,6 +195,10 @@ public:
     SRWLock(std::shared_mutex& m, bool is_exclusive, std::adopt_lock_t t)
         : SRWLockBase(m, is_exclusive, t) {}
 
+    SRWLock(SRWLock&& other) noexcept = default;
+
+    SRWLock& operator=(SRWLock&& other) noexcept = default;
+
     void on_locked(bool is_exclusive) {}
 
     void on_unlock(bool is_exclusive) {}

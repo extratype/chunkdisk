@@ -85,7 +85,7 @@ struct ChunkDisk
  * chunk size in bytes: must be a multiple of PAGE_SIZE
  * number path/to/dir...: max. # of chunks in part directory
  */
-DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, bool read_only, unique_ptr<ChunkDiskBase>& base, wstring& parent)
+DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, const bool read_only, unique_ptr<ChunkDiskBase>& base, wstring& parent)
 {
     try
     {
@@ -197,7 +197,7 @@ DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, bool read_only, unique_ptr<ChunkD
  * bases[0].read_only == true if read_only.
  * FIXME test
  */
-DWORD ReadChunkDiskBases(PCWSTR chunkdisk_file, bool read_only, vector<ChunkDiskBase>& bases)
+DWORD ReadChunkDiskBases(PCWSTR chunkdisk_file, const bool read_only, vector<ChunkDiskBase>& bases)
 {
     auto part_ids = std::unordered_set<FILE_ID_INFO, FileIdInfoHash, FileIdInfoEqual>();
 
@@ -230,10 +230,10 @@ DWORD ReadChunkDiskBases(PCWSTR chunkdisk_file, bool read_only, vector<ChunkDisk
             }
 
             // make sure parts exist, no dups
-            for (auto i = size_t(0); i < base->part_dirname.size(); ++i)
+            for (const auto& dirname : base->part_dirname)
             {
                 auto h = FileHandle(CreateFileW(
-                    (base->part_dirname[i] + L'\\').data(),
+                    (dirname + L'\\').data(),
                     FILE_READ_ATTRIBUTES, 0, nullptr,
                     OPEN_EXISTING,
                     FILE_FLAG_BACKUP_SEMANTICS, nullptr));
@@ -255,6 +255,7 @@ DWORD ReadChunkDiskBases(PCWSTR chunkdisk_file, bool read_only, vector<ChunkDisk
                     break;
                 }
             }
+            if (err != ERROR_SUCCESS) break;
 
             // base ok
             bases.emplace_back(std::move(*base));
@@ -307,7 +308,7 @@ ChunkDiskWorker* GetAssignedWorker(SPD_STORAGE_UNIT* StorageUnit)
 
 // SPD_STORAGE_UNIT_INTERFACE operations
 // op_kind: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK
-BOOLEAN PostWork(SPD_STORAGE_UNIT* StorageUnit, ChunkOpKind op_kind, u64 block_addr, u32 count)
+BOOLEAN PostWork(SPD_STORAGE_UNIT* StorageUnit, const ChunkOpKind op_kind, u64 block_addr, u32 count)
 {
     auto context = SpdStorageUnitGetOperationContext();
 
@@ -426,7 +427,8 @@ static SPD_STORAGE_UNIT_INTERFACE CHUNK_DISK_INTERFACE =
     Unmap,
 };
 
-DWORD CreateStorageUnit(PWSTR chunkdisk_file, BOOLEAN write_protected, PWSTR pipe_name, unique_ptr<ChunkDisk>& cdisk_out)
+DWORD CreateStorageUnit(PWSTR chunkdisk_file, const BOOLEAN write_protected, PWSTR pipe_name,
+                        unique_ptr<ChunkDisk>& cdisk_out)
 {
     // read chunkdisk file
     auto bases = vector<ChunkDiskBase>();
@@ -490,17 +492,13 @@ DWORD CreateStorageUnit(PWSTR chunkdisk_file, BOOLEAN write_protected, PWSTR pip
         return ERROR_NOT_ENOUGH_MEMORY;
     }
     err = cdisk->service.Start();
-    if (err != ERROR_SUCCESS)
-    {
-        SpdLogErr(L"error: cannot initialize ChunkDisk: error %lu", err);
-        return err;
-    }
+    if (err != ERROR_SUCCESS) return err;
 
     cdisk_out = std::move(cdisk);
     return ERROR_SUCCESS;
 }
 
-DWORD StopWorkers(ChunkDisk& cdisk, DWORD timeout_ms = INFINITE)
+DWORD StopWorkers(ChunkDisk& cdisk, const DWORD timeout_ms = INFINITE)
 {
     vector<HANDLE> handles;
     auto err = [&cdisk, timeout_ms, &handles]() -> DWORD
@@ -530,7 +528,7 @@ DWORD StopWorkers(ChunkDisk& cdisk, DWORD timeout_ms = INFINITE)
 }
 
 // num_workers: should be positive
-DWORD StartWorkers(ChunkDisk& cdisk, u32 num_workers)
+DWORD StartWorkers(ChunkDisk& cdisk, const u32 num_workers)
 {
     auto& workers = cdisk.workers;
     auto err = DWORD(ERROR_SUCCESS);

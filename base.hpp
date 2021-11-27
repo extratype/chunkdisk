@@ -39,7 +39,7 @@ struct PageRange
     u32 end_off;
 };
 
-// FIXME comment thread safety
+// thread safe after successful Start()
 class ChunkDiskBase
 {
 public:
@@ -52,7 +52,10 @@ public:
     const u64 chunk_count;                              // disk size = chunk_count * chunk_length * block_size
     const std::vector<u64> part_max;                    // part index -> max. # of chunks
     const std::vector<std::wstring> part_dirname;       // part index -> chunk directory
-    const bool read_only;                               // allow only read access FIXME comment
+
+    // allow only read access
+    // used as parent disk if read_only
+    const bool read_only;
 
     ChunkDiskBase(u32 block_size, u32 page_length, u64 chunk_length, u64 block_count, u64 chunk_count,
                   std::vector<u64> part_max, std::vector<std::wstring> part_dirname, bool read_only)
