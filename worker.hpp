@@ -40,7 +40,6 @@ enum ChunkOpStep : u32
     OP_DONE,            // completed, with or without error
     OP_LOCKING,         // waiting for a chunk to be closed to lock it exclusively
     OP_LOCKED,          // locked a chunk exclusively
-    OP_WAITING,         // waiting for a chunk to be unlocked
     OP_READ_PAGE,       // for WRITE_PAGE_PARTIAL, page has been read and will be written
     OP_ZERO_CHUNK,      // for WRITE_CHUNK with nullptr buffer,
                         // FSCTL_SET_ZERO_DATA is not supported
@@ -203,12 +202,13 @@ private:
     // event loop of the worker thread
     void DoWorks();
 
-    DWORD PrepareMsg(ChunkWork& work, ChunkOpKind kind, u64 idx, u64 start_off, u64 end_off, LPVOID buffer);
+    DWORD PrepareMsg(ChunkWork& msg, ChunkOpKind kind, u64 idx, u64 start_off = 0, u64 end_off = 0, LPVOID buffer = nullptr);
 
     // post an internal message to this worker
     // ignore queue depth, no response
     // FIXME currently for REFRESH_CHUNK only
-    DWORD PostMsg(ChunkWork work);
+    // msg moved, invalidates ChunkOpState::owner
+    DWORD PostMsg(ChunkWork msg);
 
     // get page aligned buffer from the pool
     DWORD GetBuffer(Pages& buffer);

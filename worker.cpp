@@ -369,11 +369,11 @@ void ChunkDiskWorker::DoWorks()
     }
 }
 
-DWORD ChunkDiskWorker::PrepareMsg(ChunkWork& work, ChunkOpKind kind, u64 idx, u64 start_off, u64 end_off, LPVOID buffer)
+DWORD ChunkDiskWorker::PrepareMsg(ChunkWork& msg, ChunkOpKind kind, u64 idx, u64 start_off, u64 end_off, LPVOID buffer)
 {
     try
     {
-        work.ops.emplace_back(&work, kind, idx, start_off, end_off, 0, buffer);
+        msg.ops.emplace_back(&msg, kind, idx, start_off, end_off, 0, buffer);
         return ERROR_SUCCESS;
     }
     catch (const bad_alloc&)
@@ -382,9 +382,10 @@ DWORD ChunkDiskWorker::PrepareMsg(ChunkWork& work, ChunkOpKind kind, u64 idx, u6
     }
 }
 
-DWORD ChunkDiskWorker::PostMsg(ChunkWork work)
+// FIXME ERROR_INVALID_STATE
+DWORD ChunkDiskWorker::PostMsg(ChunkWork msg)
 {
-    if (work.ops.empty()) return ERROR_INVALID_PARAMETER;
+    if (msg.ops.empty()) return ERROR_INVALID_PARAMETER;
 
     // this check is not thread safe,
     // it's fine because all workers start and stop in batch
@@ -395,7 +396,7 @@ DWORD ChunkDiskWorker::PostMsg(ChunkWork work)
     try
     {
         auto lk = SRWLock(*mutex_working_, true);
-        auto work_it = working_.emplace(working_.end(), std::move(work));   // invalidates ChunkOpState::owner
+        auto work_it = working_.emplace(working_.end(), std::move(msg));   // invalidates ChunkOpState::owner
         work_it->it = work_it;
         for (auto& op : work_it->ops) op.owner = &*work_it;
 
