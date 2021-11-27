@@ -798,7 +798,7 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
         }
 
         auto h = HANDLE(INVALID_HANDLE_VALUE);
-        auto err = OpenChunk(chunk_idx, false, h);
+        auto err = OpenChunkAsync(chunk_idx, false, h);
         if (err != ERROR_SUCCESS) return err;
         if (h == INVALID_HANDLE_VALUE)
         {
@@ -823,7 +823,7 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 ch
         }
         else
         {
-            CloseChunk(chunk_idx, false);
+            CloseChunkAsync(chunk_idx, false);
         }
 
         if (kind == UNMAP_CHUNK)
