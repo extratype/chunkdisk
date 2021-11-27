@@ -156,6 +156,8 @@ public:
     // FIXME comment
     DWORD LockChunk(u64 chunk_idx, LPVOID& user);
 
+    bool CheckChunkLocked(u64 chunk_idx);
+
     bool CheckChunkLocked(u64 chunk_idx, LPVOID& user);
 
     void UnlockChunk(u64 chunk_idx);

@@ -410,6 +410,13 @@ DWORD ChunkDiskService::LockChunk(u64 chunk_idx, LPVOID& user)
     }
 }
 
+bool ChunkDiskService::CheckChunkLocked(u64 chunk_idx)
+{
+    auto lk = SRWLock(mutex_chunk_lock_, false);
+    if (chunk_lock_.empty()) return false;
+    return chunk_lock_.find(chunk_idx) != chunk_lock_.end();
+}
+
 bool ChunkDiskService::CheckChunkLocked(u64 chunk_idx, LPVOID& user)
 {
     auto lk = SRWLock(mutex_chunk_lock_, false);
