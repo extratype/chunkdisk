@@ -125,7 +125,11 @@ DWORD ChunkDiskWorker::Stop(DWORD timeout_ms)
     auto err = StopAsync(h);
     if (err != ERROR_SUCCESS) return err;
 
-    return WaitForSingleObject(h, timeout_ms);
+    err = WaitForSingleObject(h, timeout_ms);
+    if (err == WAIT_OBJECT_0) return ERROR_SUCCESS;
+    if (err == WAIT_ABANDONED) return ERROR_ABANDONED_WAIT_0;
+    if (err == WAIT_TIMEOUT) return ERROR_TIMEOUT;
+    return GetLastError();
 }
 
 void ChunkDiskWorker::Terminate()
@@ -182,7 +186,12 @@ DWORD ChunkDiskWorker::Wait(DWORD timeout_ms)
 
         auto ticks = (timeout_ms != INFINITE) ? GetTickCount() : 0;
         auto err = WaitForSingleObject(wait_event_.get(), timeout_ms);
-        if (err != WAIT_OBJECT_0) return err;
+        if (err != WAIT_OBJECT_0)
+        {
+            if (err == WAIT_ABANDONED) return ERROR_ABANDONED_WAIT_0;
+            if (err == WAIT_TIMEOUT) return ERROR_TIMEOUT;
+            return GetLastError();
+        }
 
         // PostMsg() ignores queue depth so queue may still be full
         ticks = (timeout_ms != INFINITE) ? (GetTickCount() - ticks) : 0;

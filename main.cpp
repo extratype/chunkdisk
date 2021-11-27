@@ -515,7 +515,11 @@ DWORD StopWorkers(ChunkDisk& cdisk, const DWORD timeout_ms = INFINITE)
             }
 
             if (handles.empty()) return ERROR_SUCCESS;
-            return WaitForMultipleObjects(handles.size(), &handles.front(), TRUE, timeout_ms);
+            auto err = WaitForMultipleObjects(handles.size(), &handles.front(), TRUE, timeout_ms);
+            if (WAIT_OBJECT_0 <= err && err < WAIT_OBJECT_0 + handles.size()) return ERROR_SUCCESS;
+            if (WAIT_ABANDONED_0 <= err && err < WAIT_ABANDONED_0 + handles.size()) return ERROR_ABANDONED_WAIT_0;
+            if (err == WAIT_TIMEOUT) return ERROR_TIMEOUT;
+            return GetLastError();
         }
         catch (const bad_alloc&)
         {
