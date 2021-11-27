@@ -216,9 +216,13 @@ private:
     // return buffer to the pool
     DWORD ReturnBuffer(Pages buffer);
 
+    // FIXME overload
     // FIXME comment
     // get shared chunk file handle from the pool
     DWORD OpenChunkAsync(u64 chunk_idx, bool is_write, HANDLE& handle_out, ChunkOpState* state = nullptr);
+
+    // FIXME LOCK_CHUNK not yet?
+    DWORD WaitChunkAsync(u64 chunk_idx, ChunkOpState* state);
 
     // FIXME comment
     // done using the handle from the pool
