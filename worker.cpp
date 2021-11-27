@@ -19,6 +19,12 @@ static constexpr auto LOW_LOAD_THRESHOLD = u32(4);
 static constexpr auto MAX_QD = u32(32);    // QD32
 static constexpr auto STOP_TIMEOUT_MS = u32(5000);
 
+ChunkDiskWorker::~ChunkDiskWorker()
+{
+    auto err = Stop(STOP_TIMEOUT_MS);
+    if (err != ERROR_SUCCESS) Terminate();
+}
+
 // Thread-safety notes
 //
 // * Public functions are called only from the dispatcher thread.
@@ -120,6 +126,46 @@ DWORD ChunkDiskWorker::Stop(DWORD timeout_ms)
     if (err != ERROR_SUCCESS) return err;
 
     return WaitForSingleObject(h, timeout_ms);
+}
+
+void ChunkDiskWorker::Terminate()
+{
+    if (!IsRunning())
+    {
+        iocp_.reset();
+    }
+    else
+    {
+        auto lkw = SRWLock(*mutex_working_, true, std::defer_lock);
+        if (lkw.try_lock())
+        {
+            // FIXME waiting
+            if (!working_.empty())
+            {
+                auto* work = &*working_.begin();
+                while (work != nullptr)
+                {
+                    for (auto& op : work->ops) ReportOpResult(op, ERROR_OPERATION_ABORTED);
+                    if (CompleteWork(work, &work)) break;
+                }
+            }
+            lkw.unlock();
+        }
+        iocp_.reset();
+
+        auto err = WaitForSingleObject(thread_.native_handle(), STOP_TIMEOUT_MS);
+        if (err == WAIT_OBJECT_0) return;
+
+        TerminateThread(thread_.native_handle(), -1);
+        try
+        {
+            thread_.detach();
+        }
+        catch (const std::system_error& e)
+        {
+            return;
+        }
+    }
 }
 
 DWORD ChunkDiskWorker::Wait(DWORD timeout_ms)

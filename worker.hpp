@@ -153,7 +153,7 @@ class ChunkDiskWorker
 public:
     explicit ChunkDiskWorker(ChunkDiskService& service) : service_(service) {}
 
-    ~ChunkDiskWorker() { Stop(); }
+    ~ChunkDiskWorker();
 
     ChunkDiskWorker(ChunkDiskWorker&&) = default;
 
@@ -170,6 +170,9 @@ public:
 
     // StopAsync() and wait for the handle
     DWORD Stop(DWORD timeout_ms = INFINITE);
+
+    // last resort to stop the worker thread
+    void Terminate();
 
     // wait for the request queue
     DWORD Wait(DWORD timeout_ms = INFINITE);
