@@ -110,6 +110,7 @@ DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, bool read_only, unique_ptr<ChunkD
 
         // parse .chunkdisk
         buf.reset();
+        auto parent_r = wstring();
 
         // FIXME test
         auto* state = PWSTR();
@@ -120,8 +121,8 @@ DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, bool read_only, unique_ptr<ChunkD
         if (token == endp || (*endp != L'\r' && *endp != L'\0') || errno == ERANGE)
         {
             // parent
-            parent = wstring(token);
-            if (!parent.empty() && parent[parent.size() - 1] == L'\r') parent.erase(parent.size() - 1);
+            parent_r = wstring(token);
+            if (!parent_r.empty() && parent_r[parent_r.size() - 1] == L'\r') parent_r.erase(parent_r.size() - 1);
 
             // disk size
             token = wcstok_s(nullptr, L"\n", &state);
@@ -132,7 +133,7 @@ DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, bool read_only, unique_ptr<ChunkD
         else
         {
             // no parent
-            parent = L"";
+            parent_r = L"";
         }
 
         // chunk size
@@ -182,6 +183,7 @@ DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, bool read_only, unique_ptr<ChunkD
             std::move(part_max),
             std::move(part_dirname),
             read_only);
+        parent = std::move(parent_r);
     }
     catch (const bad_alloc&)
     {
@@ -202,7 +204,11 @@ DWORD ReadChunkDiskBases(PCWSTR chunkdisk_file, bool read_only, vector<ChunkDisk
     auto base = unique_ptr<ChunkDiskBase>();
     auto parent = wstring();
     auto err = ReadChunkDiskFile(chunkdisk_file, read_only, base, parent);
-    if (err != ERROR_SUCCESS) return err;
+    if (err != ERROR_SUCCESS)
+    {
+        SpdLogErr(L"error: reading %s failed with error %lu", chunkdisk_file, err);
+        return err;
+    }
 
     // read parents and add to bases
     while (true)
@@ -265,6 +271,7 @@ DWORD ReadChunkDiskBases(PCWSTR chunkdisk_file, bool read_only, vector<ChunkDisk
             err = ERROR_SUCCESS;
             break;
         }
+
         // parents are always read_only
         err = ReadChunkDiskFile(parent.data(), true, base, parent);
         if (err != ERROR_SUCCESS) break;
@@ -272,6 +279,9 @@ DWORD ReadChunkDiskBases(PCWSTR chunkdisk_file, bool read_only, vector<ChunkDisk
 
     if (err != ERROR_SUCCESS)
     {
+        // parent not set if error in ReadChunkDiskFile()
+        SpdLogErr(L"error: reading %s failed with error %lu",
+                  bases.empty() ? chunkdisk_file : parent.data(), err);
         bases.clear();
         return err;
     }
@@ -421,12 +431,7 @@ DWORD CreateStorageUnit(PWSTR chunkdisk_file, BOOLEAN write_protected, PWSTR pip
     // read chunkdisk file
     auto bases = vector<ChunkDiskBase>();
     auto err = ReadChunkDiskBases(chunkdisk_file, write_protected, bases);
-    if (err != ERROR_SUCCESS)
-    {
-        // FIXME detail log
-        SpdLogErr(L"error: parsing failed with error %lu", err);
-        return err;
-    }
+    if (err != ERROR_SUCCESS) return err;
 
     // create WinSpd unit
     SPD_STORAGE_UNIT* unit = nullptr;
