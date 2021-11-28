@@ -224,7 +224,7 @@ DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, co
     // Note that a file can still be extended with FILE_APPEND_DATA flag unset
     // https://docs.microsoft.com/en-us/windows/win32/fileio/file-security-and-access-rights
     //
-    // FIXME is_locked
+    // FIXME comment is_locked
     const auto desired_access = GENERIC_READ | (is_write ? GENERIC_WRITE : 0)
         | ((is_write && is_locked) ? DELETE : 0);
 

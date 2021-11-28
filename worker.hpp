@@ -209,7 +209,6 @@ private:
 
     // post an internal message to this worker
     // ignore queue depth, no response
-    // FIXME currently for REFRESH_CHUNK only
     // msg moved, invalidates ChunkOpState::owner
     DWORD PostMsg(ChunkWork msg);
 
@@ -256,13 +255,18 @@ private:
     // try to complete some ops immediately (abort if one of them fails)
     DWORD PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_addr, u32 count, LPVOID& buffer);
 
-    // initiate async I/O to post CK_IO to IOCP
-    // ReportOpResult() if failed synchronously, return error code
+    // chunk_idx from state
+    u64 GetChunkIndex(ChunkOpState& state);
+
+    // do an asynchronous operation
+    // ERROR_IO_PENDING if not done
+    // ReportOpResult() if done (skipped CK_IO) or failed synchronously, return error code
     DWORD PostOp(ChunkOpState& state);
 
-    // check async I/O result
-    // ReportOpResult() if completed or next step
-    void CompleteIO(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
+    // dequeued CK_IO, check async I/O result
+    // ERROR_IO_PENDING if not done
+    // ReportOpResult() if done or an error occurred, return error code
+    DWORD CompleteIO(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
 
     // check if all ops are completed, send response and remove work
     // lock required if next != nullptr
@@ -287,7 +291,7 @@ private:
     // ChunkDiskService::FlushPages() and wait for a busy page
     DWORD FlushPagesAsync(ChunkOpState& state, const PageRange& r);
 
-    // state.step == OP_READY || state.step == OP_READ_PAGE, OP_ZERO_CHUNK FIXME comment
+    // FIXME comment
     DWORD PostLockChunk(ChunkOpState& state, u64 chunk_idx, bool create_new);
 
     // FIXME comment
@@ -296,7 +300,7 @@ private:
     // FIXME comment
     DWORD PostUnlockChunk(ChunkOpState& state, u64 chunk_idx);
 
-    DWORD CreateChunkLocked(ChunkOpState& state, u64 chunk_idx);
+    DWORD CreateChunkLocked(ChunkOpState& state);
 
     static void CreateChunkLockedProc(LPVOID param);
 
@@ -305,12 +309,9 @@ private:
     // make chunk empty (truncate)
     DWORD UnmapChunkLocked(ChunkOpState& state, u64 chunk_idx);
 
-    // handle asynchronous EOF when unmap then read
-    DWORD CheckAsyncEOF(ChunkOpState& state);
-
     DWORD PostReadChunk(ChunkOpState& state);
 
-    void CompleteReadChunk(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
+    DWORD CompleteReadChunk(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
 
     // prepare zero-filled buffer shared by WRITE_CHUNK ops
     DWORD PrepareZeroChunk(ChunkWork* work);
@@ -318,20 +319,22 @@ private:
     // zero-fill if buffer is nullptr
     DWORD PostWriteChunk(ChunkOpState& state);
 
-    void CompleteWriteChunk(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
+    DWORD CompleteWriteCreateChunk(ChunkOpState& state, DWORD error);
+
+    DWORD CompleteWriteChunk(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
 
     // used by READ_PAGE and WRITE_PAGE_PARTIAL
     DWORD PostReadPage(ChunkOpState& state);
 
-    void CompleteReadPage(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
+    DWORD CompleteReadPage(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
 
     // zero-fill if buffer is nullptr
     DWORD PostWritePage(ChunkOpState& state);
 
     // OP_READY -> OP_READ_PAGE
-    void CompleteWritePartialReadPage(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
+    DWORD CompleteWritePartialReadPage(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
 
-    void CompleteWritePage(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
+    DWORD CompleteWritePage(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
 
     DWORD PostUnmapChunk(ChunkOpState& state);
 
