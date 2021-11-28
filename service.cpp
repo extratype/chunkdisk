@@ -461,7 +461,7 @@ DWORD ChunkDiskService::UnmapRange(SRWLock& lk, const u64 chunk_idx, const u64 s
     lk = SRWLock(mutex_unmapped_, true);
     try
     {
-        auto rit = chunk_unmapped_.try_emplace(chunk_idx).first;
+        auto [rit, emplaced] = chunk_unmapped_.try_emplace(chunk_idx);
         auto& ranges = rit->second;
 
         // add range [start_off, end_off)
@@ -482,7 +482,18 @@ DWORD ChunkDiskService::UnmapRange(SRWLock& lk, const u64 chunk_idx, const u64 s
                 new_start = true;
             }
         }
-        if (new_start) start = ranges.emplace(start_off, end_off).first;
+        if (new_start)
+        {
+            try
+            {
+                start = ranges.emplace(start_off, end_off).first;
+            }
+            catch (const bad_alloc&)
+            {
+                if (emplaced) chunk_unmapped_.erase(rit);
+                return ERROR_NOT_ENOUGH_MEMORY;
+            }
+        }
 
         auto it = start;
         for (++it; it != end; ++it)
