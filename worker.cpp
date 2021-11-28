@@ -720,18 +720,24 @@ DWORD ChunkDiskWorker::CloseChunkAsync(const u64 chunk_idx, const bool is_write)
     }
     // handles closed in OpenChunkAsync() or PeriodicCheck()
 
-    // FIXME maybe in dispatcher
+    // maybe in dispatcher FIXME comment
     if (cfh.locked && cfh.refs_ro == 0 && cfh.refs_rw == 0)
     {
         cfh.handle_ro.reset();
         cfh.handle_rw.reset();
 
-        // FIXME fatal
-        auto msg = ChunkWork();
-        auto user = LPVOID();
-        PrepareMsg(msg, WAIT_CHUNK, chunk_idx);
-        service_.CheckChunkLocked(chunk_idx, user);
-        recast<ChunkDiskWorker*>(user)->PostMsg(std::move(msg));
+        auto err = [this, chunk_idx]() -> DWORD
+        {
+            auto msg = ChunkWork();
+            auto err = PrepareMsg(msg, WAIT_CHUNK, chunk_idx);
+            if (err != ERROR_SUCCESS) return err;
+            auto user = LPVOID();
+            if (!service_.CheckChunkLocked(chunk_idx, user)) return ERROR_NOT_FOUND;
+            err = recast<ChunkDiskWorker*>(user)->PostMsg(std::move(msg));
+            return err == ERROR_IO_PENDING ? ERROR_SUCCESS : err;
+        }();
+        // fatal
+        if (err != ERROR_SUCCESS) SpdStorageUnitShutdown(service_.storage_unit);
     }
 
     return ERROR_SUCCESS;
@@ -752,12 +758,18 @@ DWORD ChunkDiskWorker::LockChunk(const u64 chunk_idx)
             cfh.handle_ro.reset();
             cfh.handle_rw.reset();
 
-            // FIXME fatal
-            auto msg = ChunkWork();
-            auto user = LPVOID();
-            PrepareMsg(msg, WAIT_CHUNK, chunk_idx);
-            service_.CheckChunkLocked(chunk_idx, user);
-            recast<ChunkDiskWorker*>(user)->PostMsg(std::move(msg));
+            auto err = [this, chunk_idx]() -> DWORD
+            {
+                auto msg = ChunkWork();
+                auto err = PrepareMsg(msg, WAIT_CHUNK, chunk_idx);
+                if (err != ERROR_SUCCESS) return err;
+                auto user = LPVOID();
+                if (!service_.CheckChunkLocked(chunk_idx, user)) return ERROR_NOT_FOUND;
+                err = recast<ChunkDiskWorker*>(user)->PostMsg(std::move(msg));
+                return err == ERROR_IO_PENDING ? ERROR_SUCCESS : err;
+            }();
+            // fatal
+            if (err != ERROR_SUCCESS) SpdStorageUnitShutdown(service_.storage_unit);
         }
 
         return ERROR_SUCCESS;
@@ -768,11 +780,11 @@ DWORD ChunkDiskWorker::LockChunk(const u64 chunk_idx)
     }
 }
 
-void ChunkDiskWorker::UnlockChunk(const u64 chunk_idx)
+DWORD ChunkDiskWorker::UnlockChunk(const u64 chunk_idx)
 {
     auto lk = SRWLock(*mutex_handles_, true);
     auto it = chunk_handles_.find(chunk_idx);
-    if (it == chunk_handles_.end()) return;
+    if (it == chunk_handles_.end()) return ERROR_NOT_FOUND;
     auto waiting = std::move((*it).second.waiting);
     chunk_handles_.erase(it);
     lk.unlock();
@@ -782,6 +794,7 @@ void ChunkDiskWorker::UnlockChunk(const u64 chunk_idx)
         op->step = OP_READY; // FIXME previous step?
         if (PostOp(*op) != ERROR_SUCCESS) CompleteWork(op->owner);
     }
+    return ERROR_SUCCESS;
 }
 
 DWORD ChunkDiskWorker::PreparePageOps(ChunkWork& work, const bool is_write, const u64 page_idx,

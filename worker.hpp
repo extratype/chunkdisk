@@ -232,10 +232,10 @@ private:
     DWORD CloseChunkAsync(u64 chunk_idx, bool is_write);
 
     // lock chunk file handle for LOCK_CHUNK
-    void LockChunk(u64 chunk_idx);
+    DWORD LockChunk(u64 chunk_idx);
 
     // unlock chunk file handle for UNLOCK_CHUNK
-    void UnlockChunk(u64 chunk_idx);
+    DWORD UnlockChunk(u64 chunk_idx);
 
     // for READ_PAGE, WRITE_PAGE, WRITE_PAGE_PARTIAL
     // start_off, end_off: block offset in page

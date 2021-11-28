@@ -160,7 +160,7 @@ public:
 
     bool CheckChunkLocked(u64 chunk_idx, LPVOID& user);
 
-    void UnlockChunk(u64 chunk_idx);
+    DWORD UnlockChunk(u64 chunk_idx);
 
     // mark [start_off, end_off) unmapped
     // return ERROR_SUCCESS and reset ranges if whole, ERROR_IO_PENDING otherwise
