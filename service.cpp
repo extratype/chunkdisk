@@ -7,7 +7,6 @@
 #include "service.hpp"
 #include <unordered_set>
 #include <filesystem>
-#include "utils.hpp"
 
 using std::bad_alloc;
 
@@ -36,28 +35,6 @@ DWORD ChunkDiskService::Start()
             return err;
         }
     }
-    return ERROR_SUCCESS;
-}
-
-DWORD ChunkDiskService::UnmapChunk(const u64 chunk_idx)
-{
-    auto lkp = SRWLock(mutex_parts_, false);
-
-    auto part_it = chunk_parts_.find(chunk_idx);
-    if (part_it == chunk_parts_.end()) return ERROR_FILE_NOT_FOUND;
-
-    auto part_idx = part_it->second;
-    auto path = params.part_dirname[part_idx] + L"\\chunk" + std::to_wstring(chunk_idx);
-
-    auto h = FileHandle(CreateFileW(
-        path.data(),
-        GENERIC_READ | GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING, nullptr));
-    if (!h) return GetLastError();
-    if (!SetEndOfFile(h.get())) return GetLastError();
-
     return ERROR_SUCCESS;
 }
 

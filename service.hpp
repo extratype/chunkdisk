@@ -107,10 +107,6 @@ public:
     // start bases
     DWORD Start();
 
-    // FIXME unmap
-    // make chunk empty (truncate)
-    DWORD UnmapChunk(u64 chunk_idx);
-
     // acquire shared lock for reading an existing page
     // read ptr and don't call LockPage(page_idx) while holding ptr
     // ERROR_LOCK_FAILED: the page is locked by the current thread

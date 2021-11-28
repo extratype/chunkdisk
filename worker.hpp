@@ -219,12 +219,12 @@ private:
     // return buffer to the pool
     DWORD ReturnBuffer(Pages buffer);
 
-    // FIXME overload
     // FIXME comment
     // get shared chunk file handle from the pool
     DWORD OpenChunkAsync(u64 chunk_idx, bool is_write, HANDLE& handle_out, ChunkOpState* state = nullptr);
 
     // FIXME LOCK_CHUNK not yet?
+    // FIXME comment
     DWORD WaitChunkAsync(u64 chunk_idx, ChunkOpState* state);
 
     // FIXME comment
@@ -251,7 +251,7 @@ private:
                           u64 start_off, u64 end_off, LPVOID& buffer);
 
     // add ops to work
-    // kind: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK, FIXME REFRESH_CHUNK
+    // kind: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK
     // buffer: buffer address for ops, to be updated
     // try to complete some ops immediately (abort if one of them fails)
     DWORD PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_addr, u32 count, LPVOID& buffer);
@@ -287,14 +287,23 @@ private:
     // ChunkDiskService::FlushPages() and wait for a busy page
     DWORD FlushPagesAsync(ChunkOpState& state, const PageRange& r);
 
-    // FIXME
-    DWORD PostLockChunk(ChunkOpState& state, u64 chunk_idx);
+    // state.step == OP_READY || state.step == OP_READ_PAGE, OP_ZERO_CHUNK FIXME comment
+    DWORD PostLockChunk(ChunkOpState& state, u64 chunk_idx, bool create_new);
 
-    // FIXME
-    void LockingChunk(ChunkOpState& state);
+    // FIXME comment
+    DWORD LockingChunk(ChunkOpState& state, u64 chunk_idx);
 
-    // FIXME
+    // FIXME comment
     DWORD PostUnlockChunk(ChunkOpState& state, u64 chunk_idx);
+
+    DWORD CreateChunkLocked(ChunkOpState& state, u64 chunk_idx);
+
+    static void CreateChunkLockedProc(LPVOID param);
+
+    DWORD DoCreateChunkLocked(ChunkOpState& state, HANDLE handle_ro, HANDLE handle_rw);
+
+    // make chunk empty (truncate)
+    DWORD UnmapChunkLocked(ChunkOpState& state, u64 chunk_idx);
 
     // handle asynchronous EOF when unmap then read
     DWORD CheckAsyncEOF(ChunkOpState& state);
@@ -323,6 +332,8 @@ private:
     void CompleteWritePartialReadPage(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
 
     void CompleteWritePage(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
+
+    DWORD PostUnmapChunk(ChunkOpState& state);
 
     // operation completed, report to the owner ChunkWork
     void ReportOpResult(ChunkOpState& state, DWORD error = ERROR_SUCCESS);
