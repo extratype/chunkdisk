@@ -109,7 +109,6 @@ public:
     bool CheckChunk(u64 chunk_idx);
 
     /*
-     * FIXME design.txt
      * Open an FileHandle to access a chunk.
      *
      * Open as read-write if is_write and read-only otherwise.

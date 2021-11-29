@@ -295,7 +295,7 @@ DWORD ChunkDiskService::UnlockPage(const u64 page_idx, bool remove)
 
 DWORD ChunkDiskService::FlushPages(const PageRange& r, LPVOID& user)
 {
-    auto g = SRWLock(mutex_pages_, false);
+    auto lk = SRWLock(mutex_pages_, false);
 
     for (auto i = r.start_idx; i <= r.end_idx; ++i)
     {
@@ -303,10 +303,10 @@ DWORD ChunkDiskService::FlushPages(const PageRange& r, LPVOID& user)
         auto it = cached_pages_.find(r.base_idx + i);
         if (it == cached_pages_.end()) continue;
 
-        auto err = RemovePageEntry(g, it);
+        auto err = RemovePageEntry(lk, it);
         if (err == ERROR_LOCK_FAILED)
         {
-            // g not reset if ERROR_LOCK_FAILED
+            // lk not reset if ERROR_LOCK_FAILED
             user = (*it).second.user;
             return ERROR_LOCK_FAILED;
         }
@@ -321,12 +321,12 @@ DWORD ChunkDiskService::FlushPages(const PageRange& r, LPVOID& user)
 
 DWORD ChunkDiskService::FlushPages()
 {
-    auto g = SRWLock(mutex_pages_, false);
+    auto lk = SRWLock(mutex_pages_, false);
     auto err = DWORD(ERROR_SUCCESS);
 
     while (!cached_pages_.empty())
     {
-        // RemovePageEntry() resets g
+        // RemovePageEntry() resets lk
         // Iterating over cached_pages_ is not thread safe
         const auto size = cached_pages_.size();
         auto pages = std::vector<u64>();
@@ -344,7 +344,7 @@ DWORD ChunkDiskService::FlushPages()
             auto it = cached_pages_.find(idx);
             if (it == cached_pages_.end()) continue;
 
-            auto err1 = RemovePageEntry(g, it);
+            auto err1 = RemovePageEntry(lk, it);
             if (err1 != ERROR_SUCCESS) err = err1;
         }
 

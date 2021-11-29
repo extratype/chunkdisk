@@ -78,7 +78,7 @@ DWORD ChunkDiskBase::Start()
     const auto num_parts = part_dirname.size();
     auto err = DWORD(ERROR_SUCCESS);
 
-    // put a lock file to prevent accidental double use
+    // put a lock file to prevent mistakes accidental double use
     try
     {
         // base of a differential disk if read_only
@@ -88,7 +88,8 @@ DWORD ChunkDiskBase::Start()
         const auto share_mode = read_only ? FILE_SHARE_READ : 0;
         // .lock should be removed manually after merging
         const auto cr_disp = read_only ? OPEN_ALWAYS : CREATE_NEW;
-        // disallow writing on base until merged, persistent .lock
+        // no double mount for write: temporary .lock
+        // disallow writing on base until merged: persistent .lock
         const auto flags_attrs = FILE_ATTRIBUTE_NORMAL | (read_only ? 0 : FILE_FLAG_DELETE_ON_CLOSE);
 
         for (auto i = size_t(0); i < num_parts; ++i)
@@ -189,10 +190,10 @@ DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, co
                         return new_part;
                     }
                 }
-                // the following code is not reachable because
+                // the following lines are not reachable because
                 // part_current_new_ is initially zero,
                 // ReadChunkDiskFile() checks total part_max,
-                // FIXME comment: WinSpd checks requested addresses
+                // and WinSpd checks requested addresses
                 for (auto new_part = size_t(0); new_part < part_current_new_; ++new_part)
                 {
                     if (part_current_[new_part] < part_max[new_part])
@@ -206,7 +207,6 @@ DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, co
         }
     }
 
-    // FIXME comment: check existence when starting I/O
     const auto part_found = (part_it != chunk_parts_.end());
     if (!is_write && !part_found)
     {
@@ -224,7 +224,7 @@ DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, co
     // Note that a file can still be extended with FILE_APPEND_DATA flag unset
     // https://docs.microsoft.com/en-us/windows/win32/fileio/file-security-and-access-rights
     //
-    // FIXME comment is_locked
+    // DELETE required for FILE_DISPOSITION_INFO{TRUE}
     const auto desired_access = GENERIC_READ | (is_write ? GENERIC_WRITE : 0)
         | ((is_write && is_locked) ? DELETE : 0);
 
@@ -243,7 +243,8 @@ DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, co
 
     if (is_write && !part_found)
     {
-        // FIXME comment: create non-empty chunk file or nothing
+        // create non-empty chunk file or nothing
+        // file should not exist
         auto h_locked = FileHandle(CreateFileW(
             path.data(), desired_access | DELETE, 0, nullptr,
             CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
@@ -260,7 +261,7 @@ DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, co
         {
             try
             {
-                // lk switched to exclusive
+                // lk was switched to exclusive
                 chunk_parts_[chunk_idx] = part_idx;
                 ++part_current_[part_idx];
             }
@@ -288,6 +289,7 @@ DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, co
         }
     }
 
+    // file should exist
     auto h = FileHandle(CreateFileW(
         path.data(), desired_access, share_mode, nullptr,
         OPEN_EXISTING, flags_attrs, nullptr));

@@ -1,6 +1,14 @@
+sparse chunk?
+    set chunk size small, or
+    set sparse manually
+
 Trigger unmap for all unused sectors: defrag X: /L
     consolidate free space: defrag X: /X
 
 TODO check partition -> TRIM -> shrink -> remove orphan empty chunks
 
 TODO consolidate $MFT, $INDEX
+
+TODO merge base + differential: overwrite
+
+TODO base -> read cache (SSD) -> diff (SSD)

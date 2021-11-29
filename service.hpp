@@ -3,7 +3,7 @@
  *
  * @copyright 2021 extratype
  *
- * Provide core functionality for workers.
+ * Provide shared resources for workers.
  */
 
 #ifndef CHUNKDISK_SERVICE_HPP_
@@ -70,7 +70,6 @@ struct PageEntry
 class ChunkDiskService
 {
 public:
-    // FIXME params -> bases[0]
     // current: bases[0], parent: bases[1] and so on, if any
     // don't insert or erase after Start()
     std::vector<ChunkDiskBase> bases;
@@ -145,17 +144,22 @@ public:
     // CheckChunk() from current to parents, return bases.size() if all false.
     size_t FindChunk(u64 chunk_idx);
 
-    // Open a chunk file handle for I/O.
-    // FIXME comment
+    // Open a chunk file handle for I/O. See ChunkDiskBase::CreateChunk().
+    // use base[0] if !is_write
     DWORD CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool is_write, bool is_locked = false);
 
-    // FIXME comment
+    // add (chunk_idx, user) to chunk_lock_
+    // return ERROR_LOCKED and user if chunk_idx already exists
     DWORD LockChunk(u64 chunk_idx, LPVOID& user);
 
+    // check chunk_idx in chunk_lock_
     bool CheckChunkLocked(u64 chunk_idx);
 
+    // check chunk_idx in chunk_lock_
+    // return user if exists
     bool CheckChunkLocked(u64 chunk_idx, LPVOID& user);
 
+    // remove chunk_idx in chunk_lock_
     DWORD UnlockChunk(u64 chunk_idx);
 
     // mark [start_off, end_off) unmapped
@@ -163,8 +167,10 @@ public:
     // lk: empty, hold mutex_unmapped_ when ERROR_SUCCESS or ERROR_IO_PENDING returned
     DWORD UnmapRange(SRWLock& lk, u64 chunk_idx, u64 start_off, u64 end_off);
 
+    // remove marked unmap ranges for chunk_idx
     void FlushUnmapRanges(u64 chunk_idx);
 
+    // remove all marked unmap ranges
     void FlushUnmapRanges();
 
     // last disk I/O request

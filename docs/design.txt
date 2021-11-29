@@ -3,24 +3,43 @@ C++, WinSpd
 Disk metadata file: name.chunkdisk
     disk_size
     chunk_size
-    num_of_chunks path/to/dir/prefix...
+    num_of_chunks path/to/dir/      # first part
+    num_of_chunks path/to/dir/...   # ...
 
-Create chunk:
-    directory (part): choose from top to bottom
+Differential disk: name.chunkdisk
+    parent_file                     # maybe differential, for read only
+    disk_size                       # same as parent
+    chunk_size                      # same as parent
+    num_of_chunks path/to/dir/      # first part for this disk
+    num_of_chunks path/to/dir/...   # ...
+
+Chunk files:
+    part: choose first, second, ... part when creating
     file name: chunk###
-    file size: 0 or chunk_size; empty or full, never removed
-    sparse chunk?
-        set chunk size small, or
-        set sparse manually
+    file size: 0 or chunk_size; empty or full
+    file never removed after created
 
-Read: ReadFile()
+Read():
+    current -> parent -> ...
+    ReadFile()
     chunk not found or empty: zero-fill buffer
 
-Write: WriteFile()
+Write():
+    current only
+    WriteFile()
+    not found at all: full chunk
+    not found in current and found in parent:
+        exclusive (locked) access
+        copy parent to current
 
-Unmap (a.k.a. TRIM):
-    unmap range >= chunk: Truncate (Set size to 0)
-    unmap range <  chunk: FSCTL_SET_ZERO_DATA (supports sparse files)
+Unmap(): a.k.a. TRIM
+    unmap range <  chunk:
+        FSCTL_SET_ZERO_DATA, which supports sparse files
+        zero-fill if not supported
+
+    unmap range >= chunk:
+        exclusive access
+        make it empty by truncating
 
 Asynchronous I/O:
     for best asynchronous performance
@@ -35,18 +54,27 @@ Asynchronous I/O:
                 Windows caches virtual disk
                 Cluster size is 4096 bytes by default
 
-    Close file handles if idle to trigger metadata updates
+Close file handles if idle to trigger metadata updates
 
 --------------------------------------------------------------------------------
 
-One worker thread per dispatcher thread:
-    Bypass/Synchronous/Asynchronous I/O
+ChunkDiskBase:
+    disk parameters
+    count num_of_chunks for each part
+    remember part id for each chunk file
+
+    .lock file:
+        to prevent mistakes
+        no double mount for write access: remove .lock when exiting
+        deny write access if have been opened as parent: persistent .lock
+
+    CheckChunk(idx)
+    CreateChunk(idx, is_write, is_locked) -> FileHandle
+    RemoveChunkLocked(idx, handle) FIXME comment
 
 ChunkDiskService:
-    Chunks:
-        .lock to prevent accidental double mount
-        CreateChunk(): create/open
-        UnmapChunk(): truncate
+    vector<ChunkDiskBase> bases:
+        current, parent, ...
 
     Pages:
         PeekPage(): concurrent read access
@@ -54,6 +82,13 @@ ChunkDiskService:
         UnlockPage()
         FlushPages(range)
         FlushPages()
+
+    Chunks:
+        FindChunk(): find ChunkDiskBase
+        CreateChunk(): create/open, read/write, shared/exclusive(locked)
+        LockChunk(): mark chunk locked
+        CheckChunkLocked(): check if locked
+        UnlockChunk(): clear chunk lock
 
     Unmap Ranges:
         UnmapRange(chunk, range): merge ranges, check if whole
@@ -64,9 +99,24 @@ ChunkDiskService:
         SetPostFileTime()
         GetPostFileTime()
 
+One worker thread per dispatcher thread
+
+I/O
+    Immediate
+        bypass I/O or do synchronously
+        with file handle not associated with IOCP
+
+    Synchronous
+        done synchronously with file handle assocaited with IOCP
+        packet sent if successful
+
+    Asynchronous
+        done asynchronously (ERROR_IO_PENDING)
+        packet sent, check results later
+
 ChunkDiskWorker:
     Pools:
-        file handles
+        chunk file handles
             shared among ops
             LRU policy, <= QD 32
 
@@ -75,14 +125,14 @@ ChunkDiskWorker:
             1048576 + 4096 bytes to shift buffer and align to page
             LIFO policy
 
-    Request → ChunkWork:
+    Request/Message → ChunkWork:
         ops: ChunkOpState array
             * chunk operations
             * page operations
             * no mixing of Read(), Write() or Unmap()
 
         buffer: from pool
-            copy from DataBuffer for Write()
+            copy DataBuffer for Write()
             Read():
                 respond with buffer for asynchronous I/O operations
                 copy to DataBuffer for immediate I/O operations
@@ -106,19 +156,26 @@ ChunkDiskWorker:
                 partial unmap if and only if write operation with buffer nullptr
                 zero-fill using FSCTL_SET_ZERO_DATA (see below)
 
+        Messages: post IOCP packet directly
+            * locking chunk file handle
+
     Event loop using IOCP:
         1. PostWork() in the dispatcher thread
             prepare ChunkWork, ChunkOpState
             do immediate I/O operations
             Post ChunkWork for asynchronous I/O
 
-        2. Post an asynchronous request for each ChunkOpState
-            ReadFile(), WriteFile(), DeviceIoControl()
+        2. PostOp()
+            do single asynchronous operation
+            like ReadFile(), WriteFile(), DeviceIoControl()
 
-        3. Complete ChunkOpState
-            check result
-            complete ChunkWork if all done
-                send response to WinSpd
+        3. CompleteIO()
+            check result for the asynchronous operation
+            check if ChunkOpState completed
+
+        4. CompleteWork()
+            complete ChunkWork if all ChunkOpState are done
+            send response to WinSpd
 
         Idle timer:
             GetQueuedCompletionStatus() timed out
@@ -134,7 +191,7 @@ ChunkDiskWorker:
                         service.FlushUnmapRanges()
             wait indefinitely
 
-        Check low activity when active:
+        Check idle file handles:
             Count max. load of pool
             PeriodicCheck():
                 check if low
@@ -148,6 +205,8 @@ ChunkDiskWorker:
         Remove from list:
             ChunkWork completed
             signal list
+
+        no QD for messages
 
 Synchronize pages:
     flush pages before aligned read/write
@@ -166,11 +225,37 @@ Synchronize pages:
             Traverse next and set ChunkOpState::next when LockPage() fails
             Retry when UnlockPage()
 
-Asynchronous I/O:
-    Aligned read/write:
+Lock chunk file handle:
+    mark chunk locked, wait for it if already locked...
+
+    broadcast a message to lock the handles...
+        ChunkOpState: add to waiting list if locked...
+
+    wait for the existing references to be closed...
+        reply with a message to the sender
+
+    open handle exclusively (locked)
+    do an operation...
+
+    broadcast a message to unlock the handles...
+        resume ChunkOpState's in the waiting list
+
+FIXME comment
+Asynchronous Read(), Write():
+    Aligned read:
         OpenChunk()
         FlushPages(range)...
-        ReadFile()/WriteFile()/DeviceIoControl(FSCTL_SET_ZERO_DATA)...
+        ReadFile()...
+        CloseChunk()
+
+    Aligned write or zero-fill:
+        OpenChunk()
+        FlushPages(range)...
+        WriteFile() or DeviceIoControl(FSCTL_SET_ZERO_DATA)...
+            DeviceIoControl(FSCTL_SET_ZERO_DATA) not supported?
+                set owner ChunkWork buffer from pool
+                zero-fill buffer
+                repeat WriteFile()...
         CloseChunk()
 
     Unaligned read:
@@ -195,10 +280,7 @@ Asynchronous I/O:
 Unmap():
     whole chunk: service.UnmapChunk()
     partial: zero-fill
-        DeviceIoControl(FSCTL_SET_ZERO_DATA) not supported?
-            set owner ChunkWork buffer from pool
-            zero-fill buffer
-            WriteFile()...
+
 
     Merge unmap ranges:
         in a single request:
@@ -212,20 +294,20 @@ Unmap():
                 failure: service.FlushUnmapRanges(chunk)
                 success: atomic service.UnmapRange() and service.UnmapChunk()
 
-    Synchronize file handles in all workers:
-        Unmap() then Write(): incorrect chunk size
-            cancel pending asynchronous read/write
-            refresh chunk state for all workers:
-                mark as pending
+FIXME Synchronize file handles in all workers:
+    Unmap() then Write(): incorrect chunk size
+        cancel pending asynchronous read/write
+        refresh chunk state for all workers:
+            mark as pending
 
-                CloseChunk():
-                    fix chunk size if opened as read-write
-                    close handle
+            CloseChunk():
+                fix chunk size if opened as read-write
+                close handle
 
-                OpenChunk():
-                    return empty handle if chunk is empty
-                    fix chunk size
-                    clear mark
+            OpenChunk():
+                return empty handle if chunk is empty
+                fix chunk size
+                clear mark
 
-        Unmap() then Read(): EOF
-            read successful if zero bytes read and chunk is empty
+    Unmap() then Read(): EOF
+        read successful if zero bytes read and chunk is empty

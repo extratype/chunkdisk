@@ -1,5 +1,3 @@
-* differential (take snapshots and merge later) disk
-    - parent disk path at first line (maybe nested)
-    - smaller chunk size: chunk###-###
-    - copy chunk on write
-    - copy chunk on read, as cache?
+profile performance (kernel time, user time) for SSD 4K I/O
+    locks
+    data structure

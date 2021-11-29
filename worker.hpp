@@ -57,6 +57,7 @@ struct ChunkWork
     u32 num_errors = 0;                         // failed ops out of num_completed
 
     // Status: the first reported error
+    // response sent to WinSpd if Hint is nonzero
     SPD_IOCTL_TRANSACT_RSP response = {};
 
     void SetContext(u64 hint, u8 kind)
@@ -79,6 +80,8 @@ struct ChunkWork
 };
 
 // single operation in ChunkWork
+// ovl: state for single step, as OVERLAPPED argument or custom
+// buffer: inside owner->buffer or custom
 struct ChunkOpState
 {
     OVERLAPPED ovl = {};            // specify file offset
@@ -105,6 +108,15 @@ static ChunkOpState* GetOverlappedOp(OVERLAPPED* ovl)
     return CONTAINING_RECORD(ovl, ChunkOpState, ovl);
 }
 
+/**
+ * Locking chunk file handles
+ *
+ * 1. Acquire service_.LockChunk().
+ * 2. Broadcast LOCK_CHUNK, stop opening (OP_LOCKING).
+ * 3. Reply WAIT_CHUNK to the sender after existing references are closed.
+ * 4. Open handle with service_.CreateChunk(is_locked = true) (OP_LOCKED).
+ */
+
 struct ChunkFileHandle
 {
     FileHandle handle_ro;               // read-only, for !is_write
@@ -112,7 +124,6 @@ struct ChunkFileHandle
     u32 refs_ro = 0;                    // close later if zero
     u32 refs_rw = 0;                    // close later if zero
 
-    // FIXME comment
     bool locked = false;                // OP_LOCKING or OP_LOCKED somewhere
     std::vector<ChunkOpState*> waiting; // ops waiting for !locked
 };
@@ -218,24 +229,29 @@ private:
     // return buffer to the pool
     DWORD ReturnBuffer(Pages buffer);
 
-    // FIXME comment
-    // get shared chunk file handle from the pool
+    // service_.CreateChunk() or get shared chunk file handle from the pool.
+    // The handle is associated with iocp_.
+    // ERROR_LOCK_FAILED if locking is required.
+    // If locked, wait for it asynchronously if state given or ERROR_SHARING_VIOLATION.
     DWORD OpenChunkAsync(u64 chunk_idx, bool is_write, HANDLE& handle_out, ChunkOpState* state = nullptr);
 
-    // FIXME LOCK_CHUNK not yet?
-    // FIXME comment
+    // Asynchronously wait for a locked chunk manually.
     DWORD WaitChunkAsync(u64 chunk_idx, ChunkOpState* state);
 
-    // FIXME comment
     // done using the handle from the pool
+    // Step 3. in locking chunk file handles
+    // garbage-collect it from the pool if remove
     DWORD CloseChunkAsync(u64 chunk_idx, bool is_write, bool remove = false);
 
-    DWORD PurgeChunkWrite(u64 chunk_idx);
+    // FIXME comment
+    DWORD RefreshChunkWrite(u64 chunk_idx);
 
     // lock chunk file handle for LOCK_CHUNK
+    // Step 2. in locking chunk file handles
     DWORD LockChunk(u64 chunk_idx);
 
     // unlock chunk file handle for UNLOCK_CHUNK
+    // retry operations in the waiting list
     DWORD UnlockChunk(u64 chunk_idx);
 
     // for READ_PAGE, WRITE_PAGE, WRITE_PAGE_PARTIAL
@@ -257,7 +273,7 @@ private:
     // try to complete some ops immediately (abort if one of them fails)
     DWORD PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_addr, u32 count, LPVOID& buffer);
 
-    // chunk_idx from state
+    // always get chunk_idx from ChunkOpState::idx
     u64 GetChunkIndex(ChunkOpState& state);
 
     // do an asynchronous operation
@@ -293,19 +309,22 @@ private:
     // ChunkDiskService::FlushPages() and wait for a busy page
     DWORD FlushPagesAsync(ChunkOpState& state, const PageRange& r);
 
-    // FIXME comment
+    // Step 1. and 2. in locking chunk file handles
+    // Internal, InternalHigh, hEvent in state.ovl are set
     DWORD PostLockChunk(ChunkOpState& state, u64 chunk_idx, bool create_new);
 
-    // FIXME comment
+    // waiting for Step 3. in locking chunk file handles
+    // Step 4. and forward if done
     DWORD LockingChunk(ChunkOpState& state, u64 chunk_idx);
 
-    // FIXME comment
+    // close and unlock handles, broadcast UNLOCK_CHUNK
     DWORD PostUnlockChunk(ChunkOpState& state, u64 chunk_idx);
 
+    // start copying parent to current after OP_LOCKED
+    // hEvent in state.ovl is set
     DWORD CreateChunkLocked(ChunkOpState& state);
 
-    static void CreateChunkLockedProc(LPVOID param);
-
+    // copy parent to current or nothing
     DWORD DoCreateChunkLocked(ChunkOpState& state, HANDLE handle_ro, HANDLE handle_rw);
 
     // make chunk empty (truncate)
@@ -344,6 +363,7 @@ private:
 
     DWORD CompleteWritePage(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
 
+    // lock and unmap chunk
     DWORD PostUnmapChunk(ChunkOpState& state);
 
     // operation completed, report to the owner ChunkWork
