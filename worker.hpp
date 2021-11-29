@@ -243,7 +243,8 @@ private:
     // garbage-collect it from the pool if remove
     DWORD CloseChunkAsync(u64 chunk_idx, bool is_write, bool remove = false);
 
-    // FIXME comment
+    // Reset handle_rw if not being used, ERROR_BUSY otherwise
+    // ERROR_NOT_FOUND if entry not found
     DWORD RefreshChunkWrite(u64 chunk_idx);
 
     // lock chunk file handle for LOCK_CHUNK

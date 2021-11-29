@@ -671,7 +671,7 @@ DWORD ChunkDiskWorker::OpenChunkAsync(const u64 chunk_idx, const bool is_write,
     return err;
 }
 
-// FIXME LOCK_CHUNK not yet?
+// FIXME comment LOCK_CHUNK not yet?
 DWORD ChunkDiskWorker::WaitChunkAsync(const u64 chunk_idx, ChunkOpState* state)
 {
     auto lk = SRWLock(*mutex_handles_, true);
@@ -745,10 +745,19 @@ DWORD ChunkDiskWorker::CloseChunkAsync(const u64 chunk_idx, const bool is_write,
 
 DWORD ChunkDiskWorker::RefreshChunkWrite(u64 chunk_idx)
 {
-    // FIXME check refs_rw
-    // ERROR_NOT_FOUND
-    // ERROR_SUCCESS
-    // ERROR_BUSY
+    auto lk = SRWLock(*mutex_handles_, true);
+    auto it = chunk_handles_.find(chunk_idx);
+    if (it == chunk_handles_.end()) return ERROR_NOT_FOUND;
+
+    auto& cfh = (*it).second;
+    if (cfh.refs_rw != 0) return ERROR_BUSY;
+
+    cfh.handle_rw.reset();
+    if (cfh.refs_ro == 0 && cfh.refs_rw == 0 && !cfh.locked && cfh.waiting.empty())
+    {
+        chunk_handles_.erase(it);
+    }
+    return ERROR_SUCCESS;
 }
 
 DWORD ChunkDiskWorker::LockChunk(const u64 chunk_idx)
@@ -1011,6 +1020,7 @@ u64 ChunkDiskWorker::GetChunkIndex(ChunkOpState& state)
     }
 }
 
+// FIXME check if complete
 DWORD ChunkDiskWorker::PostOp(ChunkOpState& state)
 {
     if (state.step == OP_DONE) return ERROR_SUCCESS;
@@ -1058,41 +1068,49 @@ DWORD ChunkDiskWorker::PostOp(ChunkOpState& state)
     return err;
 }
 
+// FIXME check err then CompleteWork()
 DWORD ChunkDiskWorker::CompleteIO(ChunkOpState& state, DWORD error, DWORD bytes_transferred)
 {
-    // FIXME err
+    auto err = DWORD(ERROR_SUCCESS);
     const auto kind = state.kind;
     if (kind == READ_CHUNK)
     {
-        CompleteReadChunk(state, error, bytes_transferred);
-    }
-    else if (kind == WRITE_CHUNK && state.step == OP_LOCKED)
-    {
-        // FIXME comment
-        CompleteWriteCreateChunk(state, state.ovl.Internal);
+        err = CompleteReadChunk(state, error, bytes_transferred);
     }
     else if (kind == WRITE_CHUNK)
     {
-        CompleteWriteChunk(state, error, bytes_transferred);
+        if (state.step == OP_LOCKED)
+        {
+            // FIXME comment
+            err = CompleteWriteCreateChunk(state, state.ovl.Internal);
+        }
+        else
+        {
+            err = CompleteWriteChunk(state, error, bytes_transferred);
+        }
     }
     else if (kind == READ_PAGE)
     {
-        CompleteReadPage(state, error, bytes_transferred);
+        err = CompleteReadPage(state, error, bytes_transferred);
     }
-    else if ((kind == WRITE_PAGE || kind == WRITE_PAGE_PARTIAL) && state.step == OP_LOCKED)
+    else if (kind == WRITE_PAGE || kind == WRITE_PAGE_PARTIAL)
     {
-        CompleteWriteCreateChunk(state, state.ovl.Internal);
-    }
-    else if (kind == WRITE_PAGE_PARTIAL && state.step == OP_READY)
-    {
-        CompleteWritePartialReadPage(state, error, bytes_transferred);
-    }
-    else if (kind == WRITE_PAGE_PARTIAL || kind == WRITE_PAGE)
-    {
-        CompleteWritePage(state, error, bytes_transferred);
+        if (state.step == OP_LOCKED)
+        {
+            err = CompleteWriteCreateChunk(state, state.ovl.Internal);
+        }
+        else if (kind == WRITE_PAGE_PARTIAL && state.step == OP_READY)
+        {
+            err = CompleteWritePartialReadPage(state, error, bytes_transferred);
+        }
+        else
+        {
+            err = CompleteWritePage(state, error, bytes_transferred);
+        }
     }
 
-    // FIXME ReportOpResult
+    if (err != ERROR_IO_PENDING) ReportOpResult(state, err);
+    return err;
 }
 
 // FIXME check deadlock?
@@ -1681,7 +1699,6 @@ DWORD ChunkDiskWorker::CompleteReadChunk(ChunkOpState& state, DWORD error, DWORD
         }
     }
     CloseChunkAsync(state.idx, false);
-    ReportOpResult(state, error);
     return error;
 }
 
@@ -1796,16 +1813,10 @@ DWORD ChunkDiskWorker::PostWriteChunk(ChunkOpState& state)
 DWORD ChunkDiskWorker::CompleteWriteCreateChunk(ChunkOpState& state, DWORD error)
 {
     PostUnlockChunk(state, state.idx);
-    if (error == ERROR_SUCCESS)
-    {
-        state.step = OP_READY;
-        return PostOp(state);
-    }
-    else
-    {
-        ReportOpResult(state, error);
-        return error;
-    }
+    if (error != ERROR_SUCCESS) return error;
+
+    state.step = OP_READY;
+    return PostOp(state);
 }
 
 DWORD ChunkDiskWorker::CompleteWriteChunk(ChunkOpState& state, DWORD error, DWORD bytes_transferred)
@@ -1833,17 +1844,12 @@ DWORD ChunkDiskWorker::CompleteWriteChunk(ChunkOpState& state, DWORD error, DWOR
         error = ERROR_INVALID_DATA;
     }
     CloseChunkAsync(state.idx, true);
-    if (state.buffer != nullptr)
-    {
-        ReportOpResult(state, error);
-        return error;
-    }
+    if (state.buffer != nullptr) return error;
 
     // partial UNMAP_CHUNK
     if (error != ERROR_SUCCESS)
     {
         if (state.step == OP_ZERO_CHUNK) CloseChunkAsync(state.idx, true);   // close the handle left open
-        ReportOpResult(state, error);
         service_.FlushUnmapRanges(state.idx);
         return error;
     }
@@ -1866,7 +1872,7 @@ DWORD ChunkDiskWorker::CompleteWriteChunk(ChunkOpState& state, DWORD error, DWOR
 
     // done
     if (state.step == OP_ZERO_CHUNK) CloseChunkAsync(state.idx, true);   // close the handle left open
-    ReportOpResult(state, error);
+
     auto lk = SRWLock();
     if (service_.UnmapRange(lk, state.idx, state.start_off, state.end_off) == ERROR_SUCCESS)
     {
@@ -1950,7 +1956,6 @@ DWORD ChunkDiskWorker::CompleteReadPage(ChunkOpState& state, DWORD error, DWORD 
         memcpy(state.buffer, recast<u8*>(ptr) + base.BlockBytes(state.start_off), length_bytes);
     }
     UnlockPageAsync(state, state.idx, error != ERROR_SUCCESS);
-    ReportOpResult(state, error);
     return error;
 }
 
@@ -2042,24 +2047,20 @@ DWORD ChunkDiskWorker::CompleteWritePartialReadPage(ChunkOpState& state, DWORD e
         if (CheckAsyncEOF(state) == ERROR_SUCCESS) error = ERROR_SUCCESS;
     }
     CloseChunkAsync(GetChunkIndex(state), false);
-
-    if (error == ERROR_SUCCESS)
-    {
-        // read complete, move on to writing
-        // page not freed, claim it later
-        // reset OVERLAPPED except offset (Windows does not update them)
-        state.ovl = OVERLAPPED{.Offset = state.ovl.Offset, .OffsetHigh=state.ovl.OffsetHigh};
-        state.step = OP_READ_PAGE;
-        PostOp(state);
-    }
-    else
+    if (error != ERROR_SUCCESS)
     {
         UnlockPageAsync(state, state.idx, true);
-        ReportOpResult(state, error);
+        return error;
     }
+
+    // read complete, move on to writing
+    // page not freed, claim it later
+    // reset OVERLAPPED except offset (Windows does not update them)
+    state.ovl = OVERLAPPED{.Offset = state.ovl.Offset, .OffsetHigh=state.ovl.OffsetHigh};
+    state.step = OP_READ_PAGE;
+    return PostOp(state);
 }
 
-// FIXME err
 DWORD ChunkDiskWorker::CompleteWritePage(ChunkOpState& state, DWORD error, DWORD bytes_transferred)
 {
     auto& base = service_.bases[0];
@@ -2068,7 +2069,6 @@ DWORD ChunkDiskWorker::CompleteWritePage(ChunkOpState& state, DWORD error, DWORD
     const auto chunk_idx = r.start_idx;
     CloseChunkAsync(chunk_idx, true);
     UnlockPageAsync(state, state.idx, error != ERROR_SUCCESS);
-    ReportOpResult(state, error);
 
     if (state.buffer == nullptr)
     {
@@ -2086,6 +2086,8 @@ DWORD ChunkDiskWorker::CompleteWritePage(ChunkOpState& state, DWORD error, DWORD
             }
         }
     }
+
+    return error;
 }
 
 DWORD ChunkDiskWorker::PostUnmapChunk(ChunkOpState& state)
