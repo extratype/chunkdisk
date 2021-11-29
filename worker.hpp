@@ -228,7 +228,9 @@ private:
 
     // FIXME comment
     // done using the handle from the pool
-    DWORD CloseChunkAsync(u64 chunk_idx, bool is_write);
+    DWORD CloseChunkAsync(u64 chunk_idx, bool is_write, bool remove = false);
+
+    DWORD PurgeChunkWrite(u64 chunk_idx);
 
     // lock chunk file handle for LOCK_CHUNK
     DWORD LockChunk(u64 chunk_idx);
@@ -308,6 +310,12 @@ private:
 
     // make chunk empty (truncate)
     DWORD UnmapChunkLocked(ChunkOpState& state, u64 chunk_idx);
+
+    // FIXME comment
+    DWORD UnmapChunkSync(SRWLock& lk, u64 chunk_idx);
+
+    // handle asynchronous EOF when unmap then read
+    DWORD CheckAsyncEOF(ChunkOpState& state);
 
     DWORD PostReadChunk(ChunkOpState& state);
 
