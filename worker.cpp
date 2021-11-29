@@ -889,9 +889,6 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, const 
     const auto is_write = (kind == WRITE_CHUNK);
     const auto r = base.BlockPageRange(chunk_idx, start_off, end_off);
 
-    // write operation, invalidate all ranges for simplicity
-    if (is_write && buffer != nullptr) service_.FlushUnmapRanges(chunk_idx);
-
     if (base.IsWholePages(r.start_off, r.end_off, buffer))
     {
         // aligned to page (always for UNMAP_CHUNK)
@@ -1639,6 +1636,9 @@ DWORD ChunkDiskWorker::PostWriteChunk(ChunkOpState& state)
 
     if (state.step != OP_ZERO_CHUNK)
     {
+        // invalidate all ranges for simplicity
+        if (state.buffer != nullptr) service_.FlushUnmapRanges(state.idx);
+
         auto h = HANDLE(INVALID_HANDLE_VALUE);
         if (state.step == OP_READY)
         {
@@ -1863,15 +1863,17 @@ DWORD ChunkDiskWorker::CompleteReadPage(ChunkOpState& state, DWORD error, DWORD 
     return error;
 }
 
-// FIXME write
 DWORD ChunkDiskWorker::PostWritePage(ChunkOpState& state)
 {
     auto& base = service_.bases[0];
     const auto chunk_idx = GetChunkIndex(state);
-    auto h = HANDLE(INVALID_HANDLE_VALUE);
     auto err = DWORD(ERROR_SUCCESS);
 
+    // invalidate all ranges for simplicity
+    if (state.buffer != nullptr) service_.FlushUnmapRanges(chunk_idx);
+
     // FIXME comment open order
+    auto h = HANDLE(INVALID_HANDLE_VALUE);
     if (state.step == OP_READY)
     {
         while (true)
