@@ -216,7 +216,8 @@ private:
     // event loop of the worker thread
     void DoWorks();
 
-    DWORD PrepareMsg(ChunkWork& msg, ChunkOpKind kind, u64 idx, u64 start_off = 0, u64 end_off = 0, LPVOID buffer = nullptr);
+    static DWORD PrepareMsg(ChunkWork& msg, ChunkOpKind kind, u64 idx,
+                            u64 start_off = 0, u64 end_off = 0, LPVOID buffer = nullptr);
 
     // post an internal message to this worker
     // ignore queue depth, no response
@@ -323,7 +324,7 @@ private:
 
     // start copying parent to current after OP_LOCKED
     // hEvent in state.ovl is set
-    DWORD CreateChunkLocked(ChunkOpState& state);
+    static DWORD CreateChunkLocked(ChunkOpState& state);
 
     // copy parent to current or nothing
     DWORD DoCreateChunkLocked(ChunkOpState& state, HANDLE handle_ro, HANDLE handle_rw);
@@ -332,7 +333,7 @@ private:
     DWORD UnmapChunkLocked(ChunkOpState& state, u64 chunk_idx);
 
     // FIXME comment
-    DWORD UnmapChunkSync(SRWLock& lk, u64 chunk_idx);
+    DWORD UnmapChunkSync(u64 chunk_idx);
 
     // handle asynchronous EOF when unmap then read
     DWORD CheckAsyncEOF(ChunkOpState& state);
