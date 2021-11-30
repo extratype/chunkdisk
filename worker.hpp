@@ -128,8 +128,10 @@ struct ChunkFileHandle
     std::vector<ChunkOpState*> waiting; // ops waiting for !locked
 };
 
-// single worker per single dispatcher
-// can't be shared with other dispatchers
+// PostWork() for single dispatcher
+// workers may interact via messages
+// states may be shared with the dispatcher
+// states are not shared with other workers except RefreshChunkWrite()
 class ChunkDiskWorker
 {
     enum IOCPKey

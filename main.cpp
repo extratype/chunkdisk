@@ -320,15 +320,21 @@ BOOLEAN PostWork(SPD_STORAGE_UNIT* StorageUnit, const ChunkOpKind op_kind, u64 b
     }
 
     auto* worker = GetAssignedWorker(StorageUnit);
-    worker->Wait();
-    auto err = worker->PostWork(context, op_kind, block_addr, count);
-    if (err != ERROR_IO_PENDING && err != ERROR_SUCCESS)
+    auto err = DWORD(ERROR_SUCCESS);
+    auto& status = context->Response->Status;
+
+    while (true)
     {
-        auto& status = context->Response->Status;
-        if (status.ScsiStatus == SCSISTAT_GOOD)
-        {
-            SetScsiError(&status, SCSI_SENSE_HARDWARE_ERROR, SCSI_ADSENSE_NO_SENSE);
-        }
+        err = worker->PostWork(context, op_kind, block_addr, count);
+        if (status.ScsiStatus != SCSISTAT_GOOD) break;
+        if (err != ERROR_BUSY) break;
+        err = worker->Wait();
+        if (err != ERROR_SUCCESS) break;
+    }
+
+    if (err != ERROR_IO_PENDING && err != ERROR_SUCCESS && status.ScsiStatus == SCSISTAT_GOOD)
+    {
+        SetScsiError(&status, SCSI_SENSE_HARDWARE_ERROR, SCSI_ADSENSE_NO_SENSE);
     }
     return (err == ERROR_IO_PENDING) ? FALSE : TRUE;
 }

@@ -178,7 +178,11 @@ DWORD ChunkDiskWorker::Wait(DWORD timeout_ms)
     while (true)
     {
         auto lk = SRWLock(*mutex_working_, false);
-        if (working_.size() < MAX_QD) return ERROR_SUCCESS;
+        if (working_.size() < MAX_QD)
+        {
+            return ERROR_SUCCESS;
+            // PostWork() may still fail with ERROR_BUSY due to messages
+        }
 
         if (!ResetEvent(wait_event_.get())) return GetLastError();
         lk.unlock();
@@ -204,9 +208,10 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, con
     if (!IsRunning()) return ERROR_INVALID_STATE;
 
     // check queue depth
-    // single dispatcher, no more works to be queued from it
     auto lk = SRWLock(*mutex_working_, false);
     if (working_.size() >= MAX_QD) return ERROR_BUSY;
+    // PostWork() from single dispatcher, MAX_QD still apply after unlocking
+    // messages ignore MAX_QD anyway
     lk.unlock();
 
     // expects something to do
@@ -1156,7 +1161,6 @@ bool ChunkDiskWorker::CompleteWork(ChunkWork* work, ChunkWork** next)
 
 DWORD ChunkDiskWorker::IdleWork()
 {
-    // single dispatcher
     auto lkw = SRWLock(*mutex_working_, false);
     if (!working_.empty()) return STANDBY_MS;
     lkw.unlock();
