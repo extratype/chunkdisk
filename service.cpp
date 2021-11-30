@@ -32,6 +32,7 @@ DWORD ChunkDiskService::Start()
             {
                 SpdLogErr(L"error: cannot initialize disk: error %lu", err);
             }
+            bases.clear();
             return err;
         }
     }

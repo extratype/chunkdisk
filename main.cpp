@@ -112,7 +112,6 @@ DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, const bool read_only, unique_ptr<
         buf.reset();
         auto parent_r = wstring();
 
-        // FIXME test
         auto* state = PWSTR();
         auto* token = wcstok_s(wbuf.data(), L"\n", &state);
         auto* endp = PWSTR();
@@ -165,7 +164,7 @@ DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, const bool read_only, unique_ptr<
 
         // check parameters
         if (disk_size == 0 || chunk_size == 0 || chunk_size > disk_size) return ERROR_INVALID_PARAMETER;
-        if (LONGLONG(chunk_size) <= 0) return ERROR_INVALID_PARAMETER;  // overflow in file offset
+        if (LONGLONG(chunk_size) <= 0) return ERROR_INVALID_PARAMETER;  // integer overflow in file offset
         if (disk_size % BLOCK_SIZE || disk_size % PAGE_SIZE) return ERROR_INVALID_PARAMETER;
         if (chunk_size % BLOCK_SIZE || chunk_size % PAGE_SIZE) return ERROR_INVALID_PARAMETER;
         // if (PAGE_SIZE % BLOCK_SIZE) return ERROR_INVALID_PARAMETER;

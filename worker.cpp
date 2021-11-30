@@ -292,6 +292,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, con
     }
     else
     {
+        SetScsiError(&context->Response->Status, SCSI_SENSE_ILLEGAL_REQUEST, SCSI_ADSENSE_ILLEGAL_COMMAND);
         return ERROR_INVALID_FUNCTION;
     }
 

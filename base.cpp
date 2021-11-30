@@ -77,7 +77,7 @@ DWORD ChunkDiskBase::Start()
 
     const auto num_parts = part_dirname.size();
 
-    // put a lock file to prevent mistakes accidental double use
+    // put a lock file to prevent mistakes
     try
     {
         // base of a differential disk if read_only
@@ -238,6 +238,7 @@ DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, co
         (is_locked ? 0 : (FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED));
 
     // chunk file size in bytes
+    // integer overflow checked in ReadChunkDiskFile()
     const auto chunk_bytes = LARGE_INTEGER{.QuadPart = LONGLONG(BlockBytes(ChunkBlocks(1)))};
 
     if (is_write && !part_found)

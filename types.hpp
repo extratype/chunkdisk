@@ -34,7 +34,7 @@ static constexpr T recast(U arg)
 // hash_combine_impl<64>
 static u64 hash_combine_64(u64 h, u64 k)
 {
-    auto m = (u64(0xca4a793) << 32) + 0x5bd1e995;
+    constexpr auto m = (u64(0xca4a793) << 32) + 0x5bd1e995;
     k *= m;
     k ^= k >> 47;
     k *= m;
