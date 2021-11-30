@@ -194,7 +194,6 @@ DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, const bool read_only, unique_ptr<
 /*
  * Read .chunkdisk file (bases[0]) and its parents (bases[1] and so on, if any).
  * bases[0].read_only == true if read_only.
- * FIXME test
  */
 DWORD ReadChunkDiskBases(PCWSTR chunkdisk_file, const bool read_only, vector<ChunkDiskBase>& bases)
 {

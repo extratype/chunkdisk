@@ -353,6 +353,7 @@ DWORD ChunkDiskService::FlushPages()
         if (size == cached_pages_.size()) break;
     }
 
+    // ERROR_SUCCESS anyway if empty, tried RemovePageEntry() otherwise
     return cached_pages_.empty() ? ERROR_SUCCESS : err;
 }
 

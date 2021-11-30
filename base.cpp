@@ -250,11 +250,10 @@ DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, co
             CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
         if (h_locked) return GetLastError();
 
-        auto err = DWORD(ERROR_SUCCESS);
         // This just reserves disk space and sets file length on NTFS.
         // Writing to the file actually extends the physical data, but synchronously.
         // See https://devblogs.microsoft.com/oldnewthing/20150710-00/?p=45171.
-        err = SetFilePointerEx(h_locked.get(), chunk_bytes, nullptr, FILE_BEGIN)
+        auto err = SetFilePointerEx(h_locked.get(), chunk_bytes, nullptr, FILE_BEGIN)
             ? ERROR_SUCCESS : GetLastError();
         if (err == ERROR_SUCCESS) err = SetEndOfFile(h_locked.get()) ? ERROR_SUCCESS : GetLastError();
         if (err == ERROR_SUCCESS)

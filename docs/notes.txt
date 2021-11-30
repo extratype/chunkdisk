@@ -5,6 +5,8 @@ sparse chunk?
 Trigger unmap for all unused sectors: defrag X: /L
     consolidate free space: defrag X: /X
 
+Metadata flushed automatically by Windows, not by chunkdisk
+
 TODO check partition -> TRIM -> shrink -> remove orphan empty chunks
 
 TODO consolidate $MFT, $INDEX
