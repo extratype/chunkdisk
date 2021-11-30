@@ -38,7 +38,7 @@ Unmap(): a.k.a. TRIM
         zero-fill if not supported
 
     unmap range >= chunk:
-        exclusive access
+        exclusive (locked) access
         make it empty by truncating
 
 Asynchronous I/O:
@@ -70,7 +70,9 @@ ChunkDiskBase:
 
     CheckChunk(idx)
     CreateChunk(idx, is_write, is_locked) -> FileHandle
-    RemoveChunkLocked(idx, handle) FIXME comment
+    RemoveChunkLocked(idx, handle):
+        remove chunk exclusively (locked)
+        when failed to copy parent
 
 ChunkDiskService:
     vector<ChunkDiskBase> bases:
@@ -118,6 +120,7 @@ ChunkDiskWorker:
     Pools:
         chunk file handles
             shared among ops
+            (read-only, read-write) pair
             LRU policy, <= QD 32
 
         aligned buffers
@@ -240,16 +243,16 @@ Lock chunk file handle:
     broadcast a message to unlock the handles...
         resume ChunkOpState's in the waiting list
 
-FIXME comment
 Asynchronous Read(), Write():
     Aligned read:
-        OpenChunk()
+        OpenChunk(read-only)...
         FlushPages(range)...
         ReadFile()...
         CloseChunk()
 
     Aligned write or zero-fill:
-        OpenChunk()
+        OpenChunk(read-write)...
+            lock, copy parent and retry from beginning if necessary
         FlushPages(range)...
         WriteFile() or DeviceIoControl(FSCTL_SET_ZERO_DATA)...
             DeviceIoControl(FSCTL_SET_ZERO_DATA) not supported?
@@ -260,7 +263,7 @@ Asynchronous Read(), Write():
 
     Unaligned read:
         service.LockPage()...
-        OpenChunk()
+        OpenChunk(read-only)...
         ReadFile()... to page
         CloseChunk()
         copy to buffer
@@ -269,18 +272,17 @@ Asynchronous Read(), Write():
     Unaligned write:
         not whole page?
             Unaligned read...
-
+        OpenChunk(read-write)...
+            lock, copy parent and retry from beginning if necessary
         service.LockPage()/service.ClaimPage()...
-        OpenChunk(read-write)
         copy/zero-fill page
         WriteFile()... from page
         CloseChunk()
         service.UnlockPage()
 
 Unmap():
-    whole chunk: service.UnmapChunk()
+    whole chunk: lock and truncate
     partial: zero-fill
-
 
     Merge unmap ranges:
         in a single request:
@@ -288,26 +290,16 @@ Unmap():
             merge ranges
 
         across multiple requests:
-            before service.UnmapChunk(): service.FlushUnmapRanges(chunk)
+            before whole Unmap(): service.FlushUnmapRanges(chunk)
             before Write(): service.FlushUnmapRanges(chunk)
             after FSCTL_SET_ZERO_DATA:
                 failure: service.FlushUnmapRanges(chunk)
-                success: atomic service.UnmapRange() and service.UnmapChunk()
-
-FIXME Synchronize file handles in all workers:
-    Unmap() then Write(): incorrect chunk size
-        cancel pending asynchronous read/write
-        refresh chunk state for all workers:
-            mark as pending
-
-            CloseChunk():
-                fix chunk size if opened as read-write
-                close handle
-
-            OpenChunk():
-                return empty handle if chunk is empty
-                fix chunk size
-                clear mark
+                success:
+                    service.UnmapRange()
+                    if whole, while locking range lock:
+                        remove read-write handles if idle
+                        truncate if all removed
 
     Unmap() then Read(): EOF
         read successful if zero bytes read and chunk is empty
+        remove handle from pool

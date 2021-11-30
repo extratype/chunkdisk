@@ -132,43 +132,42 @@ DWORD ChunkDiskWorker::Stop(DWORD timeout_ms)
     return GetLastError();
 }
 
-// FIXME StopWorks()
 void ChunkDiskWorker::Terminate()
 {
     if (!IsRunning())
     {
         iocp_.reset();
+        return;
     }
-    else
+
+    auto lkw = SRWLock(*mutex_working_, true, std::defer_lock);
+    if (lkw.try_lock())
     {
-        auto lkw = SRWLock(*mutex_working_, true, std::defer_lock);
-        if (lkw.try_lock())
+        if (!working_.empty())
         {
-            if (!working_.empty())
+            auto* work = &*working_.begin();
+            while (work != nullptr)
             {
-                auto* work = &*working_.begin();
-                while (work != nullptr)
-                {
-                    for (auto& op : work->ops) ReportOpResult(op, ERROR_OPERATION_ABORTED);
-                    if (CompleteWork(work, &work)) break;
-                }
+                for (auto& op : work->ops) ReportOpResult(op, ERROR_OPERATION_ABORTED);
+                if (CompleteWork(work, &work)) break;
             }
-            lkw.unlock();
         }
-        iocp_.reset();
+        lkw.unlock();
+    }
+    iocp_.reset();
 
-        auto err = WaitForSingleObject(thread_.native_handle(), STOP_TIMEOUT_MS);
-        if (err == WAIT_OBJECT_0) return;
+    WaitForSingleObject(thread_.native_handle(), STOP_TIMEOUT_MS);
 
-        TerminateThread(thread_.native_handle(), -1);
-        try
+    auto lkh = SRWLock(*mutex_handles_, true, std::defer_lock);
+    if (lkh.try_lock())
+    {
+        for (auto p : chunk_handles_)
         {
-            thread_.detach();
+            auto& cfh = p.second;
+            if (cfh.handle_ro) CancelIo(cfh.handle_ro.get());
+            if (cfh.handle_rw) CancelIo(cfh.handle_rw.get());
         }
-        catch (const std::system_error& e)
-        {
-            return;
-        }
+        lkh.unlock();
     }
 }
 
@@ -184,7 +183,7 @@ DWORD ChunkDiskWorker::Wait(DWORD timeout_ms)
         if (!ResetEvent(wait_event_.get())) return GetLastError();
         lk.unlock();
 
-        auto ticks = (timeout_ms != INFINITE) ? GetTickCount() : 0;
+        auto ticks = (timeout_ms != INFINITE) ? GetTickCount64() : 0;
         auto err = WaitForSingleObject(wait_event_.get(), timeout_ms);
         if (err != WAIT_OBJECT_0)
         {
@@ -194,8 +193,8 @@ DWORD ChunkDiskWorker::Wait(DWORD timeout_ms)
         }
 
         // PostMsg() ignores queue depth so queue may still be full
-        ticks = (timeout_ms != INFINITE) ? (GetTickCount() - ticks) : 0;
-        timeout_ms = (timeout_ms > ticks) ? (timeout_ms - ticks) : 0;
+        ticks = (timeout_ms != INFINITE) ? (GetTickCount64() - ticks) : 0;
+        timeout_ms = (timeout_ms > ticks) ? DWORD(timeout_ms - ticks) : 0;
     }
 }
 
@@ -368,21 +367,21 @@ void ChunkDiskWorker::DoWorks()
 
     while (true)
     {
-        auto err = GetQueuedCompletionStatus(
+        auto error = GetQueuedCompletionStatus(
             iocp_.get(), &bytes_transferred, &ckey, &overlapped, next_timeout)
             ? ERROR_SUCCESS : GetLastError();
 
         if (overlapped == nullptr)
         {
-            if (err == WAIT_TIMEOUT)
+            if (error == WAIT_TIMEOUT)
             {
                 next_timeout = IdleWork();
                 if (next_timeout == INFINITE) continue; // sleep
             }
             else
             {
-                // err == ERROR_SUCCESS && ckey == CK_STOP
-                // err != ERROR_SUCCESS
+                // error == ERROR_SUCCESS && ckey == CK_STOP
+                // error != ERROR_SUCCESS
                 StopWorks();
                 return;
             }
@@ -402,7 +401,7 @@ void ChunkDiskWorker::DoWorks()
         else if (ckey == CK_IO)
         {
             auto& state = *GetOverlappedOp(overlapped);
-            if (CompleteIO(state, err, bytes_transferred) != ERROR_IO_PENDING) CompleteWork(state.owner);
+            if (CompleteIO(state, error, bytes_transferred) != ERROR_IO_PENDING) CompleteWork(state.owner);
         }
 
         if (next_timeout == INFINITE)
@@ -418,7 +417,7 @@ void ChunkDiskWorker::DoWorks()
             if (check_time >= next_check_time)
             {
                 auto next_check = PeriodicCheck();
-                next_check_time  = check_time + next_check * 10000;
+                next_check_time  = check_time + u64(next_check) * 10000;
             }
         }
     }
@@ -812,7 +811,8 @@ DWORD ChunkDiskWorker::UnlockChunk(const u64 chunk_idx)
 
     for (auto* op : waiting)
     {
-        op->step = OP_READY; // FIXME previous step?
+        // FIXME comment previous step
+        op->step = OP_READY;
         if (PostOp(*op) != ERROR_IO_PENDING) CompleteWork(op->owner);
     }
     return ERROR_SUCCESS;
@@ -1024,7 +1024,6 @@ u64 ChunkDiskWorker::GetChunkIndex(ChunkOpState& state)
     }
 }
 
-// FIXME check if complete
 DWORD ChunkDiskWorker::PostOp(ChunkOpState& state)
 {
     if (state.step == OP_DONE) return ERROR_SUCCESS;
@@ -1072,7 +1071,6 @@ DWORD ChunkDiskWorker::PostOp(ChunkOpState& state)
     return err;
 }
 
-// FIXME check err then CompleteWork()
 DWORD ChunkDiskWorker::CompleteIO(ChunkOpState& state, DWORD error, DWORD bytes_transferred)
 {
     auto err = DWORD(ERROR_SUCCESS);
@@ -1275,7 +1273,7 @@ void ChunkDiskWorker::StopWorks()
             if (op.step == OP_LOCKED)
             {
                 // FIXME comment
-                op.ovl.hEvent = recast<HANDLE>(1);
+                op.ovl.hEvent = HANDLE(1);
                 std::atomic_thread_fence(std::memory_order_release);
             }
         }
@@ -1309,10 +1307,10 @@ void ChunkDiskWorker::StopWorks()
     {
         if (working_.empty()) break;
 
-        auto err = GetQueuedCompletionStatus(
+        auto error = GetQueuedCompletionStatus(
             iocp_.get(), &bytes_transferred, &ckey, &overlapped, STOP_TIMEOUT_MS)
             ? ERROR_SUCCESS : GetLastError();
-        if (overlapped == nullptr && err != ERROR_SUCCESS) break;
+        if (overlapped == nullptr && error != ERROR_SUCCESS) break;
 
         if (ckey == CK_POST)
         {
@@ -1325,19 +1323,18 @@ void ChunkDiskWorker::StopWorks()
         }
         else if (ckey == CK_IO)
         {
-            // FIXME stop
-            // FIXME ERROR_IO_PENDING
             auto& state = *GetOverlappedOp(overlapped);
+            auto err = DWORD(ERROR_IO_PENDING);
             if (state.kind == WRITE_PAGE_PARTIAL && state.step == OP_READY)
             {
                 // block OP_READ_PAGE
-                CompleteIO(state, ERROR_OPERATION_ABORTED, bytes_transferred);
+                err = CompleteIO(state, ERROR_OPERATION_ABORTED, bytes_transferred);
             }
             else
             {
-                CompleteIO(state, err, bytes_transferred);
+                err = CompleteIO(state, error, bytes_transferred);
             }
-            CompleteWork(state.owner);
+            if (err != ERROR_IO_PENDING) CompleteWork(state.owner);
         }
         // ignore ckey == CK_STOP
     }
@@ -1477,7 +1474,6 @@ DWORD ChunkDiskWorker::LockingChunk(ChunkOpState& state, const u64 chunk_idx)
     }
     else
     {
-        // FIXME unlock
         handle_ro.reset();
         handle_rw.reset();
         state.ovl.Internal = (err_ro != ERROR_SUCCESS) ? err_ro : err_rw;
@@ -1737,7 +1733,9 @@ DWORD ChunkDiskWorker::PostWriteChunk(ChunkOpState& state)
         }
         else if (state.step == OP_LOCKING)
         {
-            return state.ovl.Internal;
+            err = DWORD(state.ovl.Internal);
+            if (err != ERROR_SUCCESS) PostUnlockChunk(state, state.idx);
+            return err;
         }
         else if (state.step == OP_LOCKED)
         {
@@ -1980,8 +1978,6 @@ DWORD ChunkDiskWorker::PostWritePage(ChunkOpState& state)
         {
             err = OpenChunkAsync(chunk_idx, true, h, &state);
             if (err != ERROR_LOCK_FAILED) break;
-            // FIXME state.idx, chunk_idx
-            // FIXME redundant chunk_idx argument
             err = PostLockChunk(state, chunk_idx, true);
             if (err != ERROR_SUCCESS) return err;
         }
@@ -1989,7 +1985,9 @@ DWORD ChunkDiskWorker::PostWritePage(ChunkOpState& state)
     }
     else if (state.step == OP_LOCKING)
     {
-        return state.ovl.Internal;
+        err = DWORD(state.ovl.Internal);
+        if (err != ERROR_SUCCESS) PostUnlockChunk(state, state.idx);
+        return err;
     }
     else if (state.step == OP_LOCKED)
     {
@@ -2109,7 +2107,9 @@ DWORD ChunkDiskWorker::PostUnmapChunk(ChunkOpState& state)
     }
     else if (state.step == OP_LOCKING)
     {
-        return state.ovl.Internal;
+        auto err = DWORD(state.ovl.Internal);
+        if (err != ERROR_SUCCESS) PostUnlockChunk(state, state.idx);
+        return err;
     }
     else if (state.step == OP_LOCKED)
     {

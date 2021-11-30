@@ -76,7 +76,6 @@ DWORD ChunkDiskBase::Start()
     }
 
     const auto num_parts = part_dirname.size();
-    auto err = DWORD(ERROR_SUCCESS);
 
     // put a lock file to prevent mistakes accidental double use
     try

@@ -332,7 +332,8 @@ private:
     // make chunk empty (truncate)
     DWORD UnmapChunkLocked(ChunkOpState& state, u64 chunk_idx);
 
-    // FIXME comment
+    // truncate chunk existing on current base
+    // if not being used for write
     DWORD UnmapChunkSync(u64 chunk_idx);
 
     // handle asynchronous EOF when unmap then read
