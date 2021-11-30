@@ -577,6 +577,7 @@ constexpr PCWSTR PROGNAME = L"chunkdisk";
         "options:\n"
         "    -f ChunkDiskFile                    Chunkdisk metadata file (name.chunkdisk)\n"
         "    -W 0|1                              Disable/enable writes (deflt: enable)\n"
+        "                                        The .lock file will not be removed automaitcally if disabled\n"
         "    -t Number                           Number of threads (deflt: automatic)\n"
         "    -d -1                               Debug flags\n"
         "    -D DebugLogFile                     Debug log file; - for stderr\n"
