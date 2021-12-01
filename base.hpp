@@ -117,6 +117,8 @@ public:
      * Unbuffered, asynchronous I/O unless is_locked.
      *
      * Buffered, synchronous I/O if is_locked.
+     * Return a handle with ERROR_SUCCESS if the chunk is empty.
+     * Return ERROR_FILE_NOT_FOUND if the chunk does not exist.
      * Subsequent CreateChunk() will fail if is_write.
      * Subsequent CreateChunk() with !is_write may succeed if !is_write.
      */

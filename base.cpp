@@ -211,7 +211,7 @@ DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, co
     {
         // not present -> empty handle
         handle_out = FileHandle();
-        return ERROR_SUCCESS;
+        return is_locked ? ERROR_FILE_NOT_FOUND : ERROR_SUCCESS;
     }
 
     // !is_write -> part_found
@@ -248,7 +248,7 @@ DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, co
         auto h_locked = FileHandle(CreateFileW(
             path.data(), desired_access | DELETE, 0, nullptr,
             CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
-        if (h_locked) return GetLastError();
+        if (!h_locked) return GetLastError();
 
         // This just reserves disk space and sets file length on NTFS.
         // Writing to the file actually extends the physical data, but synchronously.
@@ -302,7 +302,7 @@ DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, co
         if (!is_write && file_size.QuadPart == 0)
         {
             // empty chunk, nothing to read -> return empty handle
-            h.reset();
+            if (!is_locked) h.reset();
         }
         else
         {
