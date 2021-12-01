@@ -125,7 +125,9 @@ struct ChunkFileHandle
     u32 refs_rw = 0;                    // close later if zero
 
     bool locked = false;                // OP_LOCKING or OP_LOCKED somewhere
+                                        // set when handling LOCK_CHUNK
     std::vector<ChunkOpState*> waiting; // ops waiting for !locked
+                                        // may be non-empty with !locked
 };
 
 // PostWork() for single dispatcher
@@ -184,7 +186,7 @@ public:
     // StopAsync() and wait for the handle
     DWORD Stop(DWORD timeout_ms = INFINITE);
 
-    // last resort to stop the worker thread
+    // last resort to stop the worker thread after StopAsync() fails
     void Terminate();
 
     // wait for the request queue
@@ -298,7 +300,7 @@ private:
     // resources may not be freed if operations are always processed immediately
     DWORD IdleWork();
 
-    // free resources unused for a while
+    // free resources unused for a while if not under load
     DWORD PeriodicCheck();
 
     // cancel all requests to exit the worker thread
@@ -319,14 +321,14 @@ private:
 
     // waiting for Step 3. in locking chunk file handles
     // Step 4. and forward if done
-    DWORD LockingChunk(ChunkOpState& state, u64 chunk_idx);
+    DWORD LockingChunk(ChunkOpState& msg, u64 chunk_idx);
 
     // close and unlock handles, broadcast UNLOCK_CHUNK
     DWORD PostUnlockChunk(ChunkOpState& state, u64 chunk_idx);
 
     // start copying parent to current after OP_LOCKED
-    // hEvent in state.ovl is set
-    static DWORD CreateChunkLocked(ChunkOpState& state);
+    // Internal, InternalHigh, hEvent in state.ovl are set
+    DWORD CreateChunkLocked(ChunkOpState& state, u64 chunk_idx);
 
     // copy parent to current or nothing
     DWORD DoCreateChunkLocked(ChunkOpState& state, HANDLE handle_ro, HANDLE handle_rw);

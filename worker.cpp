@@ -22,7 +22,11 @@ static constexpr auto STOP_TIMEOUT_MS = u32(5000);
 ChunkDiskWorker::~ChunkDiskWorker()
 {
     auto err = Stop(STOP_TIMEOUT_MS);
-    if (err != ERROR_SUCCESS) Terminate();
+    if (err != ERROR_SUCCESS)
+    {
+        SpdStorageUnitShutdown(service_.storage_unit);  // fatal
+        Terminate();
+    }
 }
 
 // Thread-safety notes
@@ -1090,7 +1094,7 @@ DWORD ChunkDiskWorker::CompleteIO(ChunkOpState& state, DWORD error, DWORD bytes_
         if (state.step == OP_LOCKED)
         {
             // FIXME comment
-            err = CompleteWriteCreateChunk(state, state.ovl.Internal);
+            err = CompleteWriteCreateChunk(state, bytes_transferred);
         }
         else
         {
@@ -1105,7 +1109,8 @@ DWORD ChunkDiskWorker::CompleteIO(ChunkOpState& state, DWORD error, DWORD bytes_
     {
         if (state.step == OP_LOCKED)
         {
-            err = CompleteWriteCreateChunk(state, state.ovl.Internal);
+            // FIXME comment
+            err = CompleteWriteCreateChunk(state, bytes_transferred);
         }
         else if (kind == WRITE_PAGE_PARTIAL && state.step == OP_READY)
         {
@@ -1278,7 +1283,7 @@ void ChunkDiskWorker::StopWorks()
             if (op.step == OP_LOCKED)
             {
                 // FIXME comment
-                op.ovl.hEvent = HANDLE(1);
+                op.ovl.hEvent = HANDLE(ERROR_OPERATION_ABORTED);
                 std::atomic_thread_fence(std::memory_order_release);
             }
         }
@@ -1462,44 +1467,29 @@ DWORD ChunkDiskWorker::PostLockChunk(ChunkOpState& state, const u64 chunk_idx, c
     return ERROR_IO_PENDING;
 }
 
-DWORD ChunkDiskWorker::LockingChunk(ChunkOpState& state, const u64 chunk_idx)
+DWORD ChunkDiskWorker::LockingChunk(ChunkOpState& msg, const u64 chunk_idx)
 {
-    if ((++state.ovl.InternalHigh) != GetWorkers(service_.storage_unit).size()) return ERROR_IO_PENDING;
+    auto user = LPVOID();
+    if (!service_.CheckChunkLocked(chunk_idx, user) || user == nullptr) return ERROR_INVALID_FUNCTION;
 
-    // ready to open handle
-    auto handle_ro = FileHandle();
-    auto handle_rw = FileHandle();
-    auto err_ro = service_.CreateChunk(chunk_idx, handle_ro, false, true);
-    auto err_rw = service_.CreateChunk(chunk_idx, handle_rw, true, true);
-    if (err_ro == ERROR_SUCCESS && err_rw == ERROR_SUCCESS)
-    {
-        state.ovl.Internal = recast<ULONG_PTR>(handle_ro.release().value);
-        state.ovl.InternalHigh = recast<ULONG_PTR>(handle_rw.release().value);
-        state.step = OP_LOCKED;
-    }
-    else
-    {
-        handle_ro.reset();
-        handle_rw.reset();
-        state.ovl.Internal = (err_ro != ERROR_SUCCESS) ? err_ro : err_rw;
-    }
+    auto& state = *recast<ChunkOpState*>(user);
+    if ((++state.ovl.InternalHigh) != GetWorkers(service_.storage_unit).size()) return ERROR_SUCCESS;
 
-    return PostOp(state);
+    state.step = OP_LOCKED;
+    if (PostOp(state) != ERROR_IO_PENDING) CompleteWork(state.owner);
+    return ERROR_SUCCESS;
 }
 
 DWORD ChunkDiskWorker::PostUnlockChunk(ChunkOpState& state, const u64 chunk_idx)
 {
     // cleanup
-    CloseHandle(recast<HANDLE>(state.ovl.Internal));
-    CloseHandle(recast<HANDLE>(state.ovl.InternalHigh));
-
     state.ovl.Internal = 0;
     state.ovl.InternalHigh = 0;
     state.ovl.hEvent = nullptr;
 
     service_.UnlockChunk(chunk_idx);
-
     auto err = DWORD(ERROR_SUCCESS);
+
     for (auto& worker : GetWorkers(service_.storage_unit))
     {
         auto err1 = [chunk_idx, &worker]() -> DWORD
@@ -1516,8 +1506,31 @@ DWORD ChunkDiskWorker::PostUnlockChunk(ChunkOpState& state, const u64 chunk_idx)
     return err;
 }
 
-DWORD ChunkDiskWorker::CreateChunkLocked(ChunkOpState& state)
+DWORD ChunkDiskWorker::CreateChunkLocked(ChunkOpState& state, u64 chunk_idx)
 {
+    // locked, open handles
+    auto handle_ro = FileHandle();
+    auto handle_rw = FileHandle();
+
+    auto err_ro = service_.CreateChunk(chunk_idx, handle_ro, false, true);
+    auto err_rw = service_.CreateChunk(chunk_idx, handle_rw, true, true);
+    if (err_ro == ERROR_SUCCESS && err_rw == ERROR_SUCCESS)
+    {
+        state.ovl.Internal = recast<ULONG_PTR>(handle_ro.release().value);
+        state.ovl.InternalHigh = recast<ULONG_PTR>(handle_rw.release().value);
+    }
+    else
+    {
+        if (err_rw == ERROR_SUCCESS)
+        {
+            auto disp = FILE_DISPOSITION_INFO{TRUE};
+            SetFileInformationByHandle(handle_rw.get(), FileDispositionInfo, &disp, sizeof(disp));
+        }
+        handle_ro.reset();
+        handle_rw.reset();
+        return (err_ro != ERROR_SUCCESS) ? err_ro : err_rw;
+    }
+
     try
     {
         auto t = std::thread(
@@ -1531,9 +1544,8 @@ DWORD ChunkDiskWorker::CreateChunkLocked(ChunkOpState& state)
                 state->ovl.hEvent = nullptr;
                 std::atomic_thread_fence(std::memory_order_release);
 
-                state->ovl.Internal = self->DoCreateChunkLocked(*state, handle_ro, handle_rw);
-                state->ovl.InternalHigh = 0;
-                if (!PostQueuedCompletionStatus(self->iocp_.get(), 0, CK_IO, &state->ovl))
+                auto err = self->DoCreateChunkLocked(*state, handle_ro, handle_rw);
+                if (!PostQueuedCompletionStatus(self->iocp_.get(), err, CK_IO, &state->ovl))
                 {
                     SpdStorageUnitShutdown(self->service_.storage_unit);    // fatal
                 }
@@ -1549,6 +1561,13 @@ DWORD ChunkDiskWorker::CreateChunkLocked(ChunkOpState& state)
     }
     catch (const std::system_error& e)
     {
+        handle_ro = FileHandle(recast<HANDLE>(state.ovl.Internal));
+        handle_rw = FileHandle(recast<HANDLE>(state.ovl.InternalHigh));
+        state.ovl.Internal = 0;
+        state.ovl.InternalHigh = 0;
+
+        auto disp = FILE_DISPOSITION_INFO{TRUE};
+        SetFileInformationByHandle(handle_rw.get(), FileDispositionInfo, &disp, sizeof(disp));
         return e.code().value();
     }
     return ERROR_IO_PENDING;
@@ -1569,7 +1588,7 @@ DWORD ChunkDiskWorker::DoCreateChunkLocked(ChunkOpState& state, HANDLE handle_ro
         while (true)
         {
             std::atomic_thread_fence(std::memory_order_acquire);
-            if (state.ovl.hEvent) return ERROR_OPERATION_ABORTED;
+            if (state.ovl.hEvent) return recast<DWORD>(state.ovl.hEvent);
 
             err = ReadFile(handle_ro, buf.get(), bufsiz, &bytes_read, nullptr)
                 ? ERROR_SUCCESS : GetLastError();
@@ -1597,9 +1616,16 @@ DWORD ChunkDiskWorker::DoCreateChunkLocked(ChunkOpState& state, HANDLE handle_ro
 DWORD ChunkDiskWorker::UnmapChunkLocked(ChunkOpState& state, const u64 chunk_idx)
 {
     service_.FlushUnmapRanges(chunk_idx);
-    auto h = recast<HANDLE>(state.ovl.InternalHigh);
-    if (!SetFilePointerEx(h, LARGE_INTEGER{.QuadPart = 0}, nullptr, FILE_BEGIN)) return GetLastError();
-    return SetEndOfFile(h) ? ERROR_SUCCESS : GetLastError();
+
+    auto h = FileHandle();
+    auto err = service_.CreateChunk(chunk_idx, h, true, true);
+    if (err != ERROR_SUCCESS) return err;
+
+    err = SetFilePointerEx(h.get(), LARGE_INTEGER{.QuadPart = 0}, nullptr, FILE_BEGIN)
+        ? ERROR_SUCCESS : GetLastError();
+    if (err != ERROR_SUCCESS) return err;
+
+    return SetEndOfFile(h.get()) ? ERROR_SUCCESS : GetLastError();
 }
 
 DWORD ChunkDiskWorker::UnmapChunkSync(const u64 chunk_idx)
@@ -1607,7 +1633,6 @@ DWORD ChunkDiskWorker::UnmapChunkSync(const u64 chunk_idx)
     auto err = DWORD(ERROR_SUCCESS);
     for (auto& worker : GetWorkers(service_.storage_unit))
     {
-        // FIXME comment thread
         auto err1 = worker.RefreshChunkWrite(chunk_idx);
         if (err1 != ERROR_SUCCESS && err1 != ERROR_NOT_FOUND) err = err1;
     }
@@ -1736,15 +1761,15 @@ DWORD ChunkDiskWorker::PostWriteChunk(ChunkOpState& state)
             }
             if (err != ERROR_SUCCESS) return err;
         }
-        else if (state.step == OP_LOCKING)
-        {
-            err = DWORD(state.ovl.Internal);
-            if (err != ERROR_SUCCESS) PostUnlockChunk(state, state.idx);
-            return err;
-        }
         else if (state.step == OP_LOCKED)
         {
-            return CreateChunkLocked(state);
+            err = CreateChunkLocked(state, state.idx);
+            if (err != ERROR_IO_PENDING) PostUnlockChunk(state, state.idx);
+            return err;
+        }
+        else
+        {
+            return ERROR_INVALID_STATE;
         }
 
         // aligned to page
@@ -1988,15 +2013,15 @@ DWORD ChunkDiskWorker::PostWritePage(ChunkOpState& state)
         }
         if (err != ERROR_SUCCESS) return err;
     }
-    else if (state.step == OP_LOCKING)
-    {
-        err = DWORD(state.ovl.Internal);
-        if (err != ERROR_SUCCESS) PostUnlockChunk(state, state.idx);
-        return err;
-    }
     else if (state.step == OP_LOCKED)
     {
-        return CreateChunkLocked(state);
+        err = CreateChunkLocked(state, chunk_idx);
+        if (err != ERROR_IO_PENDING) PostUnlockChunk(state, state.idx);
+        return err;
+    }
+    else
+    {
+        return ERROR_INVALID_STATE;
     }
 
     if (state.kind == WRITE_PAGE_PARTIAL && state.step == OP_READY)
@@ -2110,15 +2135,11 @@ DWORD ChunkDiskWorker::PostUnmapChunk(ChunkOpState& state)
         // FIXME comment
         return PostLockChunk(state, state.idx, false);
     }
-    else if (state.step == OP_LOCKING)
-    {
-        auto err = DWORD(state.ovl.Internal);
-        if (err != ERROR_SUCCESS) PostUnlockChunk(state, state.idx);
-        return err;
-    }
     else if (state.step == OP_LOCKED)
     {
-        return UnmapChunkLocked(state, state.idx);
+        auto err = UnmapChunkLocked(state, state.idx);
+        PostUnlockChunk(state, state.idx);
+        return err;
     }
 
     return ERROR_INVALID_STATE;
