@@ -840,7 +840,7 @@ DWORD ChunkDiskWorker::PreparePageOps(ChunkWork& work, const bool is_write, cons
     {
         auto& op = ops.emplace_back(&work, kind, page_idx, start_off, end_off, file_off, buffer);
         file_off += LONGLONG(base.PageBytes(1));
-        if (!(is_write && buffer == nullptr)) buffer = recast<u8*>(buffer) + base.BlockBytes(end_off - start_off);
+        if (buffer != nullptr) buffer = recast<u8*>(buffer) + base.BlockBytes(end_off - start_off);
 
         // try to complete immediately
         // work is not queued, we can't lock or wait for a page here so READ_PAGE only
@@ -929,7 +929,7 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, const 
         try
         {
             ops.emplace_back(&work, kind, chunk_idx, start_off, end_off, LONGLONG(base.BlockBytes(start_off)), buffer);
-            if (!(is_write && buffer == nullptr)) buffer = recast<u8*>(buffer) + base.BlockBytes(end_off - start_off);
+            if (buffer != nullptr) buffer = recast<u8*>(buffer) + base.BlockBytes(end_off - start_off);
         }
         catch (const bad_alloc&)
         {
