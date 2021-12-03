@@ -79,7 +79,7 @@ ChunkDiskService:
         current, parent, ...
 
     Pages:
-        PeekPage(): concurrent read access
+        PeekPage(): shared read access
         LockPage(): exclusive write access
         UnlockPage()
         FlushPages(range)
@@ -146,7 +146,7 @@ ChunkDiskWorker:
 
     ChunkOpState:
         Immediate I/O operations: done synchronously in the dispatcher thread
-            * read, chunk empty or not exists
+            * read, chunk empty or does not exist
             * read a cached page
             * unmap whole chunk
 
@@ -252,7 +252,7 @@ Asynchronous Read(), Write():
 
     Aligned write or zero-fill:
         OpenChunk(read-write)...
-            lock, copy parent and retry from beginning if necessary
+            lock chunk, copy parent and retry from beginning if necessary
         FlushPages(range)...
         WriteFile() or DeviceIoControl(FSCTL_SET_ZERO_DATA)...
             DeviceIoControl(FSCTL_SET_ZERO_DATA) not supported?
@@ -273,7 +273,7 @@ Asynchronous Read(), Write():
         not whole page?
             Unaligned read...
         OpenChunk(read-write)...
-            lock, copy parent and retry from beginning if necessary
+            lock chunk, copy parent and retry from beginning if necessary
         service.LockPage()/service.ClaimPage()...
         copy/zero-fill page
         WriteFile()... from page
@@ -298,7 +298,7 @@ Unmap():
                     service.UnmapRange()
                     if whole, while locking range lock:
                         remove read-write handles if idle
-                        truncate if all removed
+                        truncate if all read-write handles are removed
 
     Unmap() then Read(): EOF
         read successful if zero bytes read and chunk is empty

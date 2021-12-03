@@ -66,6 +66,7 @@ struct ChunkDisk
     // not movable
     ChunkDiskService service;
     // don't insert or erase after StartWorkers()
+    // StopWorkers() to stop
     vector<ChunkDiskWorker> workers;
 
     // not movable, increment only

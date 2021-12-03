@@ -25,8 +25,8 @@ enum ChunkOpKind : u32
     WRITE_CHUNK,            // aligned write, flush pages
     READ_PAGE,              // unaligned, read in pages
     WRITE_PAGE,             // unaligned, write in pages
-    WRITE_PAGE_PARTIAL,     // not page aligned, read then write in pages
-    UNMAP_CHUNK,            // become WRITE_CHUNK if partial
+    WRITE_PAGE_PARTIAL,     // not page aligned, read and write in pages
+    UNMAP_CHUNK,            // become write with buffer == nullptr if partial
 
     // for PostMsg()
     LOCK_CHUNK,             // stop using and close the chunk by setting ChunkFileHandle::locked
@@ -131,9 +131,9 @@ struct ChunkFileHandle
 };
 
 // PostWork() for single dispatcher
-// workers may interact via messages
+// workers may interact via PostMsg()
 // states may be shared with the dispatcher
-// states are not shared with other workers except RefreshChunkWrite()
+// states are not shared with other workers except ChunkDiskService::CheckChunkLocked() and RefreshChunkWrite()
 class ChunkDiskWorker
 {
     enum IOCPKey
@@ -186,7 +186,7 @@ public:
     // StopAsync() and wait for the handle
     DWORD Stop(DWORD timeout_ms = INFINITE);
 
-    // last resort to stop the worker thread after StopAsync() fails
+    // forcefully stop the worker thread
     void Terminate();
 
     // wait for the request queue
@@ -252,12 +252,13 @@ private:
     // ERROR_NOT_FOUND if entry not found
     DWORD RefreshChunkWrite(u64 chunk_idx);
 
-    // lock chunk file handle for LOCK_CHUNK
+    // handle LOCK_CHUNK, lock chunk file handle
     // Step 2. in locking chunk file handles
+    // optionally Step 3.
     DWORD LockChunk(u64 chunk_idx);
 
-    // unlock chunk file handle for UNLOCK_CHUNK
-    // retry operations in the waiting list
+    // handle UNLOCK_CHUNK, unlock chunk file handle
+    // retry operations from beginning in the waiting list
     DWORD UnlockChunk(u64 chunk_idx);
 
     // for READ_PAGE, WRITE_PAGE, WRITE_PAGE_PARTIAL
@@ -316,18 +317,23 @@ private:
     DWORD FlushPagesAsync(ChunkOpState& state, const PageRange& r);
 
     // Step 1. and 2. in locking chunk file handles
-    // Internal, InternalHigh, hEvent in state.ovl are set
+    // state.ovl is set:
+    // Internal: error code
+    // InternalHigh: number of WAIT_CHUNK
+    // hEvent: this
     DWORD PostLockChunk(ChunkOpState& state, u64 chunk_idx, bool create_new);
 
     // waiting for Step 3. in locking chunk file handles
     // Step 4. and forward if done
+    // state.ovl.InternalHigh: number of WAIT_CHUNK
     DWORD LockingChunk(ChunkOpState& msg, u64 chunk_idx);
 
     // close and unlock handles, broadcast UNLOCK_CHUNK
+    // reset Internal, InternalHigh, hEvent in state.ovl
     DWORD PostUnlockChunk(ChunkOpState& state, u64 chunk_idx);
 
     // start copying parent to current after OP_LOCKED
-    // Internal, InternalHigh, hEvent in state.ovl are set
+    // state.ovl.hEvent: for sync. with the background thread
     DWORD CreateChunkLocked(ChunkOpState& state, u64 chunk_idx);
 
     // copy parent to current or nothing
@@ -353,6 +359,7 @@ private:
     // zero-fill if buffer is nullptr
     DWORD PostWriteChunk(ChunkOpState& state);
 
+    // CreateChunkLocked() completed in write operation
     DWORD CompleteWriteCreateChunk(ChunkOpState& state, DWORD error);
 
     DWORD CompleteWriteChunk(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
