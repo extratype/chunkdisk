@@ -337,7 +337,8 @@ private:
     DWORD CreateChunkLocked(ChunkOpState& state, u64 chunk_idx);
 
     // copy parent to current or nothing
-    DWORD DoCreateChunkLocked(ChunkOpState& state, HANDLE handle_ro, HANDLE handle_rw);
+    // state.ovl.hEvent: error code when cancelled
+    DWORD DoCreateChunkLocked(ChunkOpState& state, u64 chunk_idx, HANDLE handle_ro, HANDLE handle_rw);
 
     // make chunk empty (truncate)
     DWORD UnmapChunkLocked(ChunkOpState& state, u64 chunk_idx);
