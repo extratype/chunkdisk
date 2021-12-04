@@ -245,7 +245,7 @@ private:
 
     // done using the handle from the pool
     // Step 3. in locking chunk file handles
-    // garbage-collect it from the pool if remove
+    // garbage-collect it from the pool if remove or locked
     DWORD CloseChunkAsync(u64 chunk_idx, bool is_write, bool remove = false);
 
     // Reset handle_rw if not being used, ERROR_BUSY otherwise
@@ -318,7 +318,7 @@ private:
 
     // Step 1. and 2. in locking chunk file handles
     // state.ovl is set:
-    // Internal: error code
+    // Internal: error code when cancelled
     // InternalHigh: number of WAIT_CHUNK
     // hEvent: this
     DWORD PostLockChunk(ChunkOpState& state, u64 chunk_idx, bool create_new);

@@ -270,10 +270,11 @@ Asynchronous Read(), Write():
         service.UnlockPage()
 
     Unaligned write:
-        not whole page?
-            Unaligned read...
         OpenChunk(read-write)...
             lock chunk, copy parent and retry from beginning if necessary
+        not whole page?
+            CloseChunk()
+            Unaligned read...
         service.LockPage()/service.ClaimPage()...
         copy/zero-fill page
         WriteFile()... from page
