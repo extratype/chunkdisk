@@ -442,7 +442,7 @@ DWORD CreateStorageUnit(PWSTR chunkdisk_file, const BOOLEAN write_protected, PWS
     err = [&bases, write_protected, pipe_name, &unit]() -> DWORD
     {
         constexpr wchar_t ProductId[] = L"ChunkDisk";
-        constexpr wchar_t ProductRevision[] = L"1.0";
+        constexpr wchar_t ProductRevision[] = L"1.2";
         auto unit_params = SPD_STORAGE_UNIT_PARAMS();
 
         UuidCreate(&unit_params.Guid);

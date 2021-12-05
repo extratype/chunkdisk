@@ -42,3 +42,10 @@ v1.0
 * Improve handling buffers for small-sized I/O's.
 * Fix bugs in unaligned (page-based) I/O's.
 * Fix inactivity timer.
+
+v1.2
+
+* New feature: differential disk.
+* The `.lock` file is not removed automatically on exit if `-W 0` option is given. Manually remove it to mount again with `-W 1` option.
+* Close file handles to trigger updating metadata when the virtual disk is not only idle but under low load for a minute.
+* Handle the case where the file system does not support FSCTL_SET_ZERO_DATA IOCTL.
