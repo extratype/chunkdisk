@@ -120,6 +120,7 @@ DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, const bool read_only, unique_ptr<
             // parent
             parent_r = wstring(token);
             if (!parent_r.empty() && parent_r[parent_r.size() - 1] == L'\r') parent_r.erase(parent_r.size() - 1);
+            if (parent_r.empty() || !std::filesystem::path(parent_r).is_absolute()) return ERROR_INVALID_PARAMETER;
 
             // disk size
             token = wcstok_s(nullptr, L"\n", &state);
@@ -180,6 +181,7 @@ DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, const bool read_only, unique_ptr<
             std::move(part_max),
             std::move(part_dirname),
             read_only);
+        // parent not set if err
         parent = std::move(parent_r);
     }
     catch (const bad_alloc&)
@@ -256,6 +258,12 @@ DWORD ReadChunkDiskBases(PCWSTR chunkdisk_file, const bool read_only, vector<Chu
             // base ok
             bases.emplace_back(std::move(*base));
             base.reset();
+
+            if (parent.empty())
+            {
+                err = ERROR_SUCCESS;
+                break;
+            }
         }
         catch (const bad_alloc&)
         {
@@ -263,15 +271,10 @@ DWORD ReadChunkDiskBases(PCWSTR chunkdisk_file, const bool read_only, vector<Chu
             break;
         }
 
-        if (parent.empty())
-        {
-            err = ERROR_SUCCESS;
-            break;
-        }
-
         // parents are always read_only
         err = ReadChunkDiskFile(parent.data(), true, base, parent);
         if (err != ERROR_SUCCESS) break;
+        // parent not set if err
     }
 
     if (err != ERROR_SUCCESS)
