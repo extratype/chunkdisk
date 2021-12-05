@@ -29,6 +29,7 @@ namespace
 constexpr auto BLOCK_SIZE = u32(512);
 
 // align with the underlying hardware, 4096 will work
+// like 512e with BLOCK_SIZE == 512 and PAGE_SIZE == 4096
 constexpr auto PAGE_SIZE = u32(4096);
 
 // must be a multiple of PAGE_SIZE
@@ -42,8 +43,8 @@ struct FileIdInfoHash
     {
         auto h = u64(0);
         h = hash_combine_64(h, u64(id_info.VolumeSerialNumber));
-        h = hash_combine_64(h, *(u64*)(&id_info.FileId.Identifier[0]));
-        h = hash_combine_64(h, *(u64*)(&id_info.FileId.Identifier[8]));
+        h = hash_combine_64(h, *(const u64*)(&id_info.FileId.Identifier[0]));
+        h = hash_combine_64(h, *(const u64*)(&id_info.FileId.Identifier[8]));
         return h;
     }
 };
@@ -72,7 +73,11 @@ struct ChunkDisk
     explicit ChunkDisk(vector<ChunkDiskBase> bases, SPD_STORAGE_UNIT* storage_unit)
         : service(std::move(bases), storage_unit) {}
 
-    ~ChunkDisk() { SpdStorageUnitDelete(service.storage_unit); }
+    ~ChunkDisk()
+    {
+        workers.clear();    // workers may refer service.storage_unit
+        SpdStorageUnitDelete(service.storage_unit);
+    }
 };
 
 /*
@@ -87,7 +92,7 @@ DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, const bool read_only, unique_ptr<
 {
     try
     {
-        // read .chunkdisk and convert to wstr
+        // read .chunkdisk and convert to wstring
         auto h = FileHandle(CreateFileW(
             chunkdisk_file, GENERIC_READ, FILE_SHARE_READ, nullptr,
             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
@@ -95,7 +100,7 @@ DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, const bool read_only, unique_ptr<
 
         auto size = LARGE_INTEGER();
         if (!GetFileSizeEx(h.get(), &size)) return GetLastError();
-        if (size.HighPart != 0) return ERROR_ARITHMETIC_OVERFLOW;
+        if (size.HighPart != 0 || int(size.LowPart) < 0) return ERROR_ARITHMETIC_OVERFLOW;
         if (size.LowPart == 0) return ERROR_INVALID_PARAMETER;
 
         auto buf = unique_ptr<u8[]>(new u8[size_t(size.LowPart)]);
@@ -172,6 +177,7 @@ DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, const bool read_only, unique_ptr<
         if (chunk_count == 0 || disk_size > chunk_size * chunk_count) return ERROR_INVALID_PARAMETER;
         if (chunk_count > std::accumulate(part_max.begin(), part_max.end(), 0ull)) return ERROR_INVALID_PARAMETER;
 
+        // ChunkDiskBase is not move-assignable
         base = std::make_unique<ChunkDiskBase>(
             BLOCK_SIZE,
             PAGE_SIZE / BLOCK_SIZE,
@@ -309,33 +315,24 @@ ChunkDiskWorker* GetAssignedWorker(SPD_STORAGE_UNIT* StorageUnit)
 // op_kind: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK
 BOOLEAN PostWork(SPD_STORAGE_UNIT* StorageUnit, const ChunkOpKind op_kind, u64 block_addr, u32 count)
 {
-    auto context = SpdStorageUnitGetOperationContext();
-
-    if (op_kind == UNMAP_CHUNK)
-    {
-        // for UNMAP_CHUNK use the first address to choose a worker
-        // ChunkDiskWorker::PostWork() ignores block_addr
-        auto* descs = recast<SPD_UNMAP_DESCRIPTOR*>(context->DataBuffer);
-        if (count) block_addr = descs[0].BlockAddress;
-    }
-
     auto* worker = GetAssignedWorker(StorageUnit);
+
+    auto context = SpdStorageUnitGetOperationContext();
     auto err = DWORD(ERROR_SUCCESS);
     auto& status = context->Response->Status;
 
     while (true)
     {
         err = worker->PostWork(context, op_kind, block_addr, count);
-        if (status.ScsiStatus != SCSISTAT_GOOD) break;
-        if (err != ERROR_BUSY) break;
+        if (err != ERROR_BUSY || status.ScsiStatus != SCSISTAT_GOOD) break;
         err = worker->Wait();
         if (err != ERROR_SUCCESS) break;
     }
-
     if (err != ERROR_IO_PENDING && err != ERROR_SUCCESS && status.ScsiStatus == SCSISTAT_GOOD)
     {
         SetScsiError(&status, SCSI_SENSE_HARDWARE_ERROR, SCSI_ADSENSE_NO_SENSE);
     }
+
     return (err == ERROR_IO_PENDING) ? FALSE : TRUE;
 }
 
@@ -472,9 +469,7 @@ DWORD CreateStorageUnit(PWSTR chunkdisk_file, const BOOLEAN write_protected, PWS
         unit_params.CacheSupported = TRUE;
         unit_params.UnmapSupported = TRUE;
 
-        auto err = SpdStorageUnitCreate(pipe_name, &unit_params, &CHUNK_DISK_INTERFACE, &unit);
-        if (err != ERROR_SUCCESS) return err;
-        return ERROR_SUCCESS;
+        return SpdStorageUnitCreate(pipe_name, &unit_params, &CHUNK_DISK_INTERFACE, &unit);
     }();
     if (err != ERROR_SUCCESS)
     {
@@ -518,8 +513,8 @@ DWORD StopWorkers(ChunkDisk& cdisk, const DWORD timeout_ms = INFINITE)
                 if (err != ERROR_SUCCESS) return err;
                 handles.push_back(h);
             }
-
             if (handles.empty()) return ERROR_SUCCESS;
+
             auto err = WaitForMultipleObjects(handles.size(), &handles.front(), TRUE, timeout_ms);
             if (WAIT_OBJECT_0 <= err && err < WAIT_OBJECT_0 + handles.size()) return ERROR_SUCCESS;
             if (WAIT_ABANDONED_0 <= err && err < WAIT_ABANDONED_0 + handles.size()) return ERROR_ABANDONED_WAIT_0;
@@ -540,8 +535,8 @@ DWORD StopWorkers(ChunkDisk& cdisk, const DWORD timeout_ms = INFINITE)
 DWORD StartWorkers(ChunkDisk& cdisk, const u32 num_workers)
 {
     auto& workers = cdisk.workers;
-    auto err = DWORD(ERROR_SUCCESS);
 
+    auto err = DWORD(ERROR_SUCCESS);
     try
     {
         workers.reserve(num_workers);
@@ -556,7 +551,6 @@ DWORD StartWorkers(ChunkDisk& cdisk, const u32 num_workers)
     {
         err = ERROR_NOT_ENOUGH_MEMORY;
     }
-
     if (err != ERROR_SUCCESS) StopWorkers(cdisk);
     return err;
 }
@@ -574,7 +568,7 @@ namespace
 
 struct Usage : public std::exception
 {
-    static constexpr PCWSTR PROGNAME = L"chunkdisk";
+    static constexpr WCHAR PROGNAME[] = L"chunkdisk";
 
     static constexpr WCHAR usage[] = L""
         "usage: %s OPTIONS\n"
@@ -716,7 +710,7 @@ int wmain(int argc, wchar_t** argv)
 
     auto* storage_unit = cdisk->service.storage_unit;
     SpdStorageUnitSetDebugLog(storage_unit, DebugFlags);
-    err = SpdStorageUnitStartDispatcher(cdisk->service.storage_unit, NumThreads);
+    err = SpdStorageUnitStartDispatcher(storage_unit, NumThreads);
     if (err != ERROR_SUCCESS)
     {
         SpdLogErr(L"error: cannot start ChunkDisk: error %lu", err);
