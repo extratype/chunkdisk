@@ -26,7 +26,7 @@ enum ChunkOpKind : u32
     READ_PAGE,              // unaligned, read in pages
     WRITE_PAGE,             // unaligned, write in pages
     WRITE_PAGE_PARTIAL,     // not page aligned, read and write in pages
-    UNMAP_CHUNK,            // become write with buffer == nullptr if partial
+    UNMAP_CHUNK,            // become write with buffer == nullptr if and only if partial
 
     // for PostMsg()
     LOCK_CHUNK,             // stop using and close the chunk by setting ChunkFileHandle::locked
@@ -158,7 +158,7 @@ class ChunkDiskWorker
     u32 buffers_load_ = 0;
     u32 buffers_load_max_ = 0;
 
-    const u32 max_handles_per_;
+    const u32 max_handles_per_; // per work, UNMAP_CHUNK may exceed this
     std::unique_ptr<std::shared_mutex> mutex_handles_;  // reuse, close later
     Map<u64, ChunkFileHandle> chunk_handles_;   // add to back, evict from front
     u32 handles_ro_load_ = 0;
@@ -171,7 +171,7 @@ public:
 
     ~ChunkDiskWorker();
 
-    ChunkDiskWorker(ChunkDiskWorker&&) = default;
+    ChunkDiskWorker(ChunkDiskWorker&&) noexcept = default;
 
     bool IsRunning() { return thread_.joinable(); }
 
@@ -216,8 +216,6 @@ public:
     DWORD PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, ChunkOpKind op_kind, u64 block_addr, u32 count);
 
 private:
-    static void ThreadProc(LPVOID param);
-
     // event loop of the worker thread
     void DoWorks();
 
@@ -282,7 +280,7 @@ private:
     DWORD PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_addr, u32 count, LPVOID& buffer);
 
     // always get chunk_idx from ChunkOpState::idx
-    u64 GetChunkIndex(ChunkOpState& state);
+    u64 GetChunkIndex(ChunkOpState& state) const;
 
     // do an asynchronous operation
     // ERROR_IO_PENDING if not done
@@ -326,8 +324,9 @@ private:
 
     // waiting for Step 3. in locking chunk file handles
     // Step 4. and forward if done
+    // state.ovl.Internal: error code when cancelled
     // state.ovl.InternalHigh: number of WAIT_CHUNK
-    DWORD LockingChunk(ChunkOpState& msg, u64 chunk_idx);
+    DWORD LockingChunk(u64 chunk_idx);
 
     // close and unlock handles, broadcast UNLOCK_CHUNK
     // reset Internal, InternalHigh, hEvent in state.ovl
@@ -342,7 +341,7 @@ private:
     DWORD DoCreateChunkLocked(ChunkOpState& state, u64 chunk_idx, HANDLE handle_ro, HANDLE handle_rw);
 
     // make chunk empty (truncate)
-    DWORD UnmapChunkLocked(ChunkOpState& state, u64 chunk_idx);
+    DWORD UnmapChunkLocked(u64 chunk_idx);
 
     // truncate chunk existing on current base
     // if not being used for write
