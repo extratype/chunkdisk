@@ -437,7 +437,7 @@ bool ChunkDiskService::CheckChunkLocked(const u64 chunk_idx, LPVOID& user)
 DWORD ChunkDiskService::UnlockChunk(const u64 chunk_idx)
 {
     auto lk = SRWLock(mutex_chunk_lock_, true);
-    return chunk_lock_.erase(chunk_idx) == 1 ? ERROR_SUCCESS : ERROR_NOT_FOUND;
+    return (chunk_lock_.erase(chunk_idx) != 0) ? ERROR_SUCCESS : ERROR_NOT_FOUND;
 }
 
 DWORD ChunkDiskService::UnmapRange(SRWLock& lk, const u64 chunk_idx, const u64 start_off, const u64 end_off)
