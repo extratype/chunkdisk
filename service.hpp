@@ -76,11 +76,11 @@ public:
 
     SPD_STORAGE_UNIT* const storage_unit;
 
+private:
     // must be positive
     // may exceed temporarily when pages are being used for I/O
-    const u32 max_pages;
+    const u32 max_pages_;
 
-private:
     std::shared_mutex mutex_pages_;                 // not movable
     // BLOCK_SIZE -> PAGE_SIZE access
     // read cache, write through
@@ -98,8 +98,7 @@ private:
 
 public:
     // bases: ReadChunkDiskBases()
-    ChunkDiskService(std::vector<ChunkDiskBase> bases, SPD_STORAGE_UNIT* storage_unit, u32 max_pages)
-        : bases(std::move(bases)), storage_unit(storage_unit), max_pages(max_pages) {}
+    ChunkDiskService(std::vector<ChunkDiskBase> bases, SPD_STORAGE_UNIT* storage_unit);
 
     u32 MaxTransferLength() const { return storage_unit->StorageUnitParams.MaxTransferLength; }
 

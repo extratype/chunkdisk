@@ -34,9 +34,6 @@ constexpr auto PAGE_SIZE = u32(4096);
 // must be a multiple of PAGE_SIZE
 constexpr auto MAX_TRANSFER_LENGTH = u32(1024 * 1024);
 
-// maximum number of cached pages (write through)
-constexpr auto MAX_PAGES = u32(2048);
-
 constexpr auto MAX_WORKERS = u32(MAXIMUM_WAIT_OBJECTS);
 
 struct FileIdInfoHash
@@ -73,7 +70,7 @@ struct ChunkDisk
     std::atomic<u32> workers_assigned = 0;
 
     explicit ChunkDisk(vector<ChunkDiskBase> bases, SPD_STORAGE_UNIT* storage_unit)
-        : service(std::move(bases), storage_unit, MAX_PAGES) {}
+        : service(std::move(bases), storage_unit) {}
 
     ~ChunkDisk() { SpdStorageUnitDelete(service.storage_unit); }
 };

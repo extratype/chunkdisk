@@ -13,6 +13,15 @@ using std::bad_alloc;
 namespace chunkdisk
 {
 
+// maximum number of cached pages (write through)
+static constexpr auto MAX_PAGES = u32(8192);
+
+ChunkDiskService::ChunkDiskService(std::vector<ChunkDiskBase> bases, SPD_STORAGE_UNIT* storage_unit)
+    : bases(std::move(bases)), storage_unit(storage_unit), max_pages_(MAX_PAGES)
+{
+
+}
+
 DWORD ChunkDiskService::Start()
 {
     if (bases.empty()) return ERROR_INVALID_PARAMETER;
@@ -90,11 +99,11 @@ DWORD ChunkDiskService::LockPage(const u64 page_idx, LPVOID& ptr, LPVOID& user)
         return entry != nullptr;
     };
 
-    // try to keep < max_pages
+    // try to keep < max_pages_
     // lk: shared, resets lk
     auto trim_pages = [this, &lk]()
     {
-        while (cached_pages_.size() >= max_pages)
+        while (cached_pages_.size() >= max_pages_)
         {
             // find entry to evict
             auto it_evict = cached_pages_.end();
