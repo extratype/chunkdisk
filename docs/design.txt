@@ -54,7 +54,7 @@ Asynchronous I/O:
                 Windows caches virtual disk
                 Cluster size is 4096 bytes by default
 
-Close file handles if idle to trigger metadata updates
+Close unused file handles to trigger metadata updates
 
 --------------------------------------------------------------------------------
 
@@ -197,7 +197,7 @@ ChunkDiskWorker:
         Check idle file handles:
             Count max. load of pool
             PeriodicCheck():
-                check if low
+                check if under low load
                 shrink to fit load
 
     ChunkWork queue:
@@ -263,22 +263,22 @@ Asynchronous Read(), Write():
 
     Unaligned read:
         OpenChunk(read-only)...
-        service.LockPage()...
+        LockPage()...
         ReadFile()... to page
         CloseChunk()
         copy to buffer
-        service.UnlockPage()
+        UnlockPage()
 
     Unaligned write:
         not whole page?
             Unaligned read...
         OpenChunk(read-write)...
             lock chunk, copy parent and retry from beginning if necessary
-        service.LockPage()/service.ClaimPage()...
+        LockPage()/service.ClaimPage()...
         copy/zero-fill page
         WriteFile()... from page
         CloseChunk()
-        service.UnlockPage()
+        UnlockPage()
 
 Unmap():
     whole chunk: lock and truncate
