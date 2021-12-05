@@ -363,7 +363,7 @@ BOOLEAN Flush(SPD_STORAGE_UNIT* StorageUnit,
                      UINT64 BlockAddress, UINT32 BlockCount,
                      SPD_STORAGE_UNIT_STATUS* Status)
 {
-    SpdWarnOnce(!StorageUnit->StorageUnitParams.WriteProtected);
+    // SpdWarnOnce(!StorageUnit->StorageUnitParams.WriteProtected);
     SpdWarnOnce(StorageUnit->StorageUnitParams.CacheSupported);
 
     // unbuffered, pages write through, nothing to flush
