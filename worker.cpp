@@ -19,6 +19,17 @@ static constexpr auto LOW_LOAD_THRESHOLD = u32(4);
 static constexpr auto MAX_QD = u32(32);    // QD32
 static constexpr auto STOP_TIMEOUT_MS = u32(5000);
 
+ChunkDiskWorker::ChunkDiskWorker(ChunkDiskService& service)
+    : service_(service),
+      max_handles_per_([&service]() -> u32
+      {
+          auto& base = service.bases[0];
+          return max(1, service.MaxTransferLength() / base.BlockBytes(base.ChunkBlocks(1)));
+      }())
+{
+
+}
+
 ChunkDiskWorker::~ChunkDiskWorker()
 {
     auto err = Stop(STOP_TIMEOUT_MS);
@@ -536,8 +547,8 @@ DWORD ChunkDiskWorker::OpenChunkAsync(const u64 chunk_idx, const bool is_write,
     auto emplaced = false;
     if (it == chunk_handles_.end())
     {
-        // try to keep MAX_QD by closing old handles
-        if (chunk_handles_.size() >= MAX_QD)
+        // try to keep max. by closing old handles
+        if (chunk_handles_.size() >= max_handles_per_ * MAX_QD)
         {
             for (auto it1 = chunk_handles_.begin(); it1 != chunk_handles_.end();)
             {
@@ -548,7 +559,7 @@ DWORD ChunkDiskWorker::OpenChunkAsync(const u64 chunk_idx, const bool is_write,
                     continue;
                 }
                 it1 = chunk_handles_.erase(it1);
-                if (chunk_handles_.size() < MAX_QD) break;
+                if (chunk_handles_.size() < max_handles_per_ * MAX_QD) break;
             }
         }
         try
@@ -1210,7 +1221,7 @@ DWORD ChunkDiskWorker::PeriodicCheck()
 {
     auto lkb = SRWLock(*mutex_buffers_, true);
     const auto blm = (buffers_load_max_ != 0) ? buffers_load_max_ : buffers_load_;
-    if (blm <= LOW_LOAD_THRESHOLD && !buffers_.empty())
+    if (blm <= LOW_LOAD_THRESHOLD + 1 && !buffers_.empty())
     {
         // current: buffers_load_ + buffers_.size()
         // one extra buffer for dispatcher
@@ -1220,10 +1231,12 @@ DWORD ChunkDiskWorker::PeriodicCheck()
     }
     lkb.unlock();
 
+    const auto low_handles = max_handles_per_ * LOW_LOAD_THRESHOLD;
+
     auto lkh = SRWLock(*mutex_handles_, true);
     const auto hrom = (handles_ro_load_max_ != 0) ? handles_ro_load_max_ : handles_ro_load_;
     const auto hrwm = (handles_rw_load_max_ != 0) ? handles_rw_load_max_ : handles_rw_load_;
-    if (hrom <= LOW_LOAD_THRESHOLD || hrwm <= LOW_LOAD_THRESHOLD)
+    if (hrom <= low_handles || hrwm <= low_handles)
     {
         auto count_ro = u32(0);
         auto count_rw = u32(0);
@@ -1234,8 +1247,8 @@ DWORD ChunkDiskWorker::PeriodicCheck()
             if (cfh.handle_rw) ++count_rw;
         }
 
-        auto unused_ro = (hrom <= LOW_LOAD_THRESHOLD && count_ro >= hrom) ? (count_ro - hrom) : 0;
-        auto unused_rw = (hrwm <= LOW_LOAD_THRESHOLD && count_rw >= hrwm) ? (count_rw - hrwm) : 0;
+        auto unused_ro = (hrom <= low_handles && count_ro >= hrom) ? (count_ro - hrom) : 0;
+        auto unused_rw = (hrwm <= low_handles && count_rw >= hrwm) ? (count_rw - hrwm) : 0;
         for (auto it = chunk_handles_.begin(); it != chunk_handles_.end();)
         {
             if (unused_ro == 0 && unused_rw == 0) break;
@@ -1251,7 +1264,7 @@ DWORD ChunkDiskWorker::PeriodicCheck()
                 cfh.handle_rw.reset();
                 --unused_rw;
             }
-            if (!cfh.handle_ro && !cfh.handle_rw)
+            if (!cfh.handle_ro && !cfh.handle_rw && !cfh.locked && cfh.waiting.empty())
             {
                 it = chunk_handles_.erase(it);
             }
@@ -1261,8 +1274,8 @@ DWORD ChunkDiskWorker::PeriodicCheck()
             }
         }
 
-        if (hrom <= LOW_LOAD_THRESHOLD) handles_ro_load_max_ = 0;
-        if (hrwm <= LOW_LOAD_THRESHOLD) handles_rw_load_max_ = 0;
+        if (hrom <= low_handles) handles_ro_load_max_ = 0;
+        if (hrwm <= low_handles) handles_rw_load_max_ = 0;
     }
     lkh.unlock();
 

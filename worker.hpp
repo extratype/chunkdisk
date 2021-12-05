@@ -158,6 +158,7 @@ class ChunkDiskWorker
     u32 buffers_load_ = 0;
     u32 buffers_load_max_ = 0;
 
+    const u32 max_handles_per_;
     std::unique_ptr<std::shared_mutex> mutex_handles_;  // reuse, close later
     Map<u64, ChunkFileHandle> chunk_handles_;   // add to back, evict from front
     u32 handles_ro_load_ = 0;
@@ -166,7 +167,7 @@ class ChunkDiskWorker
     u32 handles_rw_load_max_ = 0;
 
 public:
-    explicit ChunkDiskWorker(ChunkDiskService& service) : service_(service) {}
+    explicit ChunkDiskWorker(ChunkDiskService& service);
 
     ~ChunkDiskWorker();
 
