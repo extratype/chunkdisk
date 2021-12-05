@@ -572,11 +572,11 @@ vector<ChunkDiskWorker>& GetWorkers(SPD_STORAGE_UNIT* StorageUnit)
 namespace
 {
 
-constexpr PCWSTR PROGNAME = L"chunkdisk";
-
-[[noreturn]] void usage()
+struct Usage : public std::exception
 {
-    static WCHAR usage[] = L""
+    static constexpr PCWSTR PROGNAME = L"chunkdisk";
+
+    static constexpr WCHAR usage[] = L""
         "usage: %s OPTIONS\n"
         "\n"
         "options:\n"
@@ -588,15 +588,12 @@ constexpr PCWSTR PROGNAME = L"chunkdisk";
         "    -D DebugLogFile                     Debug log file; - for stderr\n"
         "    -p \\\\.\\pipe\\PipeName                Listen on pipe; omit to use driver\n"
         "";
-
-    SpdLogErr(usage, PROGNAME);
-    ExitProcess(ERROR_INVALID_PARAMETER);
-}
+};
 
 ULONG argtol(wchar_t** argp, ULONG deflt)
 {
     if (argp[0] == nullptr)
-        usage();
+        throw Usage();
 
     PWSTR endp;
     ULONG ul = wcstol(argp[0], &endp, 10);
@@ -606,7 +603,7 @@ ULONG argtol(wchar_t** argp, ULONG deflt)
 PWSTR argtos(wchar_t** argp)
 {
     if (argp[0] == nullptr)
-        usage();
+        throw Usage();
 
     return argp[0];
 }
@@ -631,39 +628,47 @@ int wmain(int argc, wchar_t** argv)
     PWSTR PipeName = nullptr;
     ULONG DebugFlags = 0;
 
-    for (argp = argv + 1; argp[0] != nullptr; argp++)
+    try
     {
-        if (argp[0][0] != L'-')
-            break;
-        switch (argp[0][1])
+        for (argp = argv + 1; argp[0] != nullptr; argp++)
         {
-        case L'?':
-            usage();
-        case L'f':
-            ChunkDiskFile = argtos(++argp);
-            break;
-        case L'W':
-            WriteAllowed = argtol(++argp, WriteAllowed);
-            break;
-        case L't':
-            NumThreads = argtol(++argp, NumThreads);
-            break;
-        case L'd':
-            DebugFlags = argtol(++argp, DebugFlags);
-            break;
-        case L'D':
-            DebugLogFile = argtos(++argp);
-            break;
-        case L'p':
-            PipeName = argtos(++argp);
-            break;
-        default:
-            usage();
+            if (argp[0][0] != L'-')
+                break;
+            switch (argp[0][1])
+            {
+            case L'?':
+                throw Usage();
+            case L'f':
+                ChunkDiskFile = argtos(++argp);
+                break;
+            case L'W':
+                WriteAllowed = argtol(++argp, WriteAllowed);
+                break;
+            case L't':
+                NumThreads = argtol(++argp, NumThreads);
+                break;
+            case L'd':
+                DebugFlags = argtol(++argp, DebugFlags);
+                break;
+            case L'D':
+                DebugLogFile = argtos(++argp);
+                break;
+            case L'p':
+                PipeName = argtos(++argp);
+                break;
+            default:
+                throw Usage();
+            }
         }
-    }
 
-    if (argp[0] != nullptr || ChunkDiskFile == nullptr)
-        usage();
+        if (argp[0] != nullptr || ChunkDiskFile == nullptr)
+            throw Usage();
+    }
+    catch (const Usage&)
+    {
+        SpdLogErr(Usage::usage, Usage::PROGNAME);
+        return ERROR_INVALID_PARAMETER;
+    }
 
     DWORD err;
     if (NumThreads == 0)
@@ -719,7 +724,7 @@ int wmain(int argc, wchar_t** argv)
     }
 
     SpdLogInfo(L"%s -f %s -W %u -t %d%s%s",
-        PROGNAME,
+        Usage::PROGNAME,
         ChunkDiskFile,
         !!WriteAllowed,
         NumThreads,
