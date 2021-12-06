@@ -239,7 +239,7 @@ private:
     // If locked, wait for it asynchronously if state given or ERROR_SHARING_VIOLATION.
     DWORD OpenChunkAsync(u64 chunk_idx, bool is_write, HANDLE& handle_out, ChunkOpState* state = nullptr);
 
-    // Asynchronously wait for a locked chunk manually.
+    // manually wait for a locked chunk asynchronously.
     DWORD WaitChunkAsync(u64 chunk_idx, ChunkOpState* state);
 
     // done using the handle from the pool
@@ -307,12 +307,14 @@ private:
     void StopWorks();
 
     // ChunkDiskService::LockPage() with waiting list
+    // wait asynchronously if locked by the same thread
     DWORD LockPageAsync(ChunkOpState& state, u64 page_idx, LPVOID& ptr);
 
     // ChunkDiskService::UnlockPage() and resume the waiting HEAD
     DWORD UnlockPageAsync(ChunkOpState& state, u64 page_idx, bool remove = false);
 
-    // ChunkDiskService::FlushPages() and wait for a busy page
+    // ChunkDiskService::FlushPages()
+    // wait asynchronously if one of pages locked by the same thread
     DWORD FlushPagesAsync(ChunkOpState& state, const PageRange& r);
 
     // Step 1. and 2. in locking chunk file handles
