@@ -529,4 +529,9 @@ void ChunkDiskService::FlushUnmapRanges()
     chunk_unmapped_.clear();
 }
 
+void ChunkDiskService::SyncUnmapRanges()
+{
+    auto lk = SRWLock(mutex_unmapped_, false);
+}
+
 }

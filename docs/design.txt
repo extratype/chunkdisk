@@ -265,20 +265,20 @@ Asynchronous Read(), Write():
         OpenChunk(read-only)...
         LockPage()...
         ReadFile()... to page
-        CloseChunk()
         copy to buffer
         UnlockPage()
+        CloseChunk()
 
     Unaligned write:
         not whole page?
-            Unaligned read...
+            Unaligned read..., keep page
         OpenChunk(read-write)...
             lock chunk, copy parent and retry from beginning if necessary
         LockPage()/service.ClaimPage()...
         copy/zero-fill page
         WriteFile()... from page
-        CloseChunk()
         UnlockPage()
+        CloseChunk()
 
 Unmap():
     whole chunk: lock and truncate
@@ -291,7 +291,7 @@ Unmap():
 
         across multiple requests:
             before whole Unmap(): service.FlushUnmapRanges(chunk)
-            before Write(): service.FlushUnmapRanges(chunk)
+            before Write(): service.FlushUnmapRanges(chunk) or just sync.
             after FSCTL_SET_ZERO_DATA:
                 failure: service.FlushUnmapRanges(chunk)
                 success:

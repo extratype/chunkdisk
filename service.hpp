@@ -172,6 +172,9 @@ public:
     // remove all marked unmap ranges
     void FlushUnmapRanges();
 
+    // do nothing, sync only
+    void SyncUnmapRanges();
+
     // last disk I/O request
     u64 GetPostFileTime() const { return post_ft_.load(std::memory_order_acquire); }
 
