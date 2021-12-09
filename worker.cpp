@@ -1989,12 +1989,23 @@ DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
         if (err != ERROR_NOT_FOUND)
         {
             // page hit or error
-            if (h != INVALID_HANDLE_VALUE) CloseChunkAsync(chunk_idx, false);
+            if (h != INVALID_HANDLE_VALUE)
+            {
+                CloseChunkAsync(chunk_idx, false);
+            }
+            else if (err == ERROR_SUCCESS)
+            {
+                memset(ptr, 0, service_.bases[0].PageBytes(1));
+            }
             return err;
         }
 
         // page miss
-        if (h == INVALID_HANDLE_VALUE) return ERROR_SUCCESS;
+        if (h == INVALID_HANDLE_VALUE)
+        {
+            // page already zero-filled
+            return ERROR_SUCCESS;
+        }
 
         const auto length_bytes = u32(service_.bases[0].PageBytes(1));
         auto bytes_read = DWORD();
@@ -2022,7 +2033,6 @@ DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
         if (state.kind != WRITE_PAGE_PARTIAL)
         {
             // page hit, chunk not found or empty
-            // page already zero-filled
             auto& base = service_.bases[0];
             auto length_bytes = base.BlockBytes(state.end_off - state.start_off);
             memcpy(state.buffer, recast<u8*>(ptr) + base.BlockBytes(state.start_off), length_bytes);
