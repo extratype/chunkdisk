@@ -307,22 +307,64 @@ DWORD ChunkDiskService::FlushPages(const PageRange& r, LPVOID& user)
 {
     auto lk = SRWLock(mutex_pages_, false);
 
-    for (auto i = r.start_idx; i <= r.end_idx; ++i)
-    {
-        if (cached_pages_.empty()) return ERROR_SUCCESS;
-        auto it = cached_pages_.find(r.base_idx + i);
-        if (it == cached_pages_.end()) continue;
+    if (cached_pages_.empty()) return ERROR_SUCCESS;
+    const auto size = cached_pages_.size();
 
-        auto err = RemovePageEntry(lk, it);
-        if (err == ERROR_LOCK_FAILED)
+    if (size > r.end_idx - r.start_idx + 1)
+    {
+        for (auto i = r.start_idx; i <= r.end_idx; ++i)
         {
-            // lk not reset if ERROR_LOCK_FAILED
-            user = (*it).second.user;
-            return ERROR_LOCK_FAILED;
+            auto it = cached_pages_.find(r.base_idx + i);
+            if (it == cached_pages_.end()) continue;
+
+            auto err = RemovePageEntry(lk, it);
+            if (err == ERROR_LOCK_FAILED)
+            {
+                // lk not reset if ERROR_LOCK_FAILED
+                user = (*it).second.user;
+                return ERROR_LOCK_FAILED;
+            }
+            else if (err != ERROR_SUCCESS)
+            {
+                return err;
+            }
         }
-        else if (err != ERROR_SUCCESS)
+    }
+    else
+    {
+        // inverse search
+        // RemovePageEntry() resets lk
+        // Iterating over cached_pages_ is not thread safe
+        auto pages = std::vector<u64>();
+        try
         {
-            return err;
+            for (auto&& p : cached_pages_)
+            {
+                auto idx = p.first;
+                if (r.base_idx + r.start_idx <= idx && idx <= r.base_idx + r.end_idx) pages.push_back(idx);
+            }
+        }
+        catch (const bad_alloc&)
+        {
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+
+        for (auto idx : pages)
+        {
+            auto it = cached_pages_.find(idx);
+            if (it == cached_pages_.end()) continue;
+
+            auto err = RemovePageEntry(lk, it);
+            if (err == ERROR_LOCK_FAILED)
+            {
+                // lk not reset if ERROR_LOCK_FAILED
+                user = (*it).second.user;
+                return ERROR_LOCK_FAILED;
+            }
+            else if (err != ERROR_SUCCESS)
+            {
+                return err;
+            }
         }
     }
 
