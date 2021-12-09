@@ -15,7 +15,7 @@ namespace chunkdisk
 extern std::vector<ChunkDiskWorker>& GetWorkers(SPD_STORAGE_UNIT* StorageUnit);
 
 static constexpr auto STANDBY_MS = u32(60000);
-static constexpr auto LOW_LOAD_THRESHOLD = u32(4);
+static constexpr auto LOW_LOAD_THRESHOLD = u32(2);  // load by CPU and file system, not by media
 static constexpr auto MAX_QD = u32(32);    // QD32
 static constexpr auto STOP_TIMEOUT_MS = u32(5000);
 
