@@ -678,7 +678,7 @@ DWORD ChunkDiskWorker::OpenChunkAsync(const u64 chunk_idx, const bool is_write,
         }
         return ERROR_SUCCESS;
     }();
-    if ((err != ERROR_SUCCESS || handle_out == INVALID_HANDLE_VALUE) && emplaced)
+    if (emplaced && (err != ERROR_SUCCESS || handle_out == INVALID_HANDLE_VALUE))
     {
         if (cfh.waiting.empty()) chunk_handles_.erase(it);
     }
@@ -702,7 +702,12 @@ DWORD ChunkDiskWorker::WaitChunkAsync(const u64 chunk_idx, ChunkOpState* state)
             if (emplaced) chunk_handles_.erase(it);
             return ERROR_NOT_ENOUGH_MEMORY;
         }
-        if (emplaced) cfh.locked = true;    // LOCK_CHUNK may not handled yet
+        if (emplaced)
+        {
+            // LOCK_CHUNK may not handled yet
+            // WAIT_CHUNK sent when handling LOCK_CHUNK
+            cfh.locked = true;
+        }
         return ERROR_IO_PENDING;
     }
     catch (const bad_alloc&)
@@ -797,6 +802,7 @@ DWORD ChunkDiskWorker::LockChunk(const u64 chunk_idx)
         auto& cfh = (*it).second;
 
         cfh.locked = true;
+        // WAIT_CHUNK sent in CloseChunkAsync() otherwise
         if (cfh.refs_ro == 0 && cfh.refs_rw == 0)
         {
             cfh.handle_ro.reset();
@@ -2227,6 +2233,10 @@ DWORD ChunkDiskWorker::CompleteWritePage(ChunkOpState& state, DWORD error, DWORD
 
 DWORD ChunkDiskWorker::PostUnmapChunk(ChunkOpState& state)
 {
+    auto& base = service_.bases[0];
+    auto err = FlushPagesAsync(state, base.BlockPageRange(state.idx, 0, base.chunk_length));
+    if (err != ERROR_SUCCESS) return err;
+
     service_.FlushUnmapRanges(state.idx);
     if (state.step == OP_READY)
     {
@@ -2235,7 +2245,7 @@ DWORD ChunkDiskWorker::PostUnmapChunk(ChunkOpState& state)
     }
     else if (state.step == OP_LOCKED)
     {
-        auto err = UnmapChunkLocked(state.idx);
+        err = UnmapChunkLocked(state.idx);
         PostUnlockChunk(state, state.idx);
         return err;
     }

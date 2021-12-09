@@ -147,17 +147,18 @@ ChunkDiskWorker:
     ChunkOpState:
         Immediate I/O operations: done synchronously in the dispatcher thread
             * read, chunk empty or does not exist
-            * read a cached page
-            * unmap whole chunk
+            * read a cached page if chunk exists and not empty
 
         Asynchronous I/O operations: may be done synchronously
             * read/write, aligned
             * read/write in a page
             * partial write in a page: read then write
-            * partial unmap:
-                becomes write operation with buffer nullptr
-                partial unmap if and only if write operation with buffer nullptr
-                zero-fill using FSCTL_SET_ZERO_DATA (see below)
+            * unmap:
+                whole: lock and truncate
+                partial:
+                    becomes write operation with buffer nullptr
+                    partial unmap if and only if write operation with buffer nullptr
+                    zero-fill using FSCTL_SET_ZERO_DATA (see below)
 
         Messages: post IOCP packet directly
             * locking chunk file handle
@@ -281,6 +282,7 @@ Asynchronous Read(), Write():
         CloseChunk()
 
 Unmap():
+    FlushPages()...
     whole chunk: lock and truncate
     partial: zero-fill
 
