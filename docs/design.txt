@@ -213,7 +213,7 @@ ChunkDiskWorker:
         no QD for messages
 
 Synchronize pages:
-    flush pages before aligned read/write
+    flush pages before aligned read/write and unmap
     shared lock for page read
     exclusive lock for page miss
     exclusive lock for partial page write: atomic read and write

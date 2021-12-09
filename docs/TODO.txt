@@ -3,3 +3,5 @@ profile performance (kernel time, user time) for SSD 4K I/O
     data structure
         reinsert_back()
     asynchronous steps
+
+Option: disable zero-fill when unmap: -Z 0 (don't) or 1 (do) (LBPRZ always 0)
