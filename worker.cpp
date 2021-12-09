@@ -1224,18 +1224,16 @@ DWORD ChunkDiskWorker::PeriodicCheck()
 {
     auto lkb = SRWLock(*mutex_buffers_, true);
     const auto blm = (buffers_load_max_ != 0) ? buffers_load_max_ : buffers_load_;
-    if (blm <= LOW_LOAD_THRESHOLD + 1 && !buffers_.empty())
+    if (blm <= LOW_LOAD_THRESHOLD && !buffers_.empty())
     {
         // current: buffers_load_ + buffers_.size()
-        // one extra buffer for dispatcher
-        auto new_size = min(blm - buffers_load_ + 1, buffers_.size());
+        auto new_size = min(blm - buffers_load_, buffers_.size());
         buffers_.resize(new_size);
         buffers_load_max_ = 0;
     }
     lkb.unlock();
 
     const auto low_handles = max_handles_per_ * LOW_LOAD_THRESHOLD;
-
     auto lkh = SRWLock(*mutex_handles_, true);
     const auto hrom = (handles_ro_load_max_ != 0) ? handles_ro_load_max_ : handles_ro_load_;
     const auto hrwm = (handles_rw_load_max_ != 0) ? handles_rw_load_max_ : handles_rw_load_;
