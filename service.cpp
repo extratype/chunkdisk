@@ -14,7 +14,7 @@ namespace chunkdisk
 {
 
 // maximum number of cached pages (write through)
-static constexpr auto MAX_PAGES = u32(8192);
+static constexpr auto MAX_PAGES = u32(2048);
 
 ChunkDiskService::ChunkDiskService(std::vector<ChunkDiskBase> bases, SPD_STORAGE_UNIT* storage_unit)
     : bases(std::move(bases)), storage_unit(storage_unit), max_pages_(MAX_PAGES)
