@@ -71,6 +71,12 @@ public:
         typename std::list<const KT*>::iterator end_it_;    // key_order_.end()
 
     public:
+        using iterator_category = std::bidirectional_iterator_tag;
+        using value_type = std::pair<const KT&, VT&>;
+        using difference_type = std::ptrdiff_t;
+        using pointer = std::pair<const KT&, VT&>*;
+        using reference = std::pair<const KT&, VT&>&&;
+
         iterator() = default;
 
         explicit iterator(std::unordered_map<KT, VIt>* map,
@@ -157,14 +163,22 @@ public:
 
     void reinsert_front(iterator it)
     {
-        key_order_.splice(key_order_.begin(), key_order_, it.it_->second.it);
-        it.it_->second.it = key_order_.begin();
+        auto& vit = it.it_->second.it;
+        if (vit != key_order_.begin())
+        {
+            key_order_.splice(key_order_.begin(), key_order_, vit);
+            vit = key_order_.begin();
+        }
     }
 
     void reinsert_back(iterator it)
     {
-        key_order_.splice(key_order_.end(), key_order_, it.it_->second.it);
-        it.it_->second.it = --key_order_.end();
+        auto& vit = it.it_->second.it;
+        if (std::next(vit) != key_order_.end())
+        {
+            key_order_.splice(key_order_.end(), key_order_, vit);
+            vit = --key_order_.end();
+        }
     }
 
     void pop_front()
