@@ -77,9 +77,11 @@ DWORD ChunkDiskBase::Start()
 
     const auto num_parts = part_dirname.size();
 
-    // put a lock file to prevent mistakes
     try
     {
+        // put a lock file to prevent mistakes
+        auto part_lock = std::vector<FileHandle>(num_parts);
+
         // base of a differential disk if read_only
         // ERROR_SHARING_VIOLATION occurs when write access requested
         const auto desired_access = GENERIC_READ | (read_only ? 0 : GENERIC_WRITE);
@@ -98,20 +100,15 @@ DWORD ChunkDiskBase::Start()
                 path.data(), desired_access, share_mode, nullptr,
                 cr_disp, flags_attrs, nullptr));
             if (!h) return GetLastError();
-            part_lock_.emplace_back(std::move(h));
+            part_lock[i] = std::move(h);
         }
-    }
-    catch (const bad_alloc&)
-    {
-        return ERROR_NOT_ENOUGH_MEMORY;
-    }
 
-    // read parts and chunks, check consistency
-    try
-    {
-        // read parts
+        part_lock_ = std::move(part_lock);
+
+        // read parts and chunks
         auto part_current = std::vector<u64>(num_parts, 0);
         auto chunk_parts = std::unordered_map<u64, size_t>();
+
         for (auto i = size_t(0); i < num_parts; ++i)
         {
             for (auto& p : std::filesystem::directory_iterator(part_dirname[i] + L'\\'))
@@ -132,7 +129,6 @@ DWORD ChunkDiskBase::Start()
             }
         }
 
-        // done
         part_current_ = std::move(part_current);
         chunk_parts_ = std::move(chunk_parts);
     }
