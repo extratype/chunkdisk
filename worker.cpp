@@ -1728,7 +1728,12 @@ DWORD ChunkDiskWorker::PostReadChunk(ChunkOpState& state)
     }
 
     const auto length_bytes = base.BlockBytes(state.end_off - state.start_off);
-    if (h != INVALID_HANDLE_VALUE)
+    if (h == INVALID_HANDLE_VALUE)
+    {
+        memset(state.buffer, 0, length_bytes);
+        return ERROR_SUCCESS;
+    }
+    else
     {
         auto bytes_read = DWORD();
         err = ReadFile(h, state.buffer, DWORD(length_bytes), &bytes_read, &state.ovl)
@@ -1747,11 +1752,6 @@ DWORD ChunkDiskWorker::PostReadChunk(ChunkOpState& state)
             return err;
         }
         return ERROR_IO_PENDING;    // CK_IO
-    }
-    else
-    {
-        memset(state.buffer, 0, length_bytes);
-        return ERROR_SUCCESS;
     }
 }
 
@@ -1823,6 +1823,7 @@ DWORD ChunkDiskWorker::PostWriteChunk(ChunkOpState& state)
                 // lock not required? try again...
             }
             if (err != ERROR_SUCCESS) return err;
+            // file open
         }
         else if (state.step == OP_LOCKED)
         {
@@ -1921,6 +1922,7 @@ DWORD ChunkDiskWorker::CompleteWriteChunk(ChunkOpState& state, DWORD error, DWOR
     }
     else
     {
+        // track progress with OVERLAPPED
         auto file_off = LARGE_INTEGER{.LowPart = state.ovl.Offset, .HighPart = LONG(state.ovl.OffsetHigh)}.QuadPart;
         auto start_off = base.ByteBlock(file_off).first;
         length_bytes = min(base.BlockBytes(state.end_off - start_off), service_.MaxTransferLength());
@@ -1984,7 +1986,7 @@ DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
 
         // always lock page because
         // READ_PAGE: operation was not done immediately
-        // WRITE_PAGE_PARTIAL: write followed by read, lock required
+        // WRITE_PAGE_PARTIAL: read followed by write, lock required
         err = LockPageAsync(state, state.idx, ptr);
         if (err != ERROR_NOT_FOUND)
         {
@@ -2101,6 +2103,7 @@ DWORD ChunkDiskWorker::PostWritePage(ChunkOpState& state)
             service_.SyncUnmapRanges();
         }
 
+        // Page was locked in PostReadPage() for WRITE_PAGE_PARTIAL
         while (true)
         {
             err = OpenChunkAsync(chunk_idx, true, h, &state);
@@ -2128,6 +2131,7 @@ DWORD ChunkDiskWorker::PostWritePage(ChunkOpState& state)
             }
             return err;
         }
+        // file open
     }
     else if (state.step == OP_LOCKED)
     {

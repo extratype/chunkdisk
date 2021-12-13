@@ -316,10 +316,9 @@ ChunkDiskWorker* GetAssignedWorker(SPD_STORAGE_UNIT* StorageUnit)
 BOOLEAN PostWork(SPD_STORAGE_UNIT* StorageUnit, const ChunkOpKind op_kind, u64 block_addr, u32 count)
 {
     auto* worker = GetAssignedWorker(StorageUnit);
-
     auto context = SpdStorageUnitGetOperationContext();
-    auto err = DWORD(ERROR_SUCCESS);
     auto& status = context->Response->Status;
+    auto err = DWORD(ERROR_SUCCESS);
 
     while (true)
     {
@@ -393,9 +392,8 @@ BOOLEAN Unmap(SPD_STORAGE_UNIT* StorageUnit,
 
     for (UINT32 I = 0; I < Count; ++I)
     {
-        auto addr = Descriptors[I].BlockAddress;
-        auto count = Descriptors[I].BlockCount;
-
+        const auto addr = Descriptors[I].BlockAddress;
+        const auto count = Descriptors[I].BlockCount;
         if (count == 0) continue;
 
         if (addr <= prev_addr + prev_count)
@@ -664,7 +662,7 @@ int wmain(int argc, wchar_t** argv)
         return ERROR_INVALID_PARAMETER;
     }
 
-    DWORD err;
+    auto err = DWORD(ERROR_SUCCESS);
     if (NumThreads == 0)
     {
         err = chunkdisk::GetThreadCount(&NumThreads);
