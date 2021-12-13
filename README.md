@@ -5,7 +5,7 @@ Mount a disk image split over files (*chunks*) in multiple directories (*parts*)
 ## Features
 
 * Unnecessary chunks become empty (0 bytes) after TRIM.
-* Unused files are closed to save system resources and update timestamps when the disk is idle or under low load.
+* Unused files are closed to save system resources and update timestamps when the virtual disk is idle or under low load.
 * Supports differential disks.
 
 ## Getting Started
