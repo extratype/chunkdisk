@@ -70,8 +70,8 @@ struct ChunkDisk
     // not movable, increment only
     std::atomic<u32> workers_assigned = 0;
 
-    explicit ChunkDisk(vector<ChunkDiskBase> bases, SPD_STORAGE_UNIT* storage_unit)
-        : service(std::move(bases), storage_unit) {}
+    explicit ChunkDisk(vector<ChunkDiskBase> bases, SPD_STORAGE_UNIT* storage_unit, bool zero_chunk)
+        : service(std::move(bases), storage_unit, zero_chunk) {}
 
     ~ChunkDisk()
     {
@@ -427,7 +427,7 @@ static SPD_STORAGE_UNIT_INTERFACE CHUNK_DISK_INTERFACE =
     Unmap,
 };
 
-DWORD CreateStorageUnit(PWSTR chunkdisk_file, const BOOLEAN write_protected, PWSTR pipe_name,
+DWORD CreateStorageUnit(PWSTR chunkdisk_file, const BOOLEAN write_protected, const BOOLEAN zero_chunk, PWSTR pipe_name,
                         unique_ptr<ChunkDisk>& cdisk_out)
 {
     // read chunkdisk file
@@ -480,7 +480,7 @@ DWORD CreateStorageUnit(PWSTR chunkdisk_file, const BOOLEAN write_protected, PWS
     try
     {
         // unit is deleted when cdisk is deleted
-        cdisk = std::make_unique<ChunkDisk>(std::move(bases), unit);
+        cdisk = std::make_unique<ChunkDisk>(std::move(bases), unit, zero_chunk);
         unit->UserContext = cdisk.get();
     }
     catch (const bad_alloc&)
@@ -575,6 +575,8 @@ struct Usage : public std::exception
         "    -f ChunkDiskFile                    Chunkdisk metadata file (name.chunkdisk)\n"
         "    -W 0|1                              Disable/enable writes (deflt: enable)\n"
         "                                        The .lock file will not be removed automaitcally if disabled\n"
+        "    -Z 0|1                              Disable/enable zero-fill chunk if partially unmapped (deflt: enable)\n"
+        "                                        Note that the LBPRZ bit is 0 for both options\n"
         "    -t Number                           Number of threads (deflt: automatic)\n"
         "    -d -1                               Debug flags\n"
         "    -D DebugLogFile                     Debug log file; - for stderr\n"
@@ -615,6 +617,7 @@ int wmain(int argc, wchar_t** argv)
     wchar_t** argp;
     PWSTR ChunkDiskFile = nullptr;
     ULONG WriteAllowed = 1;
+    ULONG ZeroChunk = 1;
     ULONG NumThreads = 0;
     PWSTR DebugLogFile = nullptr;
     PWSTR PipeName = nullptr;
@@ -635,6 +638,9 @@ int wmain(int argc, wchar_t** argv)
                 break;
             case L'W':
                 WriteAllowed = argtol(++argp, WriteAllowed);
+                break;
+            case L'Z':
+                ZeroChunk = argtol(++argp, ZeroChunk);
                 break;
             case L't':
                 NumThreads = argtol(++argp, NumThreads);
@@ -701,7 +707,7 @@ int wmain(int argc, wchar_t** argv)
     }
 
     auto cdisk = unique_ptr<chunkdisk::ChunkDisk>();
-    err = chunkdisk::CreateStorageUnit(ChunkDiskFile, !WriteAllowed, PipeName, cdisk);
+    err = chunkdisk::CreateStorageUnit(ChunkDiskFile, !WriteAllowed, !!ZeroChunk, PipeName, cdisk);
     if (err != ERROR_SUCCESS) return err;
     err = chunkdisk::StartWorkers(*cdisk, NumThreads);
     if (err != ERROR_SUCCESS) return err;
@@ -715,10 +721,11 @@ int wmain(int argc, wchar_t** argv)
         return err;
     }
 
-    SpdLogInfo(L"%s -f %s -W %u -t %d%s%s",
+    SpdLogInfo(L"%s -f %s -W %u -Z %u -t %d%s%s",
         Usage::PROGNAME,
         ChunkDiskFile,
         !!WriteAllowed,
+        !!ZeroChunk,
         NumThreads,
         (nullptr != PipeName) ? L" -p " : L"",
         (nullptr != PipeName) ? PipeName : L"");

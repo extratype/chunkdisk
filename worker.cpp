@@ -936,9 +936,43 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, const 
             }
         }
 
-        // Unmap chunk partially, zero-fill it
+        // Unmap chunk partially
         // buffer == nullptr if and only if partial UNMAP_CHUNK
-        if (kind == UNMAP_CHUNK && !base.IsWholeChunk(start_off, end_off)) kind = WRITE_CHUNK;
+        if (kind == UNMAP_CHUNK && !base.IsWholeChunk(start_off, end_off))
+        {
+            if (service_.zero_chunk)
+            {
+                // zero-fill it
+                kind = WRITE_CHUNK;
+            }
+            else
+            {
+                // complete immediately
+                try
+                {
+                    auto& op = ops.emplace_back(&work, kind, chunk_idx, start_off, end_off,
+                                                LONGLONG(base.BlockBytes(start_off)), buffer);
+                    auto lk = SRWLock();
+                    err = service_.UnmapRange(lk, chunk_idx, start_off, end_off);
+                    if (err == ERROR_SUCCESS)
+                    {
+                        // whole chunk unmapped
+                        // holding mutex_unmapped_, no more writes...
+                        ReportOpResult(op, UnmapChunkSync(chunk_idx));
+                    }
+                    else
+                    {
+                        if (err == ERROR_IO_PENDING) err = ERROR_SUCCESS;
+                        ReportOpResult(op, err);
+                    }
+                    return ERROR_SUCCESS;
+                }
+                catch (const bad_alloc&)
+                {
+                    return ERROR_NOT_ENOUGH_MEMORY;
+                }
+            }
+        }
     }
     else if (kind != WRITE_CHUNK)
     {
