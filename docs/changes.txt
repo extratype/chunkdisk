@@ -49,3 +49,7 @@ v1.2
 * The `.lock` file is not removed automatically on exit if `-W 0` option is given. Manually remove it to mount again with `-W 1` option.
 * Close file handles to trigger updating metadata when the virtual disk is not only idle but under low load for a minute.
 * Handle the case where the file system does not support FSCTL_SET_ZERO_DATA IOCTL.
+
+v1.3
+
+* Add option (`-Z 0`) to disable zero-fill partially unmapped chunk.
