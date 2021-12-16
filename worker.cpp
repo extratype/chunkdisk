@@ -702,18 +702,13 @@ DWORD ChunkDiskWorker::WaitChunkAsync(const u64 chunk_idx, ChunkOpState* state)
         auto& cfh = (*it).second;
         try
         {
+            // locked, LOCK_CHUNK not handled yet if emplaced
             cfh.waiting.push_back(state);
         }
         catch (const bad_alloc&)
         {
             if (emplaced) chunk_handles_.erase(it);
             return ERROR_NOT_ENOUGH_MEMORY;
-        }
-        if (emplaced)
-        {
-            // LOCK_CHUNK may not handled yet
-            // WAIT_CHUNK sent when handling LOCK_CHUNK
-            cfh.locked = true;
         }
         return ERROR_IO_PENDING;
     }
