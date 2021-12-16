@@ -109,7 +109,7 @@ DWORD ChunkDiskWorker::StopAsync(HANDLE& handle_out)
         return GetLastError();
     }
 
-    // native_handle() closed after detach()
+    // native_handle() closed in detach()
     auto h = HANDLE(nullptr);
     if (!DuplicateHandle(GetCurrentProcess(), thread_.native_handle(),
                          GetCurrentProcess(), &h, 0, FALSE, DUPLICATE_SAME_ACCESS))
@@ -678,7 +678,7 @@ DWORD ChunkDiskWorker::OpenChunkAsync(const u64 chunk_idx, const bool is_write,
         }
         return ERROR_SUCCESS;
     }();
-    if (emplaced && (err != ERROR_SUCCESS || handle_out == INVALID_HANDLE_VALUE))
+    if (emplaced && !(err == ERROR_SUCCESS && handle_out != INVALID_HANDLE_VALUE))
     {
         if (cfh.waiting.empty()) chunk_handles_.erase(it);
     }
@@ -842,7 +842,7 @@ DWORD ChunkDiskWorker::UnlockChunk(const u64 chunk_idx)
     if (it == chunk_handles_.end()) return ERROR_NOT_FOUND;
     auto& cfh = (*it).second;
 
-    if (!cfh.locked || cfh.refs_ro != 0 || cfh.refs_rw != 0) return ERROR_INVALID_STATE;
+    if (!(cfh.locked && cfh.refs_ro == 0 && cfh.refs_rw == 0)) return ERROR_INVALID_STATE;
     auto waiting = std::move(cfh.waiting);
     chunk_handles_.erase(it);
     lk.unlock();
@@ -1289,12 +1289,12 @@ DWORD ChunkDiskWorker::PeriodicCheck()
             if (unused_ro == 0 && unused_rw == 0) break;
 
             auto& cfh = (*it).second;
-            if (cfh.handle_ro && cfh.refs_ro == 0 && unused_ro > 0)
+            if (unused_ro > 0 && cfh.refs_ro == 0 && cfh.handle_ro)
             {
                 cfh.handle_ro.reset();
                 --unused_ro;
             }
-            if (cfh.handle_rw && cfh.refs_rw == 0 && unused_rw > 0)
+            if (unused_rw > 0 && cfh.refs_rw == 0 && cfh.handle_rw)
             {
                 cfh.handle_rw.reset();
                 --unused_rw;
