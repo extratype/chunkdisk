@@ -1240,10 +1240,32 @@ DWORD ChunkDiskWorker::IdleWork()
     lkb.unlock();
 
     auto lkh = SRWLock(*mutex_handles_, true);
-    chunk_handles_.clear();
-    handles_ro_load_ = 0;
+    for (auto it = chunk_handles_.begin(); it != chunk_handles_.end();)
+    {
+        auto& cfh = (*it).second;
+        if (cfh.refs_ro == 0)
+        {
+            cfh.handle_ro.reset();
+        }
+        if (cfh.refs_rw == 0)
+        {
+            cfh.handle_rw.reset();
+        }
+        if (!cfh.handle_ro && !cfh.handle_rw && !cfh.locked && cfh.waiting.empty())
+        {
+            it = chunk_handles_.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+    if (chunk_handles_.empty())
+    {
+        handles_ro_load_ = 0;
+        handles_rw_load_ = 0;
+    }
     handles_ro_load_max_ = 0;
-    handles_rw_load_ = 0;
     handles_rw_load_max_ = 0;
     lkh.unlock();
 
