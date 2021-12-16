@@ -171,8 +171,6 @@ void ChunkDiskWorker::Terminate()
     }
     iocp_.reset();
 
-    WaitForSingleObject(thread_.native_handle(), STOP_TIMEOUT_MS);
-
     auto lkh = SRWLock(*mutex_handles_, true, std::defer_lock);
     if (lkh.try_lock())
     {
@@ -183,6 +181,15 @@ void ChunkDiskWorker::Terminate()
             if (cfh.handle_rw) CancelIo(cfh.handle_rw.get());
         }
         lkh.unlock();
+    }
+
+    try
+    {
+        thread_.detach();
+    }
+    catch (const std::system_error&)
+    {
+        return;
     }
 }
 
