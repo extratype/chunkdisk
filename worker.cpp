@@ -1088,7 +1088,7 @@ u64 ChunkDiskWorker::GetChunkIndex(ChunkOpState& state) const
     if (state.kind == READ_PAGE || state.kind == WRITE_PAGE || state.kind == WRITE_PAGE_PARTIAL)
     {
         const auto& base = service_.bases[0];
-        return base.BlockChunkRange(base.PageBlocks(state.idx), 0).start_idx;
+        return base.BlockChunkRange(base.PageBlocks(state.idx), 0).start_idx;   // chunk is page-aligned
     }
     else
     {
@@ -2275,7 +2275,9 @@ DWORD ChunkDiskWorker::CompleteWritePage(ChunkOpState& state, DWORD error, DWORD
     auto& base = service_.bases[0];
     if (error == ERROR_SUCCESS && bytes_transferred != base.PageBytes(1)) error = ERROR_INVALID_DATA;
 
-    const auto r = base.BlockChunkRange(base.PageBlocks(state.idx), state.end_off - state.start_off);
+    const auto r = base.BlockChunkRange(
+        base.PageBlocks(state.idx) + state.start_off,
+        state.end_off - state.start_off);
     const auto chunk_idx = r.start_idx;
     UnlockPageAsync(state, state.idx, error != ERROR_SUCCESS);
     CloseChunkAsync(chunk_idx, true);
