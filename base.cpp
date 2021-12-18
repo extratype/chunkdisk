@@ -206,8 +206,15 @@ DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, co
     if (!is_write && !part_found)
     {
         // not present -> empty handle
-        handle_out = FileHandle();
-        return is_locked ? ERROR_FILE_NOT_FOUND : ERROR_SUCCESS;
+        if (is_locked)
+        {
+            return ERROR_FILE_NOT_FOUND;
+        }
+        else
+        {
+            handle_out = FileHandle();
+            return ERROR_SUCCESS;
+        }
     }
 
     // !is_write -> part_found
@@ -270,7 +277,6 @@ DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, co
             auto disp = FILE_DISPOSITION_INFO{TRUE};
             SetFileInformationByHandle(h_locked.get(), FileDispositionInfo, &disp, sizeof(disp));
             h_locked.reset();  // will remove the file
-            handle_out = FileHandle();
             return err;
         }
         if (is_locked)

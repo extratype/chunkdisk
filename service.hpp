@@ -147,7 +147,7 @@ public:
     size_t FindChunk(u64 chunk_idx);
 
     // Open a chunk file handle for I/O. See ChunkDiskBase::CreateChunk().
-    // use base[0] if !is_write
+    // base[0] used if is_write
     DWORD CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool is_write, bool is_locked = false);
 
     // add (chunk_idx, user) to chunk_lock_
