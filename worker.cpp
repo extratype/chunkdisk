@@ -1002,12 +1002,12 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, const 
     else if (buffer == nullptr && r.start_idx != r.end_idx)
     {
         // align to the next page
-        auto file_off = LONGLONG(base.PageBytes(r.start_idx));
         auto err = DWORD(ERROR_SUCCESS);
 
         // head
         if (r.start_off != 0)
         {
+            auto file_off = LONGLONG(base.PageBytes(r.start_idx));
             err = PreparePageOps(work, is_write, r.base_idx + r.start_idx,
                                  r.start_off, base.page_length, file_off, buffer);
             if (err != ERROR_SUCCESS) return err;
@@ -1021,7 +1021,7 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, const 
             auto eoff = base.PageBlocks(r.end_idx) + ((r.end_off != base.page_length) ? 0 : base.page_length);
             if (soff != eoff)
             {
-                ops.emplace_back(&work, kind, chunk_idx, soff, eoff, file_off, buffer);
+                ops.emplace_back(&work, kind, chunk_idx, soff, eoff, LONGLONG(base.BlockBytes(soff)), buffer);
                 // buffer is nullptr
             }
         }
@@ -1033,7 +1033,7 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, const 
         // tail
         if (r.end_off != base.page_length)
         {
-            file_off = LONGLONG(base.PageBytes(r.end_idx));
+            auto file_off = LONGLONG(base.PageBytes(r.end_idx));
             err = PreparePageOps(work, is_write, r.base_idx + r.end_idx, 0, r.end_off, file_off, buffer);
             if (err != ERROR_SUCCESS) return err;
         }
@@ -1042,7 +1042,6 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, const 
     {
         // unaligned to page
         auto file_off = LONGLONG(base.PageBytes(r.start_idx));
-
         auto err = PreparePageOps(work, is_write, r.base_idx + r.start_idx, r.start_off,
                                   (r.start_idx == r.end_idx) ? r.end_off : base.page_length, file_off, buffer);
         if (err != ERROR_SUCCESS) return err;
@@ -1845,7 +1844,7 @@ DWORD ChunkDiskWorker::PrepareZeroChunk(ChunkWork* work)
     }
     buffer_size = min(buffer_size, max_length);
 
-    auto err = GetBuffer(work->buffer);
+    auto err = GetBuffer(work->buffer);     // single unmap request
     if (err != ERROR_SUCCESS) return err;
     memset(work->buffer.get(), 0, buffer_size);
     return ERROR_SUCCESS;

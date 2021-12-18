@@ -51,7 +51,7 @@ struct ChunkOpState;
 struct ChunkWork
 {
     std::vector<ChunkOpState> ops;              // must not be empty
-    Pages buffer;
+    Pages buffer;                               // GetBuffer(), ReturnBuffer()
     std::list<ChunkWork>::iterator it = {};     // from ChunkDiskWorker::working_
     u32 num_completed = 0;                      // work finished when num_completed == ops.size()
     u32 num_errors = 0;                         // failed ops out of num_completed
