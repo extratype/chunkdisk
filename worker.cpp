@@ -759,15 +759,23 @@ DWORD ChunkDiskWorker::CloseChunkAsync(const u64 chunk_idx, const bool is_write,
             // reply WAIT_CHUNK to the locking worker
             auto err = [this, chunk_idx]() -> DWORD
             {
+                auto* user = LPVOID();
+                service_.CheckChunkLocked(chunk_idx, user);
+                if (user == nullptr)
+                {
+                    SpdStorageUnitShutdown(service_.storage_unit);  // fatal
+                    return ERROR_INVALID_STATE;
+                }
+                auto* worker = recast<ChunkDiskWorker*>(recast<ChunkOpState*>(user)->ovl.hEvent);
+                if (worker == nullptr)
+                {
+                    SpdStorageUnitShutdown(service_.storage_unit);  // fatal
+                    return ERROR_INVALID_STATE;
+                }
+
                 auto msg = ChunkWork();
                 auto err = PrepareMsg(msg, WAIT_CHUNK, chunk_idx);
                 if (err != ERROR_SUCCESS) return err;
-
-                auto* user = LPVOID();
-                service_.CheckChunkLocked(chunk_idx, user);
-                if (user == nullptr) return ERROR_INVALID_STATE;
-                auto* worker = recast<ChunkDiskWorker*>(recast<ChunkOpState*>(user)->ovl.hEvent);
-                if (worker == nullptr) return ERROR_INVALID_STATE;
                 err = worker->PostMsg(std::move(msg));
                 return err == ERROR_IO_PENDING ? ERROR_SUCCESS : err;
             }();
@@ -814,15 +822,23 @@ DWORD ChunkDiskWorker::LockChunk(const u64 chunk_idx)
             lk.unlock();
             auto err = [this, chunk_idx]() -> DWORD
             {
+                auto* user = LPVOID();
+                service_.CheckChunkLocked(chunk_idx, user);
+                if (user == nullptr)
+                {
+                    SpdStorageUnitShutdown(service_.storage_unit);  // fatal
+                    return ERROR_INVALID_STATE;
+                }
+                auto* worker = recast<ChunkDiskWorker*>(recast<ChunkOpState*>(user)->ovl.hEvent);
+                if (worker == nullptr)
+                {
+                    SpdStorageUnitShutdown(service_.storage_unit);  // fatal
+                    return ERROR_INVALID_STATE;
+                }
+
                 auto msg = ChunkWork();
                 auto err = PrepareMsg(msg, WAIT_CHUNK, chunk_idx);
                 if (err != ERROR_SUCCESS) return err;
-
-                auto* user = LPVOID();
-                service_.CheckChunkLocked(chunk_idx, user);
-                if (user == nullptr) return ERROR_INVALID_STATE;
-                auto* worker = recast<ChunkDiskWorker*>(recast<ChunkOpState*>(user)->ovl.hEvent);
-                if (worker == nullptr) return ERROR_INVALID_STATE;
                 err = worker->PostMsg(std::move(msg));
                 return err == ERROR_IO_PENDING ? ERROR_SUCCESS : err;
             }();
