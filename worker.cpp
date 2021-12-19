@@ -2199,7 +2199,7 @@ DWORD ChunkDiskWorker::PostWritePage(ChunkOpState& state)
                 {
                     // retry from beginning...
                     UnlockPageAsync(state, state.idx);
-                    if (state.step == OP_READ_PAGE) state.step = OP_READY;
+                    state.step = OP_READY;  // OP_READ_PAGE -> OP_READY
                 }
                 return err;
             }
@@ -2211,7 +2211,7 @@ DWORD ChunkDiskWorker::PostWritePage(ChunkOpState& state)
             {
                 // retry from beginning...
                 UnlockPageAsync(state, state.idx);
-                if (state.step == OP_READ_PAGE) state.step = OP_READY;
+                state.step = OP_READY;  // OP_READ_PAGE -> OP_READY
             }
             return err;
         }
