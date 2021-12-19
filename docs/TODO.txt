@@ -1,3 +1,7 @@
+refactor error-prone functions
+
+mock tests for invariants, requirements, specs
+
 profile performance (kernel time, user time) for SSD 4K I/O
     locks
     data structure
