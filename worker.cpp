@@ -1544,13 +1544,22 @@ DWORD ChunkDiskWorker::PostLockChunk(ChunkOpState& state, const u64 chunk_idx, c
 
     auto* user = LPVOID(&state);
     auto err = service_.LockChunk(chunk_idx, user);
-    if (err == ERROR_LOCKED) return WaitChunkAsync(chunk_idx, &state);  // LOCK_CHUNK may not have been handled yet
-    if (err != ERROR_SUCCESS) return err;
+    if (err == ERROR_LOCKED)
+    {
+        state.ovl.hEvent = nullptr;
+        return WaitChunkAsync(chunk_idx, &state);   // LOCK_CHUNK may not have been handled yet
+    }
+    if (err != ERROR_SUCCESS)
+    {
+        state.ovl.hEvent = nullptr;
+        return err;
+    }
 
     if (create_new && service_.bases[0].CheckChunk(chunk_idx))
     {
         // lock no longer required
         service_.UnlockChunk(chunk_idx);
+        state.ovl.hEvent = nullptr;
         return ERROR_SUCCESS;
     }
 
@@ -1579,6 +1588,7 @@ DWORD ChunkDiskWorker::PostLockChunk(ChunkOpState& state, const u64 chunk_idx, c
     if (err != ERROR_SUCCESS)
     {
         service_.UnlockChunk(chunk_idx);
+        state.ovl.hEvent = nullptr;
         return err;
     }
 
@@ -1607,11 +1617,11 @@ DWORD ChunkDiskWorker::LockingChunk(const u64 chunk_idx)
 DWORD ChunkDiskWorker::PostUnlockChunk(ChunkOpState& state, const u64 chunk_idx)
 {
     // cleanup
+    service_.UnlockChunk(chunk_idx);
     state.ovl.Internal = 0;
     state.ovl.InternalHigh = 0;
     state.ovl.hEvent = nullptr;
 
-    service_.UnlockChunk(chunk_idx);
     auto err = DWORD(ERROR_SUCCESS);
 
     for (auto& worker : GetWorkers(service_.storage_unit))
