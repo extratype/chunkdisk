@@ -53,3 +53,9 @@ v1.2
 v1.3
 
 * Add option (`-Z 0`) to disable zero-fill partially unmapped chunk.
+
+v1.4
+
+* Fix tracking recently unmapped pages.
+* Fix an I/O error when writing to a new differential chunk, which may cause loss of data.
+* Fix locking chunks.
