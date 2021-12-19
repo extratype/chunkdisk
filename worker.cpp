@@ -239,6 +239,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, con
     // expects something to do
     // expects ChunkWork::ops not empty
     // block_addr already checked by the WinSpd driver
+    // Unmap() filters empty ranges
     if (count == 0) return ERROR_SUCCESS;
 
     // prepare work
@@ -1623,7 +1624,6 @@ DWORD ChunkDiskWorker::PostUnlockChunk(ChunkOpState& state, const u64 chunk_idx)
     state.ovl.hEvent = nullptr;
 
     auto err = DWORD(ERROR_SUCCESS);
-
     for (auto& worker : GetWorkers(service_.storage_unit))
     {
         auto err1 = [chunk_idx, &worker]() -> DWORD
@@ -1954,7 +1954,7 @@ DWORD ChunkDiskWorker::PostWriteChunk(ChunkOpState& state)
                 if (err == ERROR_SUCCESS)
                 {
                     state.step = OP_ZERO_CHUNK;
-                    state.ovl = OVERLAPPED{.Offset = state.ovl.Offset, .OffsetHigh=state.ovl.OffsetHigh};   // reset
+                    state.ovl = OVERLAPPED{.Offset = state.ovl.Offset, .OffsetHigh=state.ovl.OffsetHigh};
                     err = PostWriteChunk(state);
                 }
             }
@@ -2034,7 +2034,7 @@ DWORD ChunkDiskWorker::CompleteWriteChunk(ChunkOpState& state, DWORD error, DWOR
     {
         // continue writing...
         auto li = LARGE_INTEGER{.QuadPart = LONGLONG(next_off)};
-        state.ovl = OVERLAPPED{.Offset = li.LowPart, .OffsetHigh = DWORD(li.HighPart)}; // reset
+        state.ovl = OVERLAPPED{.Offset = li.LowPart, .OffsetHigh = DWORD(li.HighPart)};
         error = PostOp(state);
         if (error != ERROR_IO_PENDING)
         {
@@ -2166,7 +2166,7 @@ DWORD ChunkDiskWorker::PostWritePage(ChunkOpState& state)
         {
             // read complete, move on to writing, claim page
             state.step = OP_READ_PAGE;
-            state.ovl = OVERLAPPED{.Offset = state.ovl.Offset, .OffsetHigh=state.ovl.OffsetHigh};   // reset
+            state.ovl = OVERLAPPED{.Offset = state.ovl.Offset, .OffsetHigh=state.ovl.OffsetHigh};
             return PostWritePage(state);
         }
     }
@@ -2285,7 +2285,7 @@ DWORD ChunkDiskWorker::CompleteWritePartialReadPage(ChunkOpState& state, DWORD e
 
         // read complete, move on to writing, claim page
         state.step = OP_READ_PAGE;
-        state.ovl = OVERLAPPED{.Offset = state.ovl.Offset, .OffsetHigh=state.ovl.OffsetHigh};   // reset
+        state.ovl = OVERLAPPED{.Offset = state.ovl.Offset, .OffsetHigh=state.ovl.OffsetHigh};
         return PostOp(state);
     }
     else

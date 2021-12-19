@@ -386,7 +386,7 @@ BOOLEAN Unmap(SPD_STORAGE_UNIT* StorageUnit,
                          (a.BlockAddress == b.BlockAddress) && (a.BlockCount < b.BlockCount);
               });
 
-    auto new_count = UINT32();
+    auto new_count = UINT32(0);
     auto prev_addr = Descriptors[0].BlockAddress;
     auto prev_count = Descriptors[0].BlockCount;
 

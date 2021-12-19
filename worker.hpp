@@ -84,7 +84,7 @@ struct ChunkWork
 // buffer: inside owner->buffer or custom
 struct ChunkOpState
 {
-    OVERLAPPED ovl = {};            // specify file offset
+    OVERLAPPED ovl = {};            // specify file offset, reset to reuse
     ChunkWork* owner;
     ChunkOpKind kind;               // don't reset
     ChunkOpStep step = OP_READY;
