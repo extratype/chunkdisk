@@ -1606,6 +1606,7 @@ DWORD ChunkDiskWorker::LockingChunk(const u64 chunk_idx)
     {
         PostUnlockChunk(state, chunk_idx);
         ReportOpResult(state, state.ovl.Internal);
+        CompleteWork(state.owner);
         return ERROR_SUCCESS;
     }
     if ((++state.ovl.InternalHigh) != GetWorkers(service_.storage_unit).size()) return ERROR_SUCCESS;
