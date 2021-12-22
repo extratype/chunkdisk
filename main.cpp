@@ -427,7 +427,7 @@ static SPD_STORAGE_UNIT_INTERFACE CHUNK_DISK_INTERFACE =
     Unmap,
 };
 
-DWORD CreateStorageUnit(PWSTR chunkdisk_file, const BOOLEAN write_protected, const BOOLEAN zero_chunk, PWSTR pipe_name,
+DWORD CreateStorageUnit(PWSTR chunkdisk_file, PWSTR guid, const BOOLEAN write_protected, const BOOLEAN zero_chunk, PWSTR pipe_name,
                         unique_ptr<ChunkDisk>& cdisk_out)
 {
     // read chunkdisk file
@@ -437,13 +437,21 @@ DWORD CreateStorageUnit(PWSTR chunkdisk_file, const BOOLEAN write_protected, con
 
     // create WinSpd unit
     SPD_STORAGE_UNIT* unit = nullptr;
-    err = [&bases, write_protected, pipe_name, &unit]() -> DWORD
+    err = [guid, &bases, write_protected, pipe_name, &unit]() -> DWORD
     {
         constexpr wchar_t ProductId[] = L"ChunkDisk";
         constexpr wchar_t ProductRevision[] = L"1.4";
         auto unit_params = SPD_STORAGE_UNIT_PARAMS();
 
-        UuidCreate(&unit_params.Guid);
+        if (guid == nullptr)
+        {
+            UuidCreate(&unit_params.Guid);
+        }
+        else
+        {
+            auto err = UuidFromStringW(recast<RPC_WSTR>(guid), &unit_params.Guid);
+            if (err != RPC_S_OK) return ERROR_INVALID_PARAMETER;
+        }
         unit_params.BlockCount = bases[0].block_count;
         unit_params.BlockLength = bases[0].block_size;
         unit_params.MaxTransferLength = MAX_TRANSFER_LENGTH;
@@ -578,6 +586,7 @@ struct Usage : public std::exception
         "    -Z 0|1                              Disable/enable zero-fill chunk if partially unmapped (deflt: enable)\n"
         "                                        Note that the LBPRZ bit is 0 for both options\n"
         "    -t Number                           Number of threads (deflt: automatic)\n"
+        "    -U GUID                             GUID as the serial number of the WinSpd disk (deflt: random)\n"
         "    -d -1                               Debug flags\n"
         "    -D DebugLogFile                     Debug log file; - for stderr\n"
         "    -p \\\\.\\pipe\\PipeName                Listen on pipe; omit to use driver\n"
@@ -619,6 +628,7 @@ int wmain(int argc, wchar_t** argv)
     ULONG WriteAllowed = 1;
     ULONG ZeroChunk = 1;
     ULONG NumThreads = 0;
+    PWSTR Guid = nullptr;
     PWSTR DebugLogFile = nullptr;
     PWSTR PipeName = nullptr;
     ULONG DebugFlags = 0;
@@ -644,6 +654,9 @@ int wmain(int argc, wchar_t** argv)
                 break;
             case L't':
                 NumThreads = argtol(++argp, NumThreads);
+                break;
+            case L'U':
+                Guid = argtos(++argp);
                 break;
             case L'd':
                 DebugFlags = argtol(++argp, DebugFlags);
@@ -707,7 +720,7 @@ int wmain(int argc, wchar_t** argv)
     }
 
     auto cdisk = unique_ptr<chunkdisk::ChunkDisk>();
-    err = chunkdisk::CreateStorageUnit(ChunkDiskFile, !WriteAllowed, !!ZeroChunk, PipeName, cdisk);
+    err = chunkdisk::CreateStorageUnit(ChunkDiskFile, Guid, !WriteAllowed, !!ZeroChunk, PipeName, cdisk);
     if (err != ERROR_SUCCESS) return err;
     err = chunkdisk::StartWorkers(*cdisk, NumThreads);
     if (err != ERROR_SUCCESS) return err;
@@ -721,12 +734,14 @@ int wmain(int argc, wchar_t** argv)
         return err;
     }
 
-    SpdLogInfo(L"%s -f %s -W %u -Z %u -t %d%s%s",
+    SpdLogInfo(L"%s -f %s -W %u -Z %u -t %d%s%s%s%s",
         Usage::PROGNAME,
         ChunkDiskFile,
         !!WriteAllowed,
         !!ZeroChunk,
         NumThreads,
+        (nullptr != Guid) ? L" -U " : L"",
+        (nullptr != Guid) ? Guid : L"",
         (nullptr != PipeName) ? L" -p " : L"",
         (nullptr != PipeName) ? PipeName : L"");
 
