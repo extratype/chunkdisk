@@ -96,20 +96,42 @@ DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, const bool read_only, unique_ptr<
         auto h = FileHandle(CreateFileW(
             chunkdisk_file, GENERIC_READ, FILE_SHARE_READ, nullptr,
             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
-        if (!h) return GetLastError();
+        if (!h)
+        {
+            auto err = GetLastError();
+            SpdLogErr(L"error: opening %s failed with code %lu", chunkdisk_file, err);
+            return err;
+        }
 
         auto size = LARGE_INTEGER();
-        if (!GetFileSizeEx(h.get(), &size)) return GetLastError();
-        if (size.HighPart != 0 || int(size.LowPart) < 0) return ERROR_ARITHMETIC_OVERFLOW;
-        if (size.LowPart == 0) return ERROR_INVALID_PARAMETER;
+        if (!GetFileSizeEx(h.get(), &size))
+        {
+            auto err = GetLastError();
+            SpdLogErr(L"error: reading %s failed with code %lu", chunkdisk_file, err);
+            return err;
+        }
+        if (size.HighPart != 0 || int(size.LowPart) < 0 || size.LowPart == 0)
+        {
+            SpdLogErr(L"error: invalid size of file %s", chunkdisk_file);
+            return ERROR_INVALID_PARAMETER;
+        }
 
         auto buf = unique_ptr<u8[]>(new u8[size_t(size.LowPart)]);
         auto bytes_read = DWORD();
-        if (!ReadFile(h.get(), buf.get(), size.LowPart, &bytes_read, nullptr)) return GetLastError();
+        if (!ReadFile(h.get(), buf.get(), size.LowPart, &bytes_read, nullptr))
+        {
+            auto err = GetLastError();
+            SpdLogErr(L"error: reading %s failed with code %lu", chunkdisk_file, err);
+            return err;
+        }
 
         auto wbuf = wstring();
         auto err = ConvertUTF8(buf.get(), bytes_read, wbuf);
-        if (err != ERROR_SUCCESS) return err;
+        if (err != ERROR_SUCCESS)
+        {
+            SpdLogErr(L"error: reading %s failed with code %lu", chunkdisk_file, err);
+            return err;
+        }
 
         // parse .chunkdisk
         buf.reset();
@@ -118,20 +140,36 @@ DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, const bool read_only, unique_ptr<
         auto* state = PWSTR();
         auto* token = wcstok_s(wbuf.data(), L"\n", &state);
         auto* endp = PWSTR();
-        if (!token) return ERROR_INVALID_PARAMETER;
+        if (!token)
+        {
+            SpdLogErr(L"error: missing parameters in %s", chunkdisk_file);
+            return ERROR_INVALID_PARAMETER;
+        }
         auto disk_size = wcstoull(token, &endp, 10);
         if (token == endp || (*endp != L'\r' && *endp != L'\0') || errno == ERANGE)
         {
             // parent
             parent_r = wstring(token);
             if (!parent_r.empty() && parent_r[parent_r.size() - 1] == L'\r') parent_r.erase(parent_r.size() - 1);
-            if (parent_r.empty() || !std::filesystem::path(parent_r).is_absolute()) return ERROR_INVALID_PARAMETER;
+            if (parent_r.empty() || !std::filesystem::path(parent_r).is_absolute())
+            {
+                SpdLogErr(L"error: invalid parent disk path in %s: %s", chunkdisk_file, parent_r.data());
+                return ERROR_INVALID_PARAMETER;
+            }
 
             // disk size
             token = wcstok_s(nullptr, L"\n", &state);
-            if (!token) return ERROR_INVALID_PARAMETER;
+            if (!token)
+            {
+                SpdLogErr(L"error: missing parameters in %s", chunkdisk_file);
+                return ERROR_INVALID_PARAMETER;
+            }
             disk_size = wcstoull(token, &endp, 10);
-            if (token == endp || (*endp != L'\r' && *endp != L'\0') || errno == ERANGE) return ERROR_INVALID_PARAMETER;
+            if (token == endp || (*endp != L'\r' && *endp != L'\0') || errno == ERANGE)
+            {
+                SpdLogErr(L"error: invalid disk size in %s: %s", chunkdisk_file, token);
+                return ERROR_INVALID_PARAMETER;
+            }
         }
         else
         {
@@ -141,9 +179,17 @@ DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, const bool read_only, unique_ptr<
 
         // chunk size
         token = wcstok_s(nullptr, L"\n", &state);
-        if (!token) return ERROR_INVALID_PARAMETER;
+        if (!token)
+        {
+            SpdLogErr(L"error: missing parameters in %s", chunkdisk_file);
+            return ERROR_INVALID_PARAMETER;
+        }
         auto chunk_size = wcstoull(token, &endp, 10);
-        if (token == endp || (*endp != L'\r' && *endp != L'\0') || errno == ERANGE) return ERROR_INVALID_PARAMETER;
+        if (token == endp || (*endp != L'\r' && *endp != L'\0') || errno == ERANGE)
+        {
+            SpdLogErr(L"error: invalid chunk size in %s: %s", chunkdisk_file, token);
+            return ERROR_INVALID_PARAMETER;
+        }
 
         // parts
         auto part_max = vector<u64>();
@@ -153,29 +199,62 @@ DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, const bool read_only, unique_ptr<
         for (; token; token = wcstok_s(nullptr, L"\n", &state))
         {
             auto pmax = wcstoull(token, &endp, 10);
-            if (token == endp || *endp != L' ' || errno == ERANGE) return ERROR_INVALID_PARAMETER;
+            if (token == endp || *endp != L' ' || errno == ERANGE)
+            {
+                SpdLogErr(L"error: invalid number of chunks in %s: %s", chunkdisk_file, token);
+                return ERROR_INVALID_PARAMETER;
+            }
 
             auto dirname = wstring(endp + 1);
             if (!dirname.empty() && dirname[dirname.size() - 1] == L'\r') dirname.erase(dirname.size() - 1);
             if (!dirname.empty() && dirname[dirname.size() - 1] == L'\\') dirname.erase(dirname.size() - 1);
             if (!dirname.empty() && dirname[dirname.size() - 1] == L'/')  dirname.erase(dirname.size() - 1);
             auto dirpath = std::filesystem::path(std::move(dirname));
-            if (!dirpath.is_absolute()) return ERROR_INVALID_PARAMETER;
+            if (!dirpath.is_absolute())
+            {
+                SpdLogErr(L"error: invalid part path in %s: %s", chunkdisk_file, dirpath.c_str());
+                return ERROR_INVALID_PARAMETER;
+            }
 
             part_max.push_back(pmax);
             part_dirname.emplace_back(dirpath.wstring());
         }
 
         // check parameters
-        if (disk_size == 0 || chunk_size == 0 || chunk_size > disk_size) return ERROR_INVALID_PARAMETER;
-        if (LONGLONG(chunk_size) <= 0) return ERROR_INVALID_PARAMETER;  // integer overflow in file offset
-        if (disk_size % BLOCK_SIZE || disk_size % PAGE_SIZE) return ERROR_INVALID_PARAMETER;
-        if (chunk_size % BLOCK_SIZE || chunk_size % PAGE_SIZE) return ERROR_INVALID_PARAMETER;
+        if (disk_size == 0 || chunk_size == 0 || chunk_size > disk_size)
+        {
+            SpdLogErr(L"error: invalid disk size (%llu) and/or chunk size (%llu) in %s",
+                      disk_size, chunk_size, chunkdisk_file);
+            return ERROR_INVALID_PARAMETER;
+        }
+        if (LONGLONG(chunk_size) <= 0)
+        {
+            SpdLogErr(L"error: chunk size (%llu) in %s is too large", chunk_size, chunkdisk_file);
+            return ERROR_INVALID_PARAMETER;  // integer overflow in file offset
+        }
+        if (disk_size % BLOCK_SIZE || disk_size % PAGE_SIZE)
+        {
+            SpdLogErr(L"error: disk size (%llu) is not aligned in %s", disk_size, chunkdisk_file);
+            return ERROR_INVALID_PARAMETER;
+        }
+        if (chunk_size % BLOCK_SIZE || chunk_size % PAGE_SIZE)
+        {
+            SpdLogErr(L"error: chunk size (%llu) is not aligned in %s", chunk_size, chunkdisk_file);
+            return ERROR_INVALID_PARAMETER;
+        }
         // if (PAGE_SIZE % BLOCK_SIZE) return ERROR_INVALID_PARAMETER;
 
         auto chunk_count = (disk_size + (chunk_size - 1)) / chunk_size;
-        if (chunk_count == 0 || disk_size > chunk_size * chunk_count) return ERROR_INVALID_PARAMETER;
-        if (chunk_count > std::accumulate(part_max.begin(), part_max.end(), 0ull)) return ERROR_INVALID_PARAMETER;
+        if (chunk_count == 0 || disk_size > chunk_size * chunk_count)
+        {
+            SpdLogErr(L"error: invalid chunk size (%llu) in %s", chunk_size, chunkdisk_file);
+            return ERROR_INVALID_PARAMETER;
+        }
+        if (chunk_count > std::accumulate(part_max.begin(), part_max.end(), 0ull))
+        {
+            SpdLogErr(L"error: total number of chunks must be at least %llu in %s", chunk_count, chunkdisk_file);
+            return ERROR_INVALID_PARAMETER;
+        }
 
         // ChunkDiskBase is not move-assignable
         base = std::make_unique<ChunkDiskBase>(
@@ -192,6 +271,7 @@ DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, const bool read_only, unique_ptr<
     }
     catch (const bad_alloc&)
     {
+        SpdLogErr(L"error: not enough memory to read %s", chunkdisk_file);
         return ERROR_NOT_ENOUGH_MEMORY;
     }
     return ERROR_SUCCESS;
@@ -208,11 +288,7 @@ DWORD ReadChunkDiskBases(PCWSTR chunkdisk_file, const bool read_only, vector<Chu
     auto base = unique_ptr<ChunkDiskBase>();
     auto parent = wstring();
     auto err = ReadChunkDiskFile(chunkdisk_file, read_only, base, parent);
-    if (err != ERROR_SUCCESS)
-    {
-        SpdLogErr(L"error: reading %s failed with error %lu", chunkdisk_file, err);
-        return err;
-    }
+    if (err != ERROR_SUCCESS) return err;
 
     // read parents and add to bases
     while (true)
@@ -229,6 +305,7 @@ DWORD ReadChunkDiskBases(PCWSTR chunkdisk_file, const bool read_only, vector<Chu
                     || bases[0].chunk_count != base->chunk_count)
                 {
                     err = ERROR_INVALID_PARAMETER;
+                    SpdLogErr(L"error: incompatible base disk for %s", chunkdisk_file);
                     break;
                 }
             }
@@ -244,6 +321,7 @@ DWORD ReadChunkDiskBases(PCWSTR chunkdisk_file, const bool read_only, vector<Chu
                 if (!h)
                 {
                     err = GetLastError();
+                    SpdLogErr(L"error: opening directory %s failed with code %lu", dirname.data(), err);
                     break;
                 }
 
@@ -251,11 +329,13 @@ DWORD ReadChunkDiskBases(PCWSTR chunkdisk_file, const bool read_only, vector<Chu
                 if (!GetFileInformationByHandleEx(h.get(), FileIdInfo, &id_info, sizeof(id_info)))
                 {
                     err = GetLastError();
+                    SpdLogErr(L"error: reading directory %s failed with code %lu", dirname.data(), err);
                     break;
                 }
                 if (!part_ids.emplace(id_info).second)
                 {
                     err = ERROR_INVALID_PARAMETER; // dup found
+                    SpdLogErr(L"error: duplicate part: %s", dirname.data());
                     break;
                 }
             }
@@ -274,6 +354,7 @@ DWORD ReadChunkDiskBases(PCWSTR chunkdisk_file, const bool read_only, vector<Chu
         catch (const bad_alloc&)
         {
             err = ERROR_NOT_ENOUGH_MEMORY;
+            SpdLogErr(L"error: not enough memory to read chunkdisk file(s)");
             break;
         }
 
@@ -285,9 +366,6 @@ DWORD ReadChunkDiskBases(PCWSTR chunkdisk_file, const bool read_only, vector<Chu
 
     if (err != ERROR_SUCCESS)
     {
-        // parent not set if error in ReadChunkDiskFile()
-        SpdLogErr(L"error: reading %s failed with error %lu",
-                  bases.empty() ? chunkdisk_file : parent.data(), err);
         bases.clear();
         return err;
     }
@@ -450,7 +528,11 @@ DWORD CreateStorageUnit(PWSTR chunkdisk_file, PWSTR guid, const BOOLEAN write_pr
         else
         {
             auto err = UuidFromStringW(recast<RPC_WSTR>(guid), &unit_params.Guid);
-            if (err != RPC_S_OK) return ERROR_INVALID_PARAMETER;
+            if (err != RPC_S_OK)
+            {
+                SpdLogErr(L"error: invalid disk GUID: %s", guid);
+                return ERROR_INVALID_PARAMETER;
+            }
         }
         unit_params.BlockCount = bases[0].block_count;
         unit_params.BlockLength = bases[0].block_size;
@@ -475,13 +557,11 @@ DWORD CreateStorageUnit(PWSTR chunkdisk_file, PWSTR guid, const BOOLEAN write_pr
         unit_params.CacheSupported = TRUE;
         unit_params.UnmapSupported = TRUE;
 
-        return SpdStorageUnitCreate(pipe_name, &unit_params, &CHUNK_DISK_INTERFACE, &unit);
-    }();
-    if (err != ERROR_SUCCESS)
-    {
-        SpdLogErr(L"error: cannot create ChunkDisk: error %lu", err);
+        auto err = SpdStorageUnitCreate(pipe_name, &unit_params, &CHUNK_DISK_INTERFACE, &unit);
+        if (err != ERROR_SUCCESS) SpdLogErr(L"error: failed to create ChunkDisk unit with code %lu", err);
         return err;
-    }
+    }();
+    if (err != ERROR_SUCCESS) return err;
 
     // create ChunkDisk
     auto cdisk = unique_ptr<ChunkDisk>();
@@ -687,7 +767,7 @@ int wmain(int argc, wchar_t** argv)
         err = chunkdisk::GetThreadCount(&NumThreads);
         if (err != ERROR_SUCCESS)
         {
-            SpdLogErr(L"error: failed to get number of CPU threads with error %lu", err);
+            SpdLogErr(L"error: failed to get number of CPU threads with code %lu", err);
             return err;
         }
     }
@@ -723,14 +803,18 @@ int wmain(int argc, wchar_t** argv)
     err = chunkdisk::CreateStorageUnit(ChunkDiskFile, Guid, !WriteAllowed, !!ZeroChunk, PipeName, cdisk);
     if (err != ERROR_SUCCESS) return err;
     err = chunkdisk::StartWorkers(*cdisk, NumThreads);
-    if (err != ERROR_SUCCESS) return err;
+    if (err != ERROR_SUCCESS)
+    {
+        SpdLogErr(L"error: failed to start worker threads with code %lu", err);
+        return err;
+    }
 
     auto* storage_unit = cdisk->service.storage_unit;
     SpdStorageUnitSetDebugLog(storage_unit, DebugFlags);
     err = SpdStorageUnitStartDispatcher(storage_unit, NumThreads);
     if (err != ERROR_SUCCESS)
     {
-        SpdLogErr(L"error: cannot start ChunkDisk: error %lu", err);
+        SpdLogErr(L"failed to start ChunkDisk with code %lu", err);
         return err;
     }
 

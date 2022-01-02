@@ -34,12 +34,12 @@ DWORD ChunkDiskService::Start()
             if (i > 1)
             {
                 SpdLogErr(
-                    L"error: cannot initialize disk #%llu (#1: argument, #2~: parents): error %lu",
+                    L"error: failed to initialize disk #%llu (#1: argument, #2~: parents) with code %lu",
                     i, err);
             }
             else
             {
-                SpdLogErr(L"error: cannot initialize disk: error %lu", err);
+                SpdLogErr(L"error: failed to initialize disk with code %lu", err);
             }
             bases.clear();
             return err;
