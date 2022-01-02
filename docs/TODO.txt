@@ -6,3 +6,5 @@ profile performance (kernel time, user time) for SSD 4K I/O
     locks
     data structure
     asynchronous steps
+
+use FSCTL_DUPLICATE_EXTENTS_TO_FILE for differential disk
