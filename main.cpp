@@ -505,7 +505,7 @@ static SPD_STORAGE_UNIT_INTERFACE CHUNK_DISK_INTERFACE =
     Unmap,
 };
 
-DWORD CreateStorageUnit(PWSTR chunkdisk_file, PWSTR guid, const BOOLEAN write_protected, const BOOLEAN zero_chunk, PWSTR pipe_name,
+DWORD CreateStorageUnit(PWSTR chunkdisk_file, GUID guid, const BOOLEAN write_protected, const BOOLEAN zero_chunk, PWSTR pipe_name,
                         unique_ptr<ChunkDisk>& cdisk_out)
 {
     // read chunkdisk file
@@ -521,19 +521,7 @@ DWORD CreateStorageUnit(PWSTR chunkdisk_file, PWSTR guid, const BOOLEAN write_pr
         constexpr wchar_t ProductRevision[] = L"1.4";
         auto unit_params = SPD_STORAGE_UNIT_PARAMS();
 
-        if (guid == nullptr)
-        {
-            UuidCreate(&unit_params.Guid);
-        }
-        else
-        {
-            auto err = UuidFromStringW(recast<RPC_WSTR>(guid), &unit_params.Guid);
-            if (err != RPC_S_OK)
-            {
-                SpdLogErr(L"error: invalid disk GUID: %s", guid);
-                return ERROR_INVALID_PARAMETER;
-            }
-        }
+        unit_params.Guid = guid;
         unit_params.BlockCount = bases[0].block_count;
         unit_params.BlockLength = bases[0].block_size;
         unit_params.MaxTransferLength = MAX_TRANSFER_LENGTH;
@@ -777,6 +765,21 @@ int wmain(int argc, wchar_t** argv)
         NumThreads = chunkdisk::MAX_WORKERS;
     }
 
+    auto UnitGuid = GUID();
+    if (Guid == nullptr)
+    {
+        UuidCreate(&UnitGuid);
+    }
+    else
+    {
+        err = UuidFromStringW(reinterpret_cast<RPC_WSTR>(Guid), &UnitGuid);
+        if (err != RPC_S_OK)
+        {
+            SpdLogErr(L"error: invalid disk GUID: %s", Guid);
+            return ERROR_INVALID_PARAMETER;
+        }
+    }
+
     HANDLE DebugLogHandle;
     if (DebugLogFile != nullptr)
     {
@@ -800,7 +803,7 @@ int wmain(int argc, wchar_t** argv)
     }
 
     auto cdisk = unique_ptr<chunkdisk::ChunkDisk>();
-    err = chunkdisk::CreateStorageUnit(ChunkDiskFile, Guid, !WriteAllowed, !!ZeroChunk, PipeName, cdisk);
+    err = chunkdisk::CreateStorageUnit(ChunkDiskFile, UnitGuid, !WriteAllowed, !!ZeroChunk, PipeName, cdisk);
     if (err != ERROR_SUCCESS) return err;
     err = chunkdisk::StartWorkers(*cdisk, NumThreads);
     if (err != ERROR_SUCCESS)
@@ -818,16 +821,20 @@ int wmain(int argc, wchar_t** argv)
         return err;
     }
 
-    SpdLogInfo(L"%s -f %s -W %u -Z %u -t %d%s%s%s%s",
-        Usage::PROGNAME,
-        ChunkDiskFile,
-        !!WriteAllowed,
-        !!ZeroChunk,
-        NumThreads,
-        (nullptr != Guid) ? L" -U " : L"",
-        (nullptr != Guid) ? Guid : L"",
-        (nullptr != PipeName) ? L" -p " : L"",
-        (nullptr != PipeName) ? PipeName : L"");
+    auto UnitGuidStr = RPC_WSTR();
+    if (UuidToStringW(&UnitGuid, &UnitGuidStr) == RPC_S_OK)
+    {
+        SpdLogInfo(L"%s -f %s -W %u -Z %u -t %d -U %s%s%s",
+                   Usage::PROGNAME,
+                   ChunkDiskFile,
+                   !!WriteAllowed,
+                   !!ZeroChunk,
+                   NumThreads,
+                   UnitGuidStr,
+                   (nullptr != PipeName) ? L" -p " : L"",
+                   (nullptr != PipeName) ? PipeName : L"");
+        RpcStringFreeW(&UnitGuidStr);
+    }
 
     SpdGuardSet(&ConsoleCtrlGuard, storage_unit);
     SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
