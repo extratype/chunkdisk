@@ -99,7 +99,12 @@ DWORD ChunkDiskBase::Start()
             auto h = FileHandle(CreateFileW(
                 path.data(), desired_access, share_mode, nullptr,
                 cr_disp, flags_attrs, nullptr));
-            if (!h) return GetLastError();
+            if (!h)
+            {
+                auto err = GetLastError();
+                SpdLogErr(L"error: failed to create %s with code %lu", path.data(), err);
+                return err;
+            }
             part_lock[i] = std::move(h);
         }
 
@@ -124,8 +129,18 @@ DWORD ChunkDiskBase::Start()
                     continue;
                 }
 
-                if (!chunk_parts.emplace(idx, i).second) return ERROR_FILE_EXISTS;
-                if (++part_current[i] > part_max[i]) return ERROR_PARAMETER_QUOTA_EXCEEDED;
+                auto [it, emplaced] = chunk_parts.emplace(idx, i);
+                if (!emplaced)
+                {
+                    SpdLogErr(L"error: chunk%llu is duplicate in part #%llu and #$llu",
+                              idx, it->first + 1, i + 1);
+                    return ERROR_FILE_EXISTS;
+                }
+                if (++part_current[i] > part_max[i])
+                {
+                    SpdLogErr(L"error: too many chunks in part #%llu", i + 1);
+                    return ERROR_PARAMETER_QUOTA_EXCEEDED;
+                }
             }
         }
 
