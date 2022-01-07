@@ -12,6 +12,8 @@ using std::bad_alloc;
 namespace chunkdisk
 {
 
+static constexpr auto MAX_CHUNK_PARTS = size_t(16384);
+
 ChunkRange ChunkDiskBase::BlockChunkRange(u64 block_addr, u32 count) const
 {
     auto start_idx = block_addr / chunk_length;
@@ -110,7 +112,7 @@ DWORD ChunkDiskBase::Start()
 
         part_lock_ = std::move(part_lock);
 
-        // read parts and chunks
+        // read parts to check chunks
         auto part_current = std::vector<u64>(num_parts, 0);
         auto chunk_parts = std::unordered_map<u64, size_t>();
 
@@ -145,7 +147,6 @@ DWORD ChunkDiskBase::Start()
         }
 
         part_current_ = std::move(part_current);
-        chunk_parts_ = std::move(chunk_parts);
     }
     catch (const std::system_error& e)
     {
@@ -159,32 +160,119 @@ DWORD ChunkDiskBase::Start()
     return ERROR_SUCCESS;
 }
 
+DWORD ChunkDiskBase::FindChunkPart(const u64 chunk_idx, size_t& part_idx, SRWLock& lk)
+{
+    if (!lk) lk = SRWLock(*mutex_parts_, false);
+    auto it = chunk_parts_.find(chunk_idx);
+    if (it != chunk_parts_.end())
+    {
+        part_idx = (*it).second;
+        return ERROR_SUCCESS;
+    }
+    // no reinsert_back() for performance; insertion order
+
+    if (!lk.is_exclusive())
+    {
+        lk.switch_lock();
+        it = chunk_parts_.find(chunk_idx);
+        if (it != chunk_parts_.end())
+        {
+            part_idx = (*it).second;
+            return ERROR_SUCCESS;
+        }
+    }
+
+    // lk is exclusive
+    auto err = [this, chunk_idx, &part_idx]() -> DWORD
+    {
+        auto err = DWORD(ERROR_SUCCESS);
+        const auto num_parts = part_dirname.size();
+        for (auto i = size_t(0); i < num_parts; ++i)
+        {
+            try
+            {
+                const auto path = part_dirname[i] + L"\\chunk" + std::to_wstring(chunk_idx);
+                auto attrs = GetFileAttributesW(path.data());
+                if (attrs != INVALID_FILE_ATTRIBUTES)
+                {
+                    part_idx = i;           // found
+                    return ERROR_SUCCESS;
+                }
+                else
+                {
+                    auto err1 = GetLastError();
+                    if (err1 != ERROR_FILE_NOT_FOUND) err = err1;
+                    // ERROR_PATH_NOT_FOUND if the parent directory does not exist
+                }
+            }
+            catch (const bad_alloc&)
+            {
+                err = ERROR_NOT_ENOUGH_MEMORY;
+            }
+        }
+        if (err != ERROR_SUCCESS) return err;   // blame err
+        part_idx = num_parts;           // not found
+        return ERROR_SUCCESS;
+    }();
+    if (err != ERROR_SUCCESS)
+    {
+        lk.unlock();
+        return err;
+    }
+
+    // cache result
+    try
+    {
+        if (chunk_parts_.size() >= MAX_CHUNK_PARTS) chunk_parts_.pop_front();
+        chunk_parts_.emplace(chunk_idx, part_idx);
+        return ERROR_SUCCESS;
+    }
+    catch (const bad_alloc&)
+    {
+        // failed to cache, successful anyway
+        return ERROR_SUCCESS;
+    }
+}
+
 bool ChunkDiskBase::CheckChunk(const u64 chunk_idx)
 {
-    auto lk = SRWLock(*mutex_parts_, false);
-    return chunk_parts_.find(chunk_idx) != chunk_parts_.end();
+    auto lk = SRWLock();
+    auto num_parts = part_dirname.size();
+    auto part_idx = num_parts;
+    FindChunkPart(chunk_idx, part_idx, lk);
+    return part_idx != num_parts;
 }
 
 DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, const bool is_write, const bool is_locked)
 {
     if (read_only && is_write) return ERROR_ACCESS_DENIED;
 
+    auto num_parts = part_dirname.size();
+    auto part_found = false;
+    auto part_idx = num_parts;
     auto lk = SRWLock(*mutex_parts_, false);
-    auto part_it = chunk_parts_.find(chunk_idx);
-    auto part_idx = size_t(0);
 
-    if (part_it != chunk_parts_.end())
+    auto err = FindChunkPart(chunk_idx, part_idx, lk);
+    if (err != ERROR_SUCCESS) return err;
+    if (part_idx != num_parts)
     {
-        part_idx = part_it->second;
+        part_found = true;
     }
     else if (is_write)
     {
         // assign part, will create chunk file
-        lk.switch_lock();
-        part_it = chunk_parts_.find(chunk_idx);
-        if (part_it != chunk_parts_.end())
+        if (!lk.is_exclusive())
         {
-            part_idx = part_it->second;
+            lk.switch_lock();
+            err = FindChunkPart(chunk_idx, part_idx, lk);
+            if (err != ERROR_SUCCESS) return err;
+            // lk is kept exclusive
+        }
+        // lk is exclusive
+
+        if (part_idx != num_parts)
+        {
+            part_found = true;
         }
         else
         {
@@ -217,7 +305,6 @@ DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, co
         }
     }
 
-    const auto part_found = (part_it != chunk_parts_.end());
     if (!is_write && !part_found)
     {
         // not present -> empty handle
@@ -279,7 +366,7 @@ DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, co
         // This just reserves disk space and sets file length on NTFS.
         // Writing to the file actually extends the physical data, but synchronously.
         // See https://devblogs.microsoft.com/oldnewthing/20150710-00/?p=45171.
-        auto err = SetFilePointerEx(h_locked.get(), chunk_bytes, nullptr, FILE_BEGIN)
+        err = SetFilePointerEx(h_locked.get(), chunk_bytes, nullptr, FILE_BEGIN)
             ? ERROR_SUCCESS : GetLastError();
         if (err == ERROR_SUCCESS) err = SetEndOfFile(h_locked.get()) ? ERROR_SUCCESS : GetLastError();
         if (err == ERROR_SUCCESS)
@@ -287,7 +374,9 @@ DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, co
             try
             {
                 // lk was switched to exclusive
-                chunk_parts_[chunk_idx] = part_idx;
+                auto [part_it, emplaced] = chunk_parts_.emplace(chunk_idx, part_idx);
+                if (!emplaced) (*part_it).second = part_idx;
+                if (chunk_parts_.size() > MAX_CHUNK_PARTS) chunk_parts_.pop_front();
                 ++part_current_[part_idx];
             }
             catch (const bad_alloc&)
@@ -355,11 +444,19 @@ DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, co
 
 void ChunkDiskBase::RemoveChunkLocked(const u64 chunk_idx, FileHandle handle)
 {
+    auto num_parts = size_t(part_dirname.size());
+    auto part_idx = num_parts;
     auto lk = SRWLock(*mutex_parts_, true);
-    auto part_it = chunk_parts_.find(chunk_idx);
-    if (part_it == chunk_parts_.end()) return;
-    chunk_parts_.erase(part_it);
-    --part_current_[part_it->second];
+    auto err = FindChunkPart(chunk_idx, part_idx, lk);
+    if (err != ERROR_SUCCESS) return;
+    // lk is kept exclusive
+    if (part_idx == num_parts) return;
+
+    auto [part_it, emplaced] = chunk_parts_.emplace(chunk_idx, num_parts);
+    if (!emplaced) (*part_it).second = num_parts;
+    if (chunk_parts_.size() > MAX_CHUNK_PARTS) chunk_parts_.pop_front();
+
+    --part_current_[part_idx];
     handle.reset();
 }
 

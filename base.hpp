@@ -69,7 +69,9 @@ private:
     std::unique_ptr<std::shared_mutex> mutex_parts_;
     std::vector<u64> part_current_;                     // part index -> # of chunks
     size_t part_current_new_ = 0;                       // part index for new chunks
-    std::unordered_map<u64, size_t> chunk_parts_;       // chunk index -> part index
+    Map<u64, size_t> chunk_parts_;                      // cached: add to back, evict from front
+                                                        // chunk index -> part index
+                                                        // part_dirname.size() if not found
 
 public:
     // unit conversions
@@ -129,6 +131,13 @@ public:
      * handle: returned by CreateChunk(chunk_idx, handle, true, true)
      */
     void RemoveChunkLocked(u64 chunk_idx, FileHandle handle);
+
+private:
+    // loop over parts or get cached result
+    // lk: empty or lock mutex_parts_
+    // part_idx == part_dirname.size() if not found
+    // holding mutex_parts_ if successful
+    DWORD FindChunkPart(u64 chunk_idx, size_t& part_idx, SRWLock& lk);
 };
 
 }
