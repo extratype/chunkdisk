@@ -234,7 +234,15 @@ DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, co
 
     // !is_write -> part_found
     // is_write -> part_found or assigned
-    const auto path = part_dirname[part_idx] + L"\\chunk" + std::to_wstring(chunk_idx);
+    auto path = std::wstring();
+    try
+    {
+        path = part_dirname[part_idx] + L"\\chunk" + std::to_wstring(chunk_idx);
+    }
+    catch (const bad_alloc&)
+    {
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
 
     // GENERIC_READ  means FILE_GENERIC_READ
     // GENERIC_WRITE means FILE_GENERIC_WRITE | FILE_READ_ATTRIBUTES
