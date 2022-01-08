@@ -65,6 +65,19 @@ PageRange ChunkDiskBase::BlockPageRange(u64 chunk_idx, u64 start_off, u64 end_of
     return PageRange{ base_idx, sidx, soff, eidx, eoff };
 }
 
+DWORD ChunkDiskBase::ChunkPath(u64 chunk_idx, size_t part_idx, std::wstring& path)
+{
+    try
+    {
+        path = part_dirname[part_idx] + L"\\chunk" + std::to_wstring(chunk_idx);
+        return ERROR_SUCCESS;
+    }
+    catch (const bad_alloc&)
+    {
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+}
+
 DWORD ChunkDiskBase::Start()
 {
     try
@@ -189,25 +202,25 @@ DWORD ChunkDiskBase::FindChunkPart(const u64 chunk_idx, size_t& part_idx, SRWLoc
         const auto num_parts = part_dirname.size();
         for (auto i = size_t(0); i < num_parts; ++i)
         {
-            try
+            auto path = std::wstring();
+            auto err1 = ChunkPath(chunk_idx, i, path);
+            if (err1 != ERROR_SUCCESS)
             {
-                const auto path = part_dirname[i] + L"\\chunk" + std::to_wstring(chunk_idx);
-                auto attrs = GetFileAttributesW(path.data());
-                if (attrs != INVALID_FILE_ATTRIBUTES)
-                {
-                    part_idx = i;           // found
-                    return ERROR_SUCCESS;
-                }
-                else
-                {
-                    auto err1 = GetLastError();
-                    if (err1 != ERROR_FILE_NOT_FOUND) err = err1;
-                    // ERROR_PATH_NOT_FOUND if the parent directory does not exist
-                }
+                err = err1;
+                continue;
             }
-            catch (const bad_alloc&)
+
+            auto attrs = GetFileAttributesW(path.data());
+            if (attrs != INVALID_FILE_ATTRIBUTES)
             {
-                err = ERROR_NOT_ENOUGH_MEMORY;
+                part_idx = i;           // found
+                return ERROR_SUCCESS;
+            }
+            else
+            {
+                err1 = GetLastError();
+                if (err1 != ERROR_FILE_NOT_FOUND) err = err1;
+                // ERROR_PATH_NOT_FOUND if the parent directory does not exist
             }
         }
         if (err != ERROR_SUCCESS) return err;   // blame err
@@ -322,14 +335,8 @@ DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, co
     // !is_write -> part_found
     // is_write -> part_found or assigned
     auto path = std::wstring();
-    try
-    {
-        path = part_dirname[part_idx] + L"\\chunk" + std::to_wstring(chunk_idx);
-    }
-    catch (const bad_alloc&)
-    {
-        return ERROR_NOT_ENOUGH_MEMORY;
-    }
+    err = ChunkPath(chunk_idx, part_idx, path);
+    if (err != ERROR_SUCCESS) return err;
 
     // GENERIC_READ  means FILE_GENERIC_READ
     // GENERIC_WRITE means FILE_GENERIC_WRITE | FILE_READ_ATTRIBUTES

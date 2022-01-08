@@ -133,6 +133,8 @@ public:
     void RemoveChunkLocked(u64 chunk_idx, FileHandle handle);
 
 private:
+    DWORD ChunkPath(u64 chunk_idx, size_t part_idx, std::wstring& path);
+
     // loop over parts or get cached result
     // lk: empty or lock mutex_parts_
     // part_idx == part_dirname.size() if not found
