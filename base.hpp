@@ -133,6 +133,11 @@ public:
     void RemoveChunkLocked(u64 chunk_idx, FileHandle handle);
 
 private:
+    // func(chunk_idx) for chunks in part
+    // stop when func() returns an error
+    template <class F>
+    DWORD IterPart(size_t part_idx, F&& func);
+
     DWORD ChunkPath(u64 chunk_idx, size_t part_idx, std::wstring& path);
 
     // loop over parts or get cached result

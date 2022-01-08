@@ -65,17 +65,37 @@ PageRange ChunkDiskBase::BlockPageRange(u64 chunk_idx, u64 start_off, u64 end_of
     return PageRange{ base_idx, sidx, soff, eidx, eoff };
 }
 
-DWORD ChunkDiskBase::ChunkPath(u64 chunk_idx, size_t part_idx, std::wstring& path)
+template <class F>
+DWORD ChunkDiskBase::IterPart(size_t part_idx, F&& func)
 {
     try
     {
-        path = part_dirname[part_idx] + L"\\chunk" + std::to_wstring(chunk_idx);
-        return ERROR_SUCCESS;
+        for (auto& p : std::filesystem::directory_iterator(part_dirname[part_idx] + L'\\'))
+        {
+            auto fname = p.path().filename().wstring();
+            if (_wcsnicmp(fname.data(), L"chunk", 5) != 0) continue;
+
+            auto* endp = PWSTR();
+            auto idx = wcstoull(fname.data() + 5, &endp, 10);
+            if (fname.data() + 5 == endp || *endp != L'\0'
+                || errno == ERANGE || idx >= chunk_count)
+            {
+                continue;
+            }
+
+            auto err = DWORD(func(idx));
+            if (err != ERROR_SUCCESS) return err;
+        }
     }
     catch (const bad_alloc&)
     {
         return ERROR_NOT_ENOUGH_MEMORY;
     }
+    catch (const std::system_error& e)
+    {
+        return e.code().value();
+    }
+    return ERROR_SUCCESS;
 }
 
 DWORD ChunkDiskBase::Start()
@@ -84,17 +104,9 @@ DWORD ChunkDiskBase::Start()
     {
         // make class movable
         mutex_parts_ = std::make_unique<std::shared_mutex>();
-    }
-    catch (const bad_alloc&)
-    {
-        return ERROR_NOT_ENOUGH_MEMORY;
-    }
 
-    const auto num_parts = part_dirname.size();
-
-    try
-    {
         // put a lock file to prevent mistakes
+        const auto num_parts = part_dirname.size();
         auto part_lock = std::vector<FileHandle>(num_parts);
 
         // base of a differential disk if read_only
@@ -131,19 +143,8 @@ DWORD ChunkDiskBase::Start()
 
         for (auto i = size_t(0); i < num_parts; ++i)
         {
-            for (auto& p : std::filesystem::directory_iterator(part_dirname[i] + L'\\'))
+            auto err = IterPart(i, [this, i, &part_current, &chunk_parts](u64 idx) -> DWORD
             {
-                auto fname = p.path().filename().wstring();
-                if (_wcsnicmp(fname.data(), L"chunk", 5) != 0) continue;
-
-                auto* endp = PWSTR();
-                auto idx = wcstoull(fname.data() + 5, &endp, 10);
-                if (fname.data() + 5 == endp || *endp != L'\0'
-                    || errno == ERANGE || idx >= chunk_count)
-                {
-                    continue;
-                }
-
                 auto [it, emplaced] = chunk_parts.emplace(idx, i);
                 if (!emplaced)
                 {
@@ -156,21 +157,31 @@ DWORD ChunkDiskBase::Start()
                     SpdLogErr(L"error: too many chunks in part #%llu", i + 1);
                     return ERROR_PARAMETER_QUOTA_EXCEEDED;
                 }
-            }
+                return ERROR_SUCCESS;
+            });
+            if (err != ERROR_SUCCESS) return err;
         }
 
         part_current_ = std::move(part_current);
-    }
-    catch (const std::system_error& e)
-    {
-        return e.code().value();
     }
     catch (const bad_alloc&)
     {
         return ERROR_NOT_ENOUGH_MEMORY;
     }
-
     return ERROR_SUCCESS;
+}
+
+DWORD ChunkDiskBase::ChunkPath(u64 chunk_idx, size_t part_idx, std::wstring& path)
+{
+    try
+    {
+        path = part_dirname[part_idx] + L"\\chunk" + std::to_wstring(chunk_idx);
+        return ERROR_SUCCESS;
+    }
+    catch (const bad_alloc&)
+    {
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
 }
 
 DWORD ChunkDiskBase::FindChunkPart(const u64 chunk_idx, size_t& part_idx, SRWLock& lk)
