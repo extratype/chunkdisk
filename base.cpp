@@ -149,7 +149,7 @@ DWORD ChunkDiskBase::Start()
                 {
                     SpdLogErr(L"error: chunk%llu is duplicate in part #%llu and #$llu",
                               idx, it->first + 1, i + 1);
-                    return ERROR_FILE_EXISTS;
+                    return ERROR_DUPLICATE_TAG;
                 }
                 if (++part_current[i] > part_max[i])
                 {
@@ -198,33 +198,54 @@ DWORD ChunkDiskBase::FindChunkPart(const u64 chunk_idx, size_t& part_idx, SRWLoc
     // lk is exclusive
     auto err = [this, chunk_idx, &part_idx]() -> DWORD
     {
-        auto err = DWORD(ERROR_SUCCESS);
         const auto num_parts = part_dirname.size();
-        for (auto i = size_t(0); i < num_parts; ++i)
+        auto i = size_t(0);
+        auto err = DWORD(ERROR_SUCCESS);
+        auto idx = size_t(num_parts);
+
+        for (; i < num_parts; ++i)
         {
             auto path = std::wstring();
-            auto err1 = ChunkPath(chunk_idx, i, path);
-            if (err1 != ERROR_SUCCESS)
-            {
-                err = err1;
-                continue;
-            }
+            err = ChunkPath(chunk_idx, i, path);
+            if (err != ERROR_SUCCESS) break;
 
             auto attrs = GetFileAttributesW(path.data());
             if (attrs != INVALID_FILE_ATTRIBUTES)
             {
-                part_idx = i;           // found
-                return ERROR_SUCCESS;
+                idx = i;
+                ++i;
+                break;
             }
-            else
-            {
-                err1 = GetLastError();
-                if (err1 != ERROR_FILE_NOT_FOUND) err = err1;
-                // ERROR_PATH_NOT_FOUND if the parent directory does not exist
-            }
+
+            err = GetLastError();
+            // ERROR_PATH_NOT_FOUND if the parent directory does not exist
+            if (err != ERROR_FILE_NOT_FOUND) break;
+            err = ERROR_SUCCESS;
         }
         if (err != ERROR_SUCCESS) return err;   // blame err
-        part_idx = num_parts;           // not found
+
+        for (; i < num_parts; ++i)
+        {
+            auto path = std::wstring();
+            err = ChunkPath(chunk_idx, i, path);
+            if (err != ERROR_SUCCESS) break;
+
+            auto attrs = GetFileAttributesW(path.data());
+            if (attrs != INVALID_FILE_ATTRIBUTES)
+            {
+                // duplicate chunk
+                err = ERROR_DUPLICATE_TAG;
+                break;
+            }
+
+            err = GetLastError();
+            // ERROR_PATH_NOT_FOUND if the parent directory does not exist
+            if (err != ERROR_FILE_NOT_FOUND) break;
+            err = ERROR_SUCCESS;
+        }
+        if (err != ERROR_SUCCESS) return err;   // blame err
+
+        part_idx = idx;
         return ERROR_SUCCESS;
     }();
     if (err != ERROR_SUCCESS)
