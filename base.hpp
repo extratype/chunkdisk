@@ -131,7 +131,8 @@ public:
      * Subsequent CreateChunk() will fail if is_write.
      * Subsequent CreateChunk() with !is_write may succeed if !is_write.
      */
-    DWORD CreateChunk(u64 chunk_idx, FileHandle& handle_out, bool is_write, bool is_locked = false);
+    DWORD CreateChunk(u64 chunk_idx, FileHandle& handle_out,
+                      bool is_write, bool is_locked = false, bool retrying = false);
 
     /*
      * Cancel creating the chunk which has been marked for removal.

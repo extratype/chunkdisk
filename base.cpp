@@ -360,14 +360,16 @@ DWORD ChunkDiskBase::AssignChunkPart()
     return ERROR_SUCCESS;
 }
 
-DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, const bool is_write, const bool is_locked)
+DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out,
+                                 const bool is_write, const bool is_locked, const bool retrying)
 {
     if (read_only && is_write) return ERROR_ACCESS_DENIED;
 
     auto num_parts = part_dirname.size();
     auto part_found = false;
     auto part_idx = num_parts;
-    auto lk = SRWLock(*mutex_parts_, false);
+    auto lk = SRWLock(*mutex_parts_, retrying);
+    if (retrying) chunk_parts_.erase(chunk_idx);
 
     auto err = FindChunkPart(chunk_idx, part_idx, lk);
     if (err != ERROR_SUCCESS) return err;
@@ -493,7 +495,15 @@ DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, co
     auto h = FileHandle(CreateFileW(
         path.data(), desired_access, share_mode, nullptr,
         OPEN_EXISTING, flags_attrs, nullptr));
-    if (!h) return GetLastError();
+    if (!h)
+    {
+        err = GetLastError();
+        if (err != ERROR_FILE_NOT_FOUND || !move_enabled || retrying) return err;
+
+        // rescan for chunk gone missing
+        lk.unlock();
+        return CreateChunk(chunk_idx, handle_out, is_write, is_locked, true);
+    }
 
     if (!(is_write && !part_found))
     {
