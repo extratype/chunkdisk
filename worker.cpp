@@ -659,7 +659,7 @@ DWORD ChunkDiskWorker::OpenChunkAsync(const u64 chunk_idx, const bool is_write,
             return ERROR_SUCCESS;
         }
 
-        // NOTE: a completion packet will also be sent even though the I/O operation successfully completed synchronously.
+        // NOTE: a completion packet will also be sent if the I/O operation successfully completed synchronously.
         // See https://docs.microsoft.com/en-us/windows/win32/fileio/synchronous-and-asynchronous-i-o
         // Related: https://docs.microsoft.com/en-us/troubleshoot/windows/win32/asynchronous-disk-io-synchronous
         // Related: https://docs.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-setfilecompletionnotificationmodes
@@ -780,7 +780,8 @@ DWORD ChunkDiskWorker::CloseChunkAsync(const u64 chunk_idx, const bool is_write,
                 err = worker->PostMsg(std::move(msg));
                 return err == ERROR_IO_PENDING ? ERROR_SUCCESS : err;
             }();
-            if (err != ERROR_SUCCESS && err != ERROR_INVALID_STATE) SpdStorageUnitShutdown(service_.storage_unit);    // fatal
+            // fatal
+            if (err != ERROR_SUCCESS && err != ERROR_INVALID_STATE) SpdStorageUnitShutdown(service_.storage_unit);
         }
     }
 
@@ -843,7 +844,8 @@ DWORD ChunkDiskWorker::LockChunk(const u64 chunk_idx)
                 err = worker->PostMsg(std::move(msg));
                 return err == ERROR_IO_PENDING ? ERROR_SUCCESS : err;
             }();
-            if (err != ERROR_SUCCESS && err != ERROR_INVALID_STATE) SpdStorageUnitShutdown(service_.storage_unit);    // fatal
+            // fatal
+            if (err != ERROR_SUCCESS && err != ERROR_INVALID_STATE) SpdStorageUnitShutdown(service_.storage_unit);
         }
 
         return ERROR_SUCCESS;

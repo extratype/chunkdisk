@@ -66,7 +66,7 @@ PageRange ChunkDiskBase::BlockPageRange(u64 chunk_idx, u64 start_off, u64 end_of
 }
 
 template <class F>
-DWORD ChunkDiskBase::IterPart(size_t part_idx, F&& func)
+DWORD ChunkDiskBase::IterPart(const size_t part_idx, F&& func)
 {
     try
     {
@@ -181,7 +181,7 @@ DWORD ChunkDiskBase::Start()
     return ERROR_SUCCESS;
 }
 
-DWORD ChunkDiskBase::ChunkPath(u64 chunk_idx, size_t part_idx, std::wstring& path)
+DWORD ChunkDiskBase::ChunkPath(const u64 chunk_idx, const size_t part_idx, std::wstring& path)
 {
     try
     {
