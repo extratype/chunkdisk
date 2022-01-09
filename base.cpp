@@ -163,6 +163,16 @@ DWORD ChunkDiskBase::Start()
         }
 
         part_current_ = std::move(part_current);
+        // initialize for AssignChunkPart()
+        // part_current_new_ is initially zero
+        for (auto new_part = part_current_new_; new_part < num_parts; ++new_part)
+        {
+            if (part_current_[new_part] < part_max[new_part])
+            {
+                part_current_new_ = new_part;
+                break;
+            }
+        }
     }
     catch (const bad_alloc&)
     {
@@ -288,6 +298,62 @@ bool ChunkDiskBase::CheckChunk(const u64 chunk_idx)
     return part_idx != num_parts;
 }
 
+DWORD ChunkDiskBase::AssignChunkPart()
+{
+    auto num_parts = part_dirname.size();
+    auto new_part = part_current_new_;
+
+    for (; new_part < num_parts; ++new_part)
+    {
+        if (part_current_[new_part] >= part_max[new_part])
+        {
+            // refresh to get the actual value
+            auto new_count = 0;
+            auto err = IterPart(new_part, [&new_count](u64 idx) -> DWORD
+            {
+                ++new_count;
+                return ERROR_SUCCESS;
+            });
+            if (err != ERROR_SUCCESS) return err;
+            part_current_[new_part] = new_count;
+        }
+
+        if (part_current_[new_part] < part_max[new_part])
+        {
+            part_current_new_ = new_part;
+            return ERROR_SUCCESS;
+        }
+    }
+
+    for (new_part = 0; new_part < part_current_new_; ++new_part)
+    {
+        if (part_current_[new_part] >= part_max[new_part])
+        {
+            // refresh to get the actual value
+            auto new_count = 0;
+            auto err = IterPart(new_part, [&new_count](u64 idx) -> DWORD
+            {
+                ++new_count;
+                return ERROR_SUCCESS;
+            });
+            if (err != ERROR_SUCCESS) return err;
+            part_current_[new_part] = new_count;
+        }
+
+        if (part_current_[new_part] < part_max[new_part])
+        {
+            part_current_new_ = new_part;
+            return ERROR_SUCCESS;
+        }
+    }
+
+    // this branch is not reachable because
+    // ReadChunkDiskFile() checks total part_max and
+    // WinSpd checks requested addresses
+    part_current_new_ = 0;
+    return ERROR_SUCCESS;
+}
+
 DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, const bool is_write, const bool is_locked)
 {
     if (read_only && is_write) return ERROR_ACCESS_DENIED;
@@ -314,39 +380,15 @@ DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out, co
             // lk is kept exclusive
         }
         // lk is exclusive
-
         if (part_idx != num_parts)
         {
             part_found = true;
         }
         else
         {
-            part_idx = [this]()
-            {
-                // chunks are not removed (truncated when unmapped) so remember the last result
-                auto num_parts = part_dirname.size();
-                for (auto new_part = part_current_new_; new_part < num_parts; ++new_part)
-                {
-                    if (part_current_[new_part] < part_max[new_part])
-                    {
-                        part_current_new_ = new_part;
-                        return new_part;
-                    }
-                }
-                // the following lines are not reachable because
-                // part_current_new_ is initially zero,
-                // ReadChunkDiskFile() checks total part_max,
-                // and WinSpd checks requested addresses
-                for (auto new_part = size_t(0); new_part < part_current_new_; ++new_part)
-                {
-                    if (part_current_[new_part] < part_max[new_part])
-                    {
-                        part_current_new_ = new_part;
-                        return new_part;
-                    }
-                }
-                return num_parts - 1;
-            }();
+            err = AssignChunkPart();
+            if (err != ERROR_SUCCESS) return err;
+            part_idx = part_current_new_;
         }
     }
 

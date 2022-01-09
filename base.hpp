@@ -68,7 +68,9 @@ private:
 
     std::unique_ptr<std::shared_mutex> mutex_parts_;
     std::vector<u64> part_current_;                     // part index -> # of chunks
+                                                        // maybe less than actual, refresh at max.
     size_t part_current_new_ = 0;                       // part index for new chunks
+                                                        // chunks are never removed so remember the last result
     Map<u64, size_t> chunk_parts_;                      // cached: add to back, evict from front
                                                         // chunk index -> part index
                                                         // part_dirname.size() if not found
@@ -145,6 +147,10 @@ private:
     // part_idx == part_dirname.size() if not found
     // holding mutex_parts_ if successful
     DWORD FindChunkPart(u64 chunk_idx, size_t& part_idx, SRWLock& lk);
+
+    // update part_current_new_
+    // lock mutex_parts_ and call this
+    DWORD AssignChunkPart();
 };
 
 }
