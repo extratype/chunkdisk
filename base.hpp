@@ -57,11 +57,16 @@ public:
     // used as parent disk if read_only
     const bool read_only;
 
+    // support moving chunk files
+    // !read_only required
+    const bool move_enabled;
+
     ChunkDiskBase(u32 block_size, u32 page_length, u64 chunk_length, u64 block_count, u64 chunk_count,
-                  std::vector<u64> part_max, std::vector<std::wstring> part_dirname, bool read_only)
+                  std::vector<u64> part_max, std::vector<std::wstring> part_dirname,
+                  bool read_only, bool move_enabled)
         : block_size(block_size), page_length(page_length), chunk_length(chunk_length), block_count(block_count),
           chunk_count(chunk_count), part_max(std::move(part_max)), part_dirname(std::move(part_dirname)),
-          read_only(read_only) {}
+          read_only(read_only), move_enabled(move_enabled) {}
 
 private:
     std::vector<FileHandle> part_lock_;                 // part index -> .lock

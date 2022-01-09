@@ -88,7 +88,8 @@ struct ChunkDisk
  * chunk size in bytes: must be a multiple of PAGE_SIZE
  * number path/to/dir...: max. # of chunks in part directory
  */
-DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, const bool read_only, unique_ptr<ChunkDiskBase>& base, wstring& parent)
+DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, const bool read_only, const bool move_enabled,
+                        unique_ptr<ChunkDiskBase>& base, wstring& parent)
 {
     try
     {
@@ -265,7 +266,8 @@ DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, const bool read_only, unique_ptr<
             chunk_count,
             std::move(part_max),
             std::move(part_dirname),
-            read_only);
+            read_only,
+            move_enabled);
         // parent not set if err
         parent = std::move(parent_r);
     }
@@ -279,15 +281,16 @@ DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, const bool read_only, unique_ptr<
 
 /*
  * Read .chunkdisk file (bases[0]) and its parents (bases[1] and so on, if any).
- * bases[0].read_only == true if read_only.
+ * read_only and move_enabled are for bases[0].
  */
-DWORD ReadChunkDiskBases(PCWSTR chunkdisk_file, const bool read_only, vector<ChunkDiskBase>& bases)
+DWORD ReadChunkDiskBases(PCWSTR chunkdisk_file, const bool read_only, const bool move_enabled,
+                         vector<ChunkDiskBase>& bases)
 {
     auto part_ids = std::unordered_set<FILE_ID_INFO, FileIdInfoHash, FileIdInfoEqual>();
 
     auto base = unique_ptr<ChunkDiskBase>();
     auto parent = wstring();
-    auto err = ReadChunkDiskFile(chunkdisk_file, read_only, base, parent);
+    auto err = ReadChunkDiskFile(chunkdisk_file, read_only, move_enabled, base, parent);
     if (err != ERROR_SUCCESS) return err;
 
     // read parents and add to bases
@@ -359,7 +362,7 @@ DWORD ReadChunkDiskBases(PCWSTR chunkdisk_file, const bool read_only, vector<Chu
         }
 
         // parents are always read_only
-        err = ReadChunkDiskFile(parent.data(), true, base, parent);
+        err = ReadChunkDiskFile(parent.data(), true, false, base, parent);
         if (err != ERROR_SUCCESS) break;
         // parent not set if err
     }
@@ -505,12 +508,12 @@ static SPD_STORAGE_UNIT_INTERFACE CHUNK_DISK_INTERFACE =
     Unmap,
 };
 
-DWORD CreateStorageUnit(PWSTR chunkdisk_file, GUID guid, const BOOLEAN write_protected, const BOOLEAN zero_chunk, PWSTR pipe_name,
-                        unique_ptr<ChunkDisk>& cdisk_out)
+DWORD CreateStorageUnit(PWSTR chunkdisk_file, GUID guid, const BOOLEAN write_protected, const BOOLEAN zero_chunk,
+                        const BOOLEAN move_enabled, PWSTR pipe_name, unique_ptr<ChunkDisk>& cdisk_out)
 {
     // read chunkdisk file
     auto bases = vector<ChunkDiskBase>();
-    auto err = ReadChunkDiskBases(chunkdisk_file, write_protected, bases);
+    auto err = ReadChunkDiskBases(chunkdisk_file, write_protected, move_enabled, bases);
     if (err != ERROR_SUCCESS) return err;
 
     // create WinSpd unit
@@ -653,6 +656,8 @@ struct Usage : public std::exception
         "                                        The .lock file will not be removed automaitcally if disabled\n"
         "    -Z 0|1                              Disable/enable zero-fill chunk if partially unmapped (deflt: enable)\n"
         "                                        Note that the LBPRZ bit is 0 for both options\n"
+        "    -M 0|1                              Disable/enable support for moving chunks (deflt: disable)\n"
+        "                                        Chunks must be locked properly to be moved\n"
         "    -t Number                           Number of threads (deflt: automatic)\n"
         "    -U GUID                             GUID as the serial number of the WinSpd disk (deflt: random)\n"
         "    -d -1                               Debug flags\n"
@@ -695,6 +700,7 @@ int wmain(int argc, wchar_t** argv)
     PWSTR ChunkDiskFile = nullptr;
     ULONG WriteAllowed = 1;
     ULONG ZeroChunk = 1;
+    ULONG MoveEnabled = 0;
     ULONG NumThreads = 0;
     PWSTR Guid = nullptr;
     PWSTR DebugLogFile = nullptr;
@@ -719,6 +725,9 @@ int wmain(int argc, wchar_t** argv)
                 break;
             case L'Z':
                 ZeroChunk = argtol(++argp, ZeroChunk);
+                break;
+            case L'M':
+                MoveEnabled = argtol(++argp, MoveEnabled);
                 break;
             case L't':
                 NumThreads = argtol(++argp, NumThreads);
@@ -803,7 +812,8 @@ int wmain(int argc, wchar_t** argv)
     }
 
     auto cdisk = unique_ptr<chunkdisk::ChunkDisk>();
-    err = chunkdisk::CreateStorageUnit(ChunkDiskFile, UnitGuid, !WriteAllowed, !!ZeroChunk, PipeName, cdisk);
+    err = chunkdisk::CreateStorageUnit(ChunkDiskFile, UnitGuid, !WriteAllowed, !!ZeroChunk,
+                                       !!MoveEnabled, PipeName, cdisk);
     if (err != ERROR_SUCCESS) return err;
     err = chunkdisk::StartWorkers(*cdisk, NumThreads);
     if (err != ERROR_SUCCESS)

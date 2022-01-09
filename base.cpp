@@ -105,6 +105,12 @@ DWORD ChunkDiskBase::Start()
         // make class movable
         mutex_parts_ = std::make_unique<std::shared_mutex>();
 
+        if (read_only && move_enabled)
+        {
+            SpdLogErr(L"error: cannot specify -W 1 option with -M 1");
+            return ERROR_INVALID_PARAMETER;
+        }
+
         // put a lock file to prevent mistakes
         const auto num_parts = part_dirname.size();
         auto part_lock = std::vector<FileHandle>(num_parts);
