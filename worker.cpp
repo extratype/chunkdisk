@@ -957,42 +957,11 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, const 
             }
         }
 
-        // Unmap chunk partially
-        // buffer == nullptr if and only if partial UNMAP_CHUNK
-        if (kind == UNMAP_CHUNK && !base.IsWholeChunk(start_off, end_off))
+        // buffer == nullptr if and only if partial UNMAP_CHUNK with service_.zero_chunk
+        if (kind == UNMAP_CHUNK && !base.IsWholeChunk(start_off, end_off) && service_.zero_chunk)
         {
-            if (service_.zero_chunk)
-            {
-                // zero-fill it
-                kind = WRITE_CHUNK;
-            }
-            else
-            {
-                // complete immediately
-                try
-                {
-                    auto& op = ops.emplace_back(&work, kind, chunk_idx, start_off, end_off,
-                                                LONGLONG(base.BlockBytes(start_off)), buffer);
-                    auto lk = SRWLock();
-                    err = service_.UnmapRange(lk, chunk_idx, start_off, end_off);
-                    if (err == ERROR_SUCCESS)
-                    {
-                        // whole chunk unmapped
-                        // holding mutex_unmapped_, no more writes...
-                        ReportOpResult(op, UnmapChunkSync(chunk_idx));
-                    }
-                    else
-                    {
-                        if (err == ERROR_IO_PENDING) err = ERROR_SUCCESS;
-                        ReportOpResult(op, err);
-                    }
-                    return ERROR_SUCCESS;
-                }
-                catch (const bad_alloc&)
-                {
-                    return ERROR_NOT_ENOUGH_MEMORY;
-                }
-            }
+            // zero-fill the range
+            kind = WRITE_CHUNK;
         }
     }
     else if (kind != WRITE_CHUNK)
@@ -1005,9 +974,10 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, const 
     const auto is_write = (kind == WRITE_CHUNK);
     const auto r = base.BlockPageRange(chunk_idx, start_off, end_off);
 
-    if (base.IsWholePages(r.start_off, r.end_off, buffer))
+    if (kind == UNMAP_CHUNK || base.IsWholePages(r.start_off, r.end_off, buffer))
     {
-        // aligned to page (always for UNMAP_CHUNK)
+        // UNMAP_CHUNK: ignore alignment
+        // others: aligned to page
         try
         {
             ops.emplace_back(&work, kind, chunk_idx, start_off, end_off, LONGLONG(base.BlockBytes(start_off)), buffer);
@@ -2334,22 +2304,39 @@ DWORD ChunkDiskWorker::CompleteWritePage(ChunkOpState& state, DWORD error, DWORD
 DWORD ChunkDiskWorker::PostUnmapChunk(ChunkOpState& state)
 {
     auto& base = service_.bases[0];
-    auto err = FlushPagesAsync(state, base.BlockPageRange(state.idx, 0, base.chunk_length));
+    auto err = FlushPagesAsync(state, base.BlockPageRange(state.idx, state.start_off, state.end_off));
     if (err != ERROR_SUCCESS) return err;
 
-    service_.FlushUnmapRanges(state.idx);
-    if (state.step == OP_READY)
+    if (base.IsWholeChunk(state.start_off, state.end_off))
     {
-        // changing chunk state, lock always
-        return PostLockChunk(state, state.idx, false);
+        service_.FlushUnmapRanges(state.idx);
+        if (state.step == OP_READY)
+        {
+            // changing chunk state, lock always
+            return PostLockChunk(state, state.idx, false);
+        }
+        else if (state.step == OP_LOCKED)
+        {
+            err = UnmapChunkLocked(state.idx);
+            PostUnlockChunk(state, state.idx);
+            return err;
+        }
+        return ERROR_INVALID_STATE;
     }
-    else if (state.step == OP_LOCKED)
+
+    // partial and !service_.zero_chunk
+    auto lk = SRWLock();
+    err = service_.UnmapRange(lk, state.idx, state.start_off, state.end_off);
+    if (err == ERROR_SUCCESS)
     {
-        err = UnmapChunkLocked(state.idx);
-        PostUnlockChunk(state, state.idx);
-        return err;
+        // whole chunk unmapped
+        // holding mutex_unmapped_, no more writes...
+        return UnmapChunkSync(state.idx);
     }
-    return ERROR_INVALID_STATE;
+    else
+    {
+        return (err == ERROR_IO_PENDING) ? ERROR_SUCCESS : err;
+    }
 }
 
 void ChunkDiskWorker::ReportOpResult(ChunkOpState& state, const DWORD error)

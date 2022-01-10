@@ -26,7 +26,8 @@ enum ChunkOpKind : u32
     READ_PAGE,              // unaligned, read in pages
     WRITE_PAGE,             // unaligned, write in pages
     WRITE_PAGE_PARTIAL,     // not page aligned, read and write in pages
-    UNMAP_CHUNK,            // become write with buffer == nullptr if and only if partial
+    UNMAP_CHUNK,            // become write with buffer == nullptr
+                            // if and only if partial and service_.zero_chunk
 
     // for PostMsg()
     LOCK_CHUNK,             // stop using and close the chunk by setting ChunkFileHandle::locked
@@ -380,7 +381,8 @@ private:
 
     DWORD CompleteWritePage(ChunkOpState& state, DWORD error, DWORD bytes_transferred);
 
-    // lock and unmap chunk
+    // lock and unmap chunk if whole
+    // track unmapped ranges if partial
     DWORD PostUnmapChunk(ChunkOpState& state);
 
     // operation completed, report to the owner ChunkWork
