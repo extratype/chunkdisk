@@ -18,6 +18,7 @@ static constexpr auto STANDBY_MS = u32(60000);
 static constexpr auto LOW_LOAD_THRESHOLD = u32(2);  // load by CPU and file system, not by media
 static constexpr auto MAX_QD = u32(32);    // QD32
 static constexpr auto STOP_TIMEOUT_MS = u32(5000);
+static constexpr auto BUSY_WAIT_MS = u32(5000);
 
 ChunkDiskWorker::ChunkDiskWorker(ChunkDiskService& service)
     : service_(service),
@@ -925,8 +926,14 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, const 
     {
         auto h = HANDLE(INVALID_HANDLE_VALUE);
         auto err = OpenChunkAsync(chunk_idx, false, h);
-        if (err != ERROR_SUCCESS && err != ERROR_SHARING_VIOLATION) return err;
-        // maybe locked, continue posting if ERROR_SHARING_VIOLATION
+        if (err != ERROR_SUCCESS && err != ERROR_SHARING_VIOLATION
+            && !(err == ERROR_DUPLICATE_TAG && base.move_enabled))
+        {
+            return err;
+            // maybe locked if ERROR_SHARING_VIOLATION
+            // maybe being moved if ERROR_DUPLICATE_TAG
+        }
+
         if (err == ERROR_SUCCESS)
         {
             if (h != INVALID_HANDLE_VALUE)
@@ -1137,13 +1144,27 @@ DWORD ChunkDiskWorker::CompleteIO(ChunkOpState& state, const DWORD error, const 
 {
     auto err = DWORD(ERROR_INVALID_STATE);
     const auto kind = state.kind;
+
     if (kind == READ_CHUNK)
     {
-        err = CompleteReadChunk(state, error, bytes_transferred);
+        if (state.step == OP_BUSY_WAITING)
+        {
+            // error is bytes_transferred
+            err = CompleteBusyWaitChunk(state, bytes_transferred);
+        }
+        else
+        {
+            err = CompleteReadChunk(state, error, bytes_transferred);
+        }
     }
     else if (kind == WRITE_CHUNK)
     {
-        if (state.step == OP_LOCKED)
+        if (state.step == OP_BUSY_WAITING)
+        {
+            // error is bytes_transferred
+            err = CompleteBusyWaitChunk(state, bytes_transferred);
+        }
+        else if (state.step == OP_LOCKED)
         {
             // error is bytes_transferred
             err = CompleteWriteCreateChunk(state, bytes_transferred);
@@ -1155,11 +1176,24 @@ DWORD ChunkDiskWorker::CompleteIO(ChunkOpState& state, const DWORD error, const 
     }
     else if (kind == READ_PAGE)
     {
-        err = CompleteReadPage(state, error, bytes_transferred);
+        if (state.step == OP_BUSY_WAITING)
+        {
+            // error is bytes_transferred
+            err = CompleteBusyWaitChunk(state, bytes_transferred);
+        }
+        else
+        {
+            err = CompleteReadPage(state, error, bytes_transferred);
+        }
     }
     else if (kind == WRITE_PAGE || kind == WRITE_PAGE_PARTIAL)
     {
-        if (state.step == OP_LOCKED)
+        if (state.step == OP_BUSY_WAITING)
+        {
+            // error is bytes_transferred
+            err = CompleteBusyWaitChunk(state, bytes_transferred);
+        }
+        else if (state.step == OP_LOCKED)
         {
             // error is bytes_transferred
             err = CompleteWriteCreateChunk(state, bytes_transferred);
@@ -1171,6 +1205,14 @@ DWORD ChunkDiskWorker::CompleteIO(ChunkOpState& state, const DWORD error, const 
         else
         {
             err = CompleteWritePage(state, error, bytes_transferred);
+        }
+    }
+    else if (kind == UNMAP_CHUNK)
+    {
+        if (state.step == OP_BUSY_WAITING)
+        {
+            // error is bytes_transferred
+            err = CompleteBusyWaitChunk(state, bytes_transferred);
         }
     }
 
@@ -1342,15 +1384,22 @@ void ChunkDiskWorker::StopWorks()
                 ReportOpResult(*op.next, ERROR_OPERATION_ABORTED);
                 op.next = nullptr;
             }
+
             if (op.step == OP_LOCKING)
             {
                 // abort LockingChunk()
                 op.ovl.Internal = ERROR_OPERATION_ABORTED;
             }
-            if (op.step == OP_LOCKED)
+            else if (op.step == OP_LOCKED)
             {
                 // abort DoCreateChunkLocked()
                 // UnmapChunkLocked() is synchronous
+                op.ovl.hEvent = HANDLE(ERROR_OPERATION_ABORTED);
+                std::atomic_thread_fence(std::memory_order_release);
+            }
+            else if (op.step == OP_BUSY_WAITING)
+            {
+                // abort opening chunk
                 op.ovl.hEvent = HANDLE(ERROR_OPERATION_ABORTED);
                 std::atomic_thread_fence(std::memory_order_release);
             }
@@ -1651,7 +1700,6 @@ DWORD ChunkDiskWorker::CreateChunkLocked(ChunkOpState& state, u64 chunk_idx)
                 }
             },
             &state, chunk_idx, handle_ro.get(), handle_rw.get());
-
         while (true)
         {
             std::atomic_thread_fence(std::memory_order_acquire);
@@ -1726,6 +1774,116 @@ DWORD ChunkDiskWorker::DoCreateChunkLocked(ChunkOpState& state, u64 chunk_idx, H
     return err;
 }
 
+DWORD ChunkDiskWorker::TryBusyWaitChunk(ChunkOpState& state, const DWORD error, const ChunkOpStep next_step, shared_mutex* const mtx,
+                                        const u64 chunk_idx, const bool is_write, const bool is_locked)
+{
+    if ((error != ERROR_SHARING_VIOLATION && error != ERROR_DUPLICATE_TAG)
+        || !service_.bases[0].move_enabled
+        || (next_step == OP_UNMAP_SYNC && mtx == nullptr))
+    {
+        if (mtx != nullptr) mtx->unlock();
+        return error;
+    }
+
+    try
+    {
+        auto t = std::thread(
+            [](ChunkDiskWorker* const self, ChunkOpState* const state, const ChunkOpStep next_step, shared_mutex* const mtx,
+               const u64 chunk_idx, const bool is_write, const bool is_locked) -> void
+            {
+                state->step = OP_BUSY_WAITING;
+                state->ovl.Internal = next_step;
+                state->ovl.InternalHigh = recast<ULONG_PTR>(mtx);
+                std::atomic_thread_fence(std::memory_order_release);
+
+                auto err = DWORD(ERROR_SUCCESS);
+                auto h = FileHandle();
+                auto ft = GetSystemFileTime();
+
+                while (true)
+                {
+                    std::atomic_thread_fence(std::memory_order_acquire);
+                    if (state->ovl.hEvent != nullptr)
+                    {
+                        err = DWORD(recast<ULONG_PTR>(state->ovl.hEvent));
+                        break;
+                    }
+                    auto err1 = self->service_.CreateChunk(chunk_idx, h, is_write, is_locked);
+                    if (err1 != ERROR_SHARING_VIOLATION && err1 != ERROR_DUPLICATE_TAG)
+                    {
+                        err = err1;
+                        break;
+                    }
+
+                    Sleep(1);
+                    if (GetSystemFileTime() >= ft + BUSY_WAIT_MS)
+                    {
+                         err = ERROR_TIMEOUT;
+                         break;
+                    }
+                }
+
+                if (!PostQueuedCompletionStatus(self->iocp_.get(), err, CK_IO, &state->ovl))
+                {
+                    SpdStorageUnitShutdown(self->service_.storage_unit);    // fatal
+                }
+            },
+            this, &state, next_step, mtx, chunk_idx, is_write, is_locked);
+        while (true)
+        {
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (state.step == OP_BUSY_WAITING) break;
+            std::this_thread::yield();
+        }
+        t.detach();
+    }
+    catch (const bad_alloc&)
+    {
+        if (mtx != nullptr) mtx->unlock();
+        return ERROR_NOT_ENOUGH_MEMORY;
+    }
+    catch (const std::system_error& e)
+    {
+        if (mtx != nullptr) mtx->unlock();
+        return e.code().value();
+    }
+    return ERROR_IO_PENDING;
+}
+
+DWORD ChunkDiskWorker::CompleteBusyWaitChunk(ChunkOpState& state, DWORD error)
+{
+    const auto next_step = ChunkOpStep(state.ovl.Internal);
+    const auto internal_high = state.ovl.InternalHigh;
+    state.ovl.Internal = 0;
+    state.ovl.InternalHigh = 0;
+    state.ovl.hEvent = nullptr;
+
+    if (next_step != OP_UNMAP_SYNC)
+    {
+        if (error != ERROR_SUCCESS) return error;
+
+        state.step = next_step;
+        return PostOp(state);
+    }
+    else
+    {
+        // lk exclusive from UnmapRange()
+        auto lk = SRWLock(*recast<shared_mutex*>(internal_high), true, std::adopt_lock);
+        // writing succeeded, no error if not UNMAP_CHUNK
+        if (error != ERROR_SUCCESS) return (state.kind == UNMAP_CHUNK) ? error : ERROR_SUCCESS;
+
+        state.step = next_step;
+        const auto chunk_idx = GetChunkIndex(state);
+        auto err = UnmapChunkSync(chunk_idx);
+        if (err != ERROR_SUCCESS)
+        {
+            err = TryBusyWaitChunk(state, err, OP_UNMAP_SYNC, lk.release(), chunk_idx, true);
+            if (err == ERROR_IO_PENDING) return err;
+        }
+        return (state.kind == UNMAP_CHUNK) ? err : ERROR_SUCCESS;
+    }
+}
+
 DWORD ChunkDiskWorker::UnmapChunkLocked(const u64 chunk_idx)
 {
     auto h = FileHandle();
@@ -1755,7 +1913,7 @@ DWORD ChunkDiskWorker::CheckAsyncEOF(ChunkOpState& state)
     const auto chunk_idx = GetChunkIndex(state);
 
     auto h = HANDLE(INVALID_HANDLE_VALUE);
-    // refs_ro != 0, won't be ERROR_IO_PENDING
+    // reusing, should be successful
     auto err = OpenChunkAsync(chunk_idx, false, h);
     if (err != ERROR_SUCCESS) return err;
     if (h == INVALID_HANDLE_VALUE) return ERROR_SUCCESS;
@@ -1771,7 +1929,7 @@ DWORD ChunkDiskWorker::PostReadChunk(ChunkOpState& state)
 {
     auto h = HANDLE(INVALID_HANDLE_VALUE);
     auto err = OpenChunkAsync(state.idx, false, h, &state);
-    if (err != ERROR_SUCCESS) return err;
+    if (err != ERROR_SUCCESS) return TryBusyWaitChunk(state, err, state.step, nullptr, state.idx, false);
 
     // aligned to page
     // Windows caches disk
@@ -1878,7 +2036,7 @@ DWORD ChunkDiskWorker::PostWriteChunk(ChunkOpState& state)
                 if (err != ERROR_SUCCESS) return err;
                 // lock not required? try again...
             }
-            if (err != ERROR_SUCCESS) return err;
+            if (err != ERROR_SUCCESS) return TryBusyWaitChunk(state, err, state.step, nullptr, state.idx, true);
             // file open
         }
         else if (state.step == OP_LOCKED)
@@ -1937,7 +2095,7 @@ DWORD ChunkDiskWorker::PostWriteChunk(ChunkOpState& state)
     {
         // start/continue writing...
         auto h = HANDLE(INVALID_HANDLE_VALUE);
-        // reusing chunk, no ERROR_LOCK_FAILED
+        // reusing chunk, should be successful
         err = OpenChunkAsync(state.idx, true, h);
         if (err != ERROR_SUCCESS) return err;
 
@@ -2025,7 +2183,12 @@ DWORD ChunkDiskWorker::CompleteWriteChunk(ChunkOpState& state, DWORD error, DWOR
     {
         // whole chunk unmapped
         // holding mutex_unmapped_, no more writes...
-        UnmapChunkSync(state.idx);
+        auto err = UnmapChunkSync(state.idx);
+        if (err != ERROR_SUCCESS)
+        {
+            err = TryBusyWaitChunk(state, err, OP_UNMAP_SYNC, lk.release(), state.idx, true);
+            if (err == ERROR_IO_PENDING) return err;
+        }
     }
     return error;
 }
@@ -2038,7 +2201,7 @@ DWORD ChunkDiskWorker::PostReadPage(ChunkOpState& state)
         const auto chunk_idx = GetChunkIndex(state);
         auto h = HANDLE(INVALID_HANDLE_VALUE);
         auto err = OpenChunkAsync(chunk_idx, false, h, &state);
-        if (err != ERROR_SUCCESS) return err;
+        if (err != ERROR_SUCCESS) return TryBusyWaitChunk(state, err, state.step, nullptr, chunk_idx, false);
 
         // always lock page because
         // READ_PAGE: operation was not done immediately
@@ -2185,7 +2348,7 @@ DWORD ChunkDiskWorker::PostWritePage(ChunkOpState& state)
                 UnlockPageAsync(state, state.idx);
                 state.step = OP_READY;  // OP_READ_PAGE -> OP_READY
             }
-            return err;
+            return TryBusyWaitChunk(state, err, state.step, nullptr, chunk_idx, true);
         }
         // file open
     }
@@ -2294,7 +2457,12 @@ DWORD ChunkDiskWorker::CompleteWritePage(ChunkOpState& state, DWORD error, DWORD
             {
                 // whole chunk unmapped
                 // holding mutex_unmapped_, no more writes...
-                UnmapChunkSync(chunk_idx);
+                auto err = UnmapChunkSync(chunk_idx);
+                if (err != ERROR_SUCCESS)
+                {
+                    err = TryBusyWaitChunk(state, err, OP_UNMAP_SYNC, lk.release(), chunk_idx, true);
+                    if (err == ERROR_IO_PENDING) return err;
+                }
             }
         }
     }
@@ -2318,6 +2486,11 @@ DWORD ChunkDiskWorker::PostUnmapChunk(ChunkOpState& state)
         else if (state.step == OP_LOCKED)
         {
             err = UnmapChunkLocked(state.idx);
+            if (err != ERROR_SUCCESS)
+            {
+                err = TryBusyWaitChunk(state, err, state.step, nullptr, state.idx, true, true);
+                if (err == ERROR_IO_PENDING) return err;
+            }
             PostUnlockChunk(state, state.idx);
             return err;
         }
@@ -2331,7 +2504,9 @@ DWORD ChunkDiskWorker::PostUnmapChunk(ChunkOpState& state)
     {
         // whole chunk unmapped
         // holding mutex_unmapped_, no more writes...
-        return UnmapChunkSync(state.idx);
+        err = UnmapChunkSync(state.idx);
+        if (err != ERROR_SUCCESS) return TryBusyWaitChunk(state, err, OP_UNMAP_SYNC, lk.release(), state.idx, true);
+        return ERROR_SUCCESS;
     }
     else
     {

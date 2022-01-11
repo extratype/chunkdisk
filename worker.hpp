@@ -44,6 +44,8 @@ enum ChunkOpStep : u32
     OP_READ_PAGE,       // for WRITE_PAGE_PARTIAL, page has been read and will be written
     OP_ZERO_CHUNK,      // for WRITE_CHUNK with nullptr buffer,
                         // FSCTL_SET_ZERO_DATA is not supported
+    OP_BUSY_WAITING,    // waiting for a chunk locked externally
+    OP_UNMAP_SYNC       // retry the last UnmapChunkSync() in CompleteBusyWaitChunk()
 };
 
 struct ChunkOpState;
@@ -342,6 +344,19 @@ private:
     // copy parent to current or nothing
     // state.ovl.hEvent: error code when cancelled
     DWORD DoCreateChunkLocked(ChunkOpState& state, u64 chunk_idx, HANDLE handle_ro, HANDLE handle_rw);
+
+    // return error as it is without waiting if not applicable
+    // state.step: OP_BUSY_WAITING -> next_step
+    // mtx: for next_step == OP_UNMAP_SYNC
+    //
+    // state.ovl.hEvent: error code when cancelled
+    // state.ovl.Internal: next_step
+    // state.ovl.InternalHigh: mtx for OP_UNMAP_SYNC
+    DWORD TryBusyWaitChunk(ChunkOpState& state, DWORD error, ChunkOpStep next_step, std::shared_mutex* mtx,
+                           u64 chunk_idx, bool is_write, bool is_locked = false);
+
+    // continue or handle OP_UNMAP_SYNC and done
+    DWORD CompleteBusyWaitChunk(ChunkOpState& state, DWORD error);
 
     // make chunk empty (truncate)
     DWORD UnmapChunkLocked(u64 chunk_idx);
