@@ -521,6 +521,7 @@ DWORD ChunkDiskService::UnmapRange(SRWLock& lk, const u64 chunk_idx, const u64 s
             catch (const bad_alloc&)
             {
                 if (emplaced) chunk_unmapped_.erase(rit);
+                lk = SRWLock();
                 return ERROR_NOT_ENOUGH_MEMORY;
             }
         }
@@ -548,6 +549,7 @@ DWORD ChunkDiskService::UnmapRange(SRWLock& lk, const u64 chunk_idx, const u64 s
     }
     catch (const bad_alloc&)
     {
+        lk = SRWLock();
         return ERROR_NOT_ENOUGH_MEMORY;
     }
     return ERROR_SUCCESS;
