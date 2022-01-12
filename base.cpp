@@ -161,7 +161,7 @@ DWORD ChunkDiskBase::Start()
                 if (++part_current[i] > part_max[i])
                 {
                     SpdLogErr(L"error: too many chunks in part #%llu", i + 1);
-                    return ERROR_PARAMETER_QUOTA_EXCEEDED;
+                    return ERROR_INVALID_PARAMETER;
                 }
                 return ERROR_SUCCESS;
             });

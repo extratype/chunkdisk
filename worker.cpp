@@ -1750,7 +1750,7 @@ DWORD ChunkDiskWorker::DoCreateChunkLocked(ChunkOpState& state, const u64 chunk_
 
             err = WriteFile(handle_rw, buf.get(), bytes_read, &bytes_written, nullptr)
                 ? ERROR_SUCCESS : GetLastError();
-            if (err == ERROR_SUCCESS && bytes_read != bytes_written) err = ERROR_INVALID_DATA;
+            if (err == ERROR_SUCCESS && bytes_read != bytes_written) err = ERROR_WRITE_FAULT;
             if (err != ERROR_SUCCESS) return err;
         }
 
@@ -1972,7 +1972,7 @@ DWORD ChunkDiskWorker::PostReadChunk(ChunkOpState& state)
 DWORD ChunkDiskWorker::CompleteReadChunk(ChunkOpState& state, DWORD error, DWORD bytes_transferred)
 {
     const auto length_bytes = service_.bases[0].BlockBytes(state.end_off - state.start_off);
-    if (error == ERROR_SUCCESS && bytes_transferred != length_bytes) error = ERROR_INVALID_DATA;
+    if (error == ERROR_SUCCESS && bytes_transferred != length_bytes) error = ERROR_READ_FAULT;
     if (error == ERROR_HANDLE_EOF && bytes_transferred == 0)
     {
         if (CheckAsyncEOF(state) == ERROR_SUCCESS)
@@ -2148,7 +2148,7 @@ DWORD ChunkDiskWorker::CompleteWriteChunk(ChunkOpState& state, DWORD error, DWOR
         && bytes_transferred != length_bytes
         && !(state.buffer == nullptr && state.step != OP_ZERO_CHUNK))
     {
-        error = ERROR_INVALID_DATA;
+        error = ERROR_WRITE_FAULT;
     }
     CloseChunkAsync(state.idx, true);
     if (state.buffer != nullptr) return error;
@@ -2267,7 +2267,7 @@ DWORD ChunkDiskWorker::CompleteReadPage(ChunkOpState& state, DWORD error, DWORD 
 {
     const auto& base = service_.bases[0];
     auto eof = false;
-    if (error == ERROR_SUCCESS && bytes_transferred != base.PageBytes(1)) error = ERROR_INVALID_DATA;
+    if (error == ERROR_SUCCESS && bytes_transferred != base.PageBytes(1)) error = ERROR_READ_FAULT;
     if (error == ERROR_HANDLE_EOF && bytes_transferred == 0 && CheckAsyncEOF(state) == ERROR_SUCCESS)
     {
         eof = true;
@@ -2408,7 +2408,7 @@ DWORD ChunkDiskWorker::PostWritePage(ChunkOpState& state)
 DWORD ChunkDiskWorker::CompleteWritePartialReadPage(ChunkOpState& state, DWORD error, DWORD bytes_transferred)
 {
     auto eof = false;
-    if (error == ERROR_SUCCESS && bytes_transferred != service_.bases[0].PageBytes(1)) error = ERROR_INVALID_DATA;
+    if (error == ERROR_SUCCESS && bytes_transferred != service_.bases[0].PageBytes(1)) error = ERROR_READ_FAULT;
     if (error == ERROR_HANDLE_EOF && bytes_transferred == 0 && CheckAsyncEOF(state) == ERROR_SUCCESS)
     {
         eof = true;
@@ -2435,7 +2435,7 @@ DWORD ChunkDiskWorker::CompleteWritePartialReadPage(ChunkOpState& state, DWORD e
 DWORD ChunkDiskWorker::CompleteWritePage(ChunkOpState& state, DWORD error, DWORD bytes_transferred)
 {
     const auto& base = service_.bases[0];
-    if (error == ERROR_SUCCESS && bytes_transferred != base.PageBytes(1)) error = ERROR_INVALID_DATA;
+    if (error == ERROR_SUCCESS && bytes_transferred != base.PageBytes(1)) error = ERROR_WRITE_FAULT;
 
     const auto r = base.BlockChunkRange(
         base.PageBlocks(state.idx) + state.start_off,
