@@ -432,7 +432,7 @@ void ChunkDiskWorker::DoWorks()
         {
             // woke up
             next_timeout = STANDBY_MS;
-            next_check_time = GetSystemFileTime() + STANDBY_MS * 10000;
+            next_check_time = GetSystemFileTime() + u64(STANDBY_MS) * 10000;
         }
         else
         {
@@ -1261,7 +1261,7 @@ DWORD ChunkDiskWorker::IdleWork()
     lkw.unlock();
 
     const auto last_post_ft = service_.GetPostFileTime();
-    auto disk_idle = (GetSystemFileTime() >= last_post_ft + STANDBY_MS * 10000);
+    auto disk_idle = (GetSystemFileTime() >= last_post_ft + u64(STANDBY_MS) * 10000);
 
     auto lkb = SRWLock(*mutex_buffers_, true);
     buffers_.clear();
@@ -1626,7 +1626,7 @@ DWORD ChunkDiskWorker::LockingChunk(const u64 chunk_idx)
     if (state.ovl.Internal != ERROR_SUCCESS)
     {
         PostUnlockChunk(state, chunk_idx);
-        ReportOpResult(state, state.ovl.Internal);
+        ReportOpResult(state, DWORD(state.ovl.Internal));
         CompleteWork(state.owner);
         return ERROR_SUCCESS;
     }
