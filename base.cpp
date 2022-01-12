@@ -187,7 +187,7 @@ DWORD ChunkDiskBase::Start()
     return ERROR_SUCCESS;
 }
 
-DWORD ChunkDiskBase::ChunkPath(const u64 chunk_idx, const size_t part_idx, std::wstring& path)
+DWORD ChunkDiskBase::ChunkPath(const u64 chunk_idx, const size_t part_idx, std::wstring& path) const
 {
     try
     {
@@ -306,7 +306,7 @@ bool ChunkDiskBase::CheckChunk(const u64 chunk_idx)
 
 DWORD ChunkDiskBase::AssignChunkPart()
 {
-    auto num_parts = part_dirname.size();
+    const auto num_parts = part_dirname.size();
     auto new_part = part_current_new_;
 
     for (; new_part < num_parts; ++new_part)
@@ -365,7 +365,7 @@ DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out,
 {
     if (read_only && is_write) return ERROR_ACCESS_DENIED;
 
-    auto num_parts = part_dirname.size();
+    const auto num_parts = part_dirname.size();
     auto part_found = false;
     auto part_idx = num_parts;
     auto lk = SRWLock(*mutex_parts_, retrying);

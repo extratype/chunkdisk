@@ -289,7 +289,7 @@ DWORD ChunkDiskService::RemovePageEntry(SRWLock& lk, Map<u64, PageEntry>::iterat
     return ERROR_SUCCESS;
 }
 
-DWORD ChunkDiskService::UnlockPage(const u64 page_idx, bool remove)
+DWORD ChunkDiskService::UnlockPage(const u64 page_idx, const bool remove)
 {
     auto lk = SRWLock(mutex_pages_, false);
     auto it = cached_pages_.find(page_idx);
@@ -408,7 +408,7 @@ DWORD ChunkDiskService::FlushPages()
     return cached_pages_.empty() ? ERROR_SUCCESS : err;
 }
 
-size_t ChunkDiskService::FindChunk(u64 chunk_idx)
+size_t ChunkDiskService::FindChunk(const u64 chunk_idx)
 {
     auto i = size_t(0);
     const auto n = bases.size();
@@ -428,7 +428,7 @@ DWORD ChunkDiskService::CreateChunk(
     }
     else
     {
-        auto i = FindChunk(chunk_idx);
+        const auto i = FindChunk(chunk_idx);
         if (i == bases.size())
         {
             handle_out = FileHandle();

@@ -146,7 +146,7 @@ private:
     template <class F>
     DWORD IterPart(size_t part_idx, F&& func);
 
-    DWORD ChunkPath(u64 chunk_idx, size_t part_idx, std::wstring& path);
+    DWORD ChunkPath(u64 chunk_idx, size_t part_idx, std::wstring& path) const;
 
     // loop over parts or get cached result
     // lk: empty or lock mutex_parts_

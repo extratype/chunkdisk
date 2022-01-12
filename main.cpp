@@ -397,7 +397,7 @@ ChunkDiskWorker* GetAssignedWorker(SPD_STORAGE_UNIT* StorageUnit)
 BOOLEAN PostWork(SPD_STORAGE_UNIT* StorageUnit, const ChunkOpKind op_kind, u64 block_addr, u32 count)
 {
     auto* worker = GetAssignedWorker(StorageUnit);
-    auto context = SpdStorageUnitGetOperationContext();
+    auto* context = SpdStorageUnitGetOperationContext();
     auto& status = context->Response->Status;
     auto err = DWORD(ERROR_SUCCESS);
 
@@ -643,7 +643,7 @@ vector<ChunkDiskWorker>& GetWorkers(SPD_STORAGE_UNIT* StorageUnit)
 namespace
 {
 
-struct Usage : public std::exception
+struct Usage : std::exception
 {
     static constexpr WCHAR PROGNAME[] = L"chunkdisk";
 

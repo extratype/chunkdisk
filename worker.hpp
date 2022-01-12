@@ -283,7 +283,7 @@ private:
     DWORD PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_addr, u32 count, LPVOID& buffer);
 
     // always get chunk_idx from ChunkOpState::idx
-    u64 GetChunkIndex(ChunkOpState& state) const;
+    u64 GetChunkIndex(const ChunkOpState& state) const;
 
     // do an asynchronous operation
     // ERROR_IO_PENDING if not done
@@ -366,7 +366,7 @@ private:
     DWORD UnmapChunkSync(u64 chunk_idx);
 
     // handle asynchronous EOF when unmap then read
-    DWORD CheckAsyncEOF(ChunkOpState& state);
+    DWORD CheckAsyncEOF(const ChunkOpState& state);
 
     DWORD PostReadChunk(ChunkOpState& state);
 
