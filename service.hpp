@@ -110,7 +110,7 @@ public:
 
     // acquire shared lock for reading an existing page
     // read ptr and don't call LockPage(page_idx) while holding ptr
-    // ERROR_LOCK_FAILED: the page is locked by the current thread
+    // ERROR_LOCKED: the page is locked by the current thread
     // ERROR_NOT_FOUND: the page does not exist
     DWORD PeekPage(u64 page_idx, SRWLock& lk, LPVOID& ptr);
 
@@ -118,7 +118,7 @@ public:
     // the calling thread must call UnlockPage(page_idx) later
     // user: user-defined value to associate with the page
     // ERROR_NOT_FOUND/ERROR_SUCCESS: page created/locked, ptr returned, user set
-    // ERROR_LOCK_FAILED: the page is locked by the current thread, user returned
+    // ERROR_LOCKED: the page is locked by the current thread, user returned
     // ERROR_NOT_ENOUGH_MEMORY
     DWORD LockPage(u64 page_idx, LPVOID& ptr, LPVOID& user);
 
@@ -135,12 +135,12 @@ public:
     DWORD UnlockPage(u64 page_idx, bool remove = false);
 
     // remove cached pages in range
-    // ERROR_LOCK_FAILED: one of them is locked by the current thread, user returned
+    // ERROR_LOCKED: one of them is locked by the current thread, user returned
     DWORD FlushPages(const PageRange& r, LPVOID& user);
 
     // try to remove all cached pages
     // skip pages locked by the current thread
-    // return ERROR_LOCK_FAILED if there's such one
+    // return ERROR_LOCKED if there's such one
     DWORD FlushPages();
 
     // CheckChunk() from current to parents, return bases.size() if all false.
@@ -187,7 +187,7 @@ public:
 private:
     // lk: mutex_pages_, shared
     // it: from cached_pages_ while holding lk
-    // return ERROR_LOCK_FAILED if it is locked by the current thread
+    // return ERROR_LOCKED if it is locked by the current thread
     // lk temporaily reset otherwise, iterators may be invalidated
     DWORD RemovePageEntry(SRWLock& lk, Map<u64, PageEntry>::iterator it);
 };

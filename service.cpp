@@ -54,7 +54,7 @@ DWORD ChunkDiskService::PeekPage(const u64 page_idx, SRWLock& lk, LPVOID& ptr)
     auto it = cached_pages_.find(page_idx);
     if (it == cached_pages_.end()) return ERROR_NOT_FOUND;
     auto* entry = &((*it).second);
-    if (entry->is_owned()) return ERROR_LOCK_FAILED;
+    if (entry->is_owned()) return ERROR_LOCKED;
 
     cached_pages_.reinsert_back(it);
     auto m = entry->mutex;
@@ -141,7 +141,7 @@ DWORD ChunkDiskService::LockPage(const u64 page_idx, LPVOID& ptr, LPVOID& user)
             if (entry->is_owned())
             {
                 user = entry->user;
-                return ERROR_LOCK_FAILED;
+                return ERROR_LOCKED;
             }
 
             cached_pages_.reinsert_back(it);
@@ -253,7 +253,7 @@ DWORD ChunkDiskService::RemovePageEntry(SRWLock& lk, Map<u64, PageEntry>::iterat
 
     auto page_idx = (*it).first;
     auto* entry = &((*it).second);
-    if (entry->is_owned()) return ERROR_LOCK_FAILED;
+    if (entry->is_owned()) return ERROR_LOCKED;
     auto find_entry = [this, page_idx, &it, &entry]() -> bool
     {
         it = cached_pages_.find(page_idx);
@@ -318,11 +318,11 @@ DWORD ChunkDiskService::FlushPages(const PageRange& r, LPVOID& user)
             if (it == cached_pages_.end()) continue;
 
             auto err = RemovePageEntry(lk, it);
-            if (err == ERROR_LOCK_FAILED)
+            if (err == ERROR_LOCKED)
             {
-                // lk not reset if ERROR_LOCK_FAILED
+                // lk not reset if ERROR_LOCKED
                 user = (*it).second.user;
-                return ERROR_LOCK_FAILED;
+                return ERROR_LOCKED;
             }
             else if (err != ERROR_SUCCESS)
             {
@@ -355,11 +355,11 @@ DWORD ChunkDiskService::FlushPages(const PageRange& r, LPVOID& user)
             if (it == cached_pages_.end()) continue;
 
             auto err = RemovePageEntry(lk, it);
-            if (err == ERROR_LOCK_FAILED)
+            if (err == ERROR_LOCKED)
             {
-                // lk not reset if ERROR_LOCK_FAILED
+                // lk not reset if ERROR_LOCKED
                 user = (*it).second.user;
-                return ERROR_LOCK_FAILED;
+                return ERROR_LOCKED;
             }
             else if (err != ERROR_SUCCESS)
             {

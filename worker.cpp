@@ -1516,7 +1516,7 @@ DWORD ChunkDiskWorker::LockPageAsync(ChunkOpState& state, const u64 page_idx, LP
 {
     auto* user = LPVOID(&state);    // state in ChunkWork::ops in working_
     auto err = service_.LockPage(page_idx, ptr, user);
-    if (err == ERROR_LOCK_FAILED)
+    if (err == ERROR_LOCKED)
     {
         auto* cur = recast<ChunkOpState*>(user);
         for (; cur->next != nullptr; cur = cur->next) {}
@@ -1550,7 +1550,7 @@ DWORD ChunkDiskWorker::FlushPagesAsync(ChunkOpState& state, const PageRange& r)
 {
     auto* user = LPVOID();
     auto err = service_.FlushPages(r, user);
-    if (err == ERROR_LOCK_FAILED)
+    if (err == ERROR_LOCKED)
     {
         auto* cur = recast<ChunkOpState*>(user);
         for (; cur->next != nullptr; cur = cur->next) {}
