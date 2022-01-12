@@ -394,7 +394,7 @@ ChunkDiskWorker* GetAssignedWorker(SPD_STORAGE_UNIT* StorageUnit)
 
 // SPD_STORAGE_UNIT_INTERFACE operations
 // op_kind: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK
-BOOLEAN PostWork(SPD_STORAGE_UNIT* StorageUnit, const ChunkOpKind op_kind, u64 block_addr, u32 count)
+BOOLEAN PostWork(SPD_STORAGE_UNIT* StorageUnit, const ChunkOpKind op_kind, u64 block_addr, u64 count)
 {
     auto* worker = GetAssignedWorker(StorageUnit);
     auto* context = SpdStorageUnitGetOperationContext();

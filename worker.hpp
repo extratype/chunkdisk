@@ -216,7 +216,7 @@ public:
      * Return an error with Response->Status set when an error occurred while doing immediately or starting operations.
      * Response is sent when all operations are completed for ERROR_IO_PENDING.
      */
-    DWORD PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, ChunkOpKind op_kind, u64 block_addr, u32 count);
+    DWORD PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, ChunkOpKind op_kind, u64 block_addr, u64 count);
 
 private:
     // event loop of the worker thread
@@ -280,7 +280,7 @@ private:
     // kind: one of READ_CHUNK, WRITE_CHUNK, UNMAP_CHUNK
     // buffer: buffer address for ops, to be updated
     // try to complete some ops immediately (abort if one of them fails)
-    DWORD PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_addr, u32 count, LPVOID& buffer);
+    DWORD PrepareOps(ChunkWork& work, ChunkOpKind kind, u64 block_addr, u64 count, LPVOID& buffer);
 
     // always get chunk_idx from ChunkOpState::idx
     u64 GetChunkIndex(const ChunkOpState& state) const;

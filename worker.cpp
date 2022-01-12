@@ -226,7 +226,7 @@ DWORD ChunkDiskWorker::Wait(DWORD timeout_ms)
 }
 
 DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, const ChunkOpKind op_kind,
-                                const u64 block_addr, const u32 count)
+                                const u64 block_addr, const u64 count)
 {
     if (!IsRunning()) return ERROR_INVALID_STATE;
 
@@ -312,7 +312,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, con
     {
         // buffer is nullptr for UNMAP_CHUNK
         auto* descs = recast<SPD_UNMAP_DESCRIPTOR*>(ctx_buffer);
-        for (auto i = u32(0); i < count; ++i)
+        for (auto i = u64(0); i < count; ++i)
         {
             auto* ops_buffer = LPVOID(nullptr);
             err = PrepareOps(work, op_kind, descs[i].BlockAddress, descs[i].BlockCount, ops_buffer);
@@ -1056,7 +1056,7 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, const 
     return ERROR_SUCCESS;
 }
 
-DWORD ChunkDiskWorker::PrepareOps(ChunkWork& work, const ChunkOpKind kind, const u64 block_addr, const u32 count,
+DWORD ChunkDiskWorker::PrepareOps(ChunkWork& work, const ChunkOpKind kind, const u64 block_addr, const u64 count,
                                   LPVOID& buffer)
 {
     const auto& base = service_.bases[0];

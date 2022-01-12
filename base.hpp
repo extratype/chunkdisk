@@ -94,7 +94,7 @@ public:
     u64 ChunkBlocks(u64 count) const { return chunk_length * count; }
 
     // block_addr, count: in blocks
-    ChunkRange BlockChunkRange(u64 block_addr, u32 count) const;
+    ChunkRange BlockChunkRange(u64 block_addr, u64 count) const;
 
     // start_off, end_off: block offsets relative to a chunk
     bool IsWholeChunk(u64 start_off, u64 end_off) const { return start_off == 0 && end_off == chunk_length; }

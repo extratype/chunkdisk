@@ -14,7 +14,7 @@ namespace chunkdisk
 
 static constexpr auto MAX_CHUNK_PARTS = size_t(16384);
 
-ChunkRange ChunkDiskBase::BlockChunkRange(u64 block_addr, u32 count) const
+ChunkRange ChunkDiskBase::BlockChunkRange(u64 block_addr, u64 count) const
 {
     auto start_idx = block_addr / chunk_length;
     auto start_off = block_addr % chunk_length;
