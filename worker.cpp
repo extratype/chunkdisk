@@ -18,7 +18,6 @@ static constexpr auto STANDBY_MS = u32(60000);
 static constexpr auto LOW_LOAD_THRESHOLD = u32(2);  // load by CPU and file system, not by media
 static constexpr auto MAX_QD = u32(32);    // QD32
 static constexpr auto STOP_TIMEOUT_MS = u32(5000);
-static constexpr auto BUSY_WAIT_READ_MS = u32(5000);
 
 ChunkDiskWorker::ChunkDiskWorker(ChunkDiskService& service)
     : service_(service),
@@ -1798,7 +1797,6 @@ DWORD ChunkDiskWorker::TryBusyWaitChunk(ChunkOpState& state, const DWORD error, 
 
                 auto err = DWORD(ERROR_SUCCESS);
                 auto h = FileHandle();
-                const auto ft = (is_write || is_locked) ? 0 : GetSystemFileTime();
 
                 while (true)
                 {
@@ -1816,11 +1814,6 @@ DWORD ChunkDiskWorker::TryBusyWaitChunk(ChunkOpState& state, const DWORD error, 
                     }
 
                     Sleep(1);
-                    if (!(is_write || is_locked) && GetSystemFileTime() >= ft + BUSY_WAIT_READ_MS)
-                    {
-                         err = ERROR_TIMEOUT;
-                         break;
-                    }
                 }
 
                 if (!PostQueuedCompletionStatus(self->iocp_.get(), err, CK_IO, &state->ovl))
