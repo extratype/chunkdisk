@@ -657,7 +657,7 @@ struct Usage : std::exception
         "    -Z 0|1                              Disable/enable zero-fill chunk if partially unmapped (deflt: enable)\n"
         "                                        Note that the LBPRZ bit is 0 for both options\n"
         "    -M 0|1                              Disable/enable support for moving chunks (deflt: disable)\n"
-        "                                        Chunks must be locked properly to be moved\n"
+        "                                        Chunks must be locked exclusively to be moved\n"
         "    -t Number                           Number of threads (deflt: automatic)\n"
         "    -U GUID                             GUID as the serial number of the WinSpd disk (deflt: random)\n"
         "    -d -1                               Debug flags\n"
