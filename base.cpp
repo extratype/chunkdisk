@@ -311,7 +311,7 @@ DWORD ChunkDiskBase::AssignChunkPart()
 
     for (; new_part < num_parts; ++new_part)
     {
-        if (part_current_[new_part] >= part_max[new_part])
+        if (part_current_[new_part] >= part_max[new_part] && move_enabled)
         {
             // refresh to get the actual value
             auto new_count = 0;
@@ -326,14 +326,14 @@ DWORD ChunkDiskBase::AssignChunkPart()
 
         if (part_current_[new_part] < part_max[new_part])
         {
-            part_current_new_ = new_part;
+            if (part_current_new_ != new_part) part_current_new_ = new_part;
             return ERROR_SUCCESS;
         }
     }
 
     for (new_part = 0; new_part < part_current_new_; ++new_part)
     {
-        if (part_current_[new_part] >= part_max[new_part])
+        if (part_current_[new_part] >= part_max[new_part] && move_enabled)
         {
             // refresh to get the actual value
             auto new_count = 0;
@@ -348,7 +348,7 @@ DWORD ChunkDiskBase::AssignChunkPart()
 
         if (part_current_[new_part] < part_max[new_part])
         {
-            part_current_new_ = new_part;
+            if (part_current_new_ != new_part) part_current_new_ = new_part;
             return ERROR_SUCCESS;
         }
     }
