@@ -7,7 +7,7 @@ Disk metadata file: name.chunkdisk
     num_of_chunks path/to/dir/...   # ...
 
 Differential disk: name.chunkdisk
-    parent_file                     # maybe differential, for read only
+    parent_file                     # maybe differential, read-only
     disk_size                       # same as parent
     chunk_size                      # same as parent
     num_of_chunks path/to/dir/      # first part for this disk
@@ -17,10 +17,10 @@ Chunk files:
     part: choose first, second, ... part when creating
     file name: chunk###
     file size: 0 or chunk_size; empty or full
-    file never removed after created
+    files are not removed by chunkdisk after created
 
 Read():
-    current -> parent -> ...
+    current → parent → ...
     ReadFile()
     chunk not found or empty: zero-fill buffer
 
@@ -36,74 +36,165 @@ Unmap(): a.k.a. TRIM
     unmap range <  chunk:
         FSCTL_SET_ZERO_DATA, which supports sparse files
         zero-fill if not supported
+        ... if -Z 1 (default)
 
     unmap range >= chunk:
         exclusive (locked) access
         make it empty by truncating
 
-Asynchronous I/O:
-    for best asynchronous performance
-        FILE_FLAG_NO_BUFFERING && FILE_FLAG_WRITE_THROUGH
+I/O:
+    FILE_FLAG_OVERLAPPED for asynchronous I/O
+    FILE_FLAG_NO_BUFFERING as Windows caches the virtual disk
 
-    Alignment requirements with FILE_FLAG_NO_BUFFERING:
-        always align to 4096 bytes (pages)
-        convert unaligned block I/O to page I/O:
+    Alignment requirements by FILE_FLAG_NO_BUFFERING:
+        Always align to 4096 bytes (pages) like 512e
+        Convert unaligned block I/O to page I/O:
             write through
             flush when aligned
-            performance?
-                Windows caches virtual disk
-                Cluster size is 4096 bytes by default
+            few block I/O requests for 4096 bytes cluster
 
-Close unused file handles to trigger metadata updates
+    No write buffering:
+        Ignore FlushFlag in Read() or Write()
+        Do nothing in Flush()
+
+    Close unused file handles to trigger metadata updates
+
+    1048576 bytes MaxTransferLength:
+        No length limit in ReadFile(), WriteFile()
+        Prefer single large request over multiple small requests
+        For better sequential performance
+            Read(), Write() calls are not deterministic
+
+Support moving chunks while running (if -M 1):
+    For write buffering outside chunkdisk
+    Lock a chunk to move, busy wait in chunkdisk
+    Rescan parts for missing chunks
 
 --------------------------------------------------------------------------------
 
+main():
+    Command line arguments
+    chunkdisk parameters
+    WinSpd parameters
+        virtual disk serial number: GUID
+    Free resources upon exit
+
+ReadChunkDiskFile(): parse parameters in .chunkdisk file
+
+ReadChunkDiskBases():
+    bases: vector<ChunkDiskBase>
+        bases[0]: current
+        bases[1]: parent of bases[0]...
+
+    Iterate ReadChunkDiskFile() → ChunkDiskBase:
+        Error if duplicate parts found
+
+Read(), Write(), Unmap() callbacks:
+    in WinSpd dispatcher threads
+    Complete or send response later for each request
+    Post a request to a worker thread:
+        one ChunkDiskWorker for each dispatcher thread
+        GetAssignedWorker(): assign a ChunkDiskWorker at the first post
+
+Read-only if -W 0:
+    SPD_STORAGE_UNIT_PARAMS.WriteProtected
+    ChunkDiskBase.read_only
+    ChunkDiskBase.CreateChunk(is_write=false)
+
 ChunkDiskBase:
-    disk parameters
-    count num_of_chunks for each part
-    remember part id for each chunk file
+    Disk parameters in .chunkdisk file
 
-    .lock file:
-        to prevent mistakes
-        no double mount for write access: remove .lock when exiting
-        deny write access if have been opened as parent: persistent .lock
+    Unit conversions:
+        Bytes
+        Blocks
+        Pages
+        Chunks
 
-    CheckChunk(idx)
-    CreateChunk(idx, is_write, is_locked) -> FileHandle
-    RemoveChunkLocked(idx, handle):
-        remove chunk exclusively (locked)
-        when failed to copy parent
+    Chunk files in parts:
+        .lock file:
+            to prevent mistakes
+            if -W 1:
+                No double mount
+                Remove .lock upon exit
+            if -W 0:
+                May be shared for multiple instances of chunkdisk
+                Persistent .lock:
+                    Remove .lock manually to merge differential into parent
+
+        Check num_of_chunks and check duplicate chunks when Start()
+
+        Count num_of_chunks for each part to assign part for new chunks:
+            Refresh if full, actual value may be less if -M 1
+
+        Cache part lookup result for chunks:
+            error if duplicate chunks found
+            save result: found or not found
+
+        Check if a chunk exists in this base
+
+        CreateChunk(): open existing chunk or create new
+            New chunk:
+                Assign part
+                Open file handle to create, locked
+                Set file size, remove file on error
+
+            Existing chunk:
+                If found in cache but not existing: refresh and retry if -M 1
+                Check file size, extend to write
+
+            If no chunk exists or chunk is empty for Read():
+                INVALID_HANDLE_VALUE with ERROR_SUCCESS
+
+            is_write:
+                Read-only if false
+                Read-write if true, for Write() and Unmap()
+
+            is_locked:
+                For locked access
+                    Shared read-only
+                    Exclusive write, with DELETE access
+
+                Synchronous I/O
+
+        RemoveChunkLocked():
+            Cancel creating a chunk (exclusive access)
+            For Write() in differential chunkdisk
 
 ChunkDiskService:
-    vector<ChunkDiskBase> bases:
-        current, parent, ...
+    vector<ChunkDiskBase> bases
+    zero_chunk if -Z 1
+    MaxTransferLength()
 
     Pages:
-        PeekPage(): shared read access
-        LockPage(): exclusive write access
-        UnlockPage()
-        FlushPages(range)
-        FlushPages()
+        Read/Write block → Read/Write page
+        LRU, write through
+
+        Shared read: read done if hit
+        Exclusive write: read buffer if miss or write buffer
+        Flush
 
     Chunks:
-        FindChunk(): find ChunkDiskBase
-        CreateChunk(): create/open, read/write, shared/exclusive(locked)
-        LockChunk(): mark chunk locked
-        CheckChunkLocked(): check if locked
-        UnlockChunk(): clear chunk lock
+        Find in bases
 
-    Unmap Ranges:
-        UnmapRange(chunk, range): merge ranges, check if whole
-        FlushUnmapRanges(chunk)
-        FlushUnmapRanges()
+        Create/Open: CreateChunk()
+            Write to bases[0]
+            Read from bases[0] or bases[1] or ...
 
-    Last pending disk I/O timestamp
-        SetPostFileTime()
-        GetPostFileTime()
+        Synchronize chunk file state (see below):
+            Mark chunk locked
+            Check mark
+            Clear mark
 
-One worker thread per dispatcher thread
+    Unmapped ranges:
+        Merge ranges:
+            Return lock if whole
+        Flush ranges
+        Sync
 
-I/O
+    Last pending disk I/O timestamp:
+        For ChunkDiskWorker to check if disk is idle
+
+I/O operation
     Immediate
         bypass I/O or do synchronously
         with file handle not associated with IOCP
@@ -117,191 +208,288 @@ I/O
         packet sent, check results later
 
 ChunkDiskWorker:
-    Pools:
-        chunk file handles
-            shared among ops
-            (read-only, read-write) pair
-            LRU policy, <= QD 32
+    Worker thread
 
-        aligned buffers
-            aligned to page, zero-filled
+    Queue for incomplete I/O requests
+        Add:
+            Max: QD <= 32 (MAX_QD)
+            Wait for event if full
+
+        Remove:
+            ChunkWork completed
+            Signal event
+
+        No QD for messages
+
+    Pools:
+        Chunk file handles
+            Shared among ops
+            (is_write == false, is_write == true) pair
+            LRU policy
+
+            locked: a worker requested not to open handles
+            waiting: ops waiting for !locked
+
+        Buffers aligned to page (4096 bytes)
             1048576 + 4096 bytes to shift buffer and align to page
+            Zero-fill range only necessary
             LIFO policy
 
-    Request/Message → ChunkWork:
-        ops: ChunkOpState array
-            * chunk operations
-            * page operations
-            * no mixing of Read(), Write() or Unmap()
+    Messages: post IOCP packet from a worker to another
+
+    I/O Request or Message → ChunkWork:
+        ops: vector<ChunkOpState>
+            * Chunk operations
+            * Page operations
+            * No mixing of Read(), Write() or Unmap()
 
         buffer: from pool
-            copy DataBuffer for Write()
             Read():
-                respond with buffer for asynchronous I/O operations
-                copy to DataBuffer for immediate I/O operations
-                    DataBuffer not zero-filled
+                Respond with buffer for asynchronous I/O operations
+                Copy to DataBuffer for immediate I/O operations
 
-        completed when all ops are completed
-        respond with the first error if any
+            Write(): copy from DataBuffer
 
-    ChunkOpState:
-        Immediate I/O operations: done synchronously in the dispatcher thread
-            * read, chunk empty or does not exist
-            * read a cached page if chunk exists and not empty
+        Completed when all ops are completed
 
-        Asynchronous I/O operations: may be done synchronously
-            * read/write, aligned
-            * read/write in a page
-            * partial write in a page: read then write
-            * unmap:
-                whole: lock and truncate
-                partial:
-                    becomes write operation with buffer nullptr
-                    partial unmap if and only if write operation with buffer nullptr
-                    zero-fill using FSCTL_SET_ZERO_DATA (see below)
-
-        Messages: post IOCP packet directly
-            * locking chunk file handle
+        Respond with the first error if any
 
     Event loop using IOCP:
         1. PostWork() in the dispatcher thread
-            prepare ChunkWork, ChunkOpState
-            do immediate I/O operations
+            Prepare ChunkWork, ChunkOpState
+            Do immediate I/O operations
             Post ChunkWork for asynchronous I/O
 
-        2. PostOp()
-            do single asynchronous operation
-            like ReadFile(), WriteFile(), DeviceIoControl()
+        2. PostOp(): single asynchronous operation
+            ERROR_IO_PENDING: wait asynchronously
+            Otherwise done successfully or with error
 
-        3. CompleteIO()
-            check result for the asynchronous operation
-            check if ChunkOpState completed
+        3. CompleteIO(): check asynchronous I/O result
+            ERROR_IO_PENDING: not done yet
+            Otherwise done successfully or with error
 
         4. CompleteWork()
-            complete ChunkWork if all ChunkOpState are done
-            send response to WinSpd
+            Complete ChunkWork if all ChunkOpState are done
+            Send response to WinSpd
 
-        Idle timer:
-            GetQueuedCompletionStatus() timed out
-            IdleWork():
-                reset pool
+        IdleWork(): GetQueuedCompletionStatus() timed out (idle timer)
+            Reset pools
 
-                Disk idle?
-                    No requests except immediate I/O operations
-                    service.SetPostFileTime() in PostWork()
-                    service.GetPostFileTime() + idle timer in IdleWork():
-                        maybe the last worker
-                        service.FlushPages()
-                        service.FlushUnmapRanges()
-            wait indefinitely
+            Check if the disk is idle:
+                No requests except immediate I/O operations
+                Set I/O timestamp in PostWork()
+                Get I/O timestamp + idle timeout in IdleWork():
+                    maybe the last worker
 
-        Check idle file handles:
-            Count max. load of pool
-            PeriodicCheck():
-                check if under low load
-                shrink to fit load
+                Flush pages
+                Flush unmapped ranges
 
-    ChunkWork queue:
-        Add to list for asynchronous I/O:
-            max: QD 32
-            wait for list if full
+            Wait indefinitely for GetQueuedCompletionStatus()
 
-        Remove from list:
-            ChunkWork completed
-            signal list
+        PeriodicCheck(): check timer expired while running loop
+            Count max. load when getting a buffer or file handle
 
-        no QD for messages
+            If under load threshold:
+                Close idle buffers
+                Close idle file handles
+                Shrink to fit the load
+
+Read():
+    Prepare work.buffer and shift it to align to pages
+    Prepare ops:
+        Open chunk, is_write=false
+        If INVALID_HANDLE_VALUE:
+            Zero-fill buffer
+            Done immediately
+        Else:
+            Close chunk
+            * Aligned chunk read
+            * Page read:
+                If shared read and page hit:
+                    Copy page to buffer
+                    Done immediately
+
+    Aligned chunk read:
+        Open chunk, is_write=false...
+        Flush pages
+        If INVALID_HANDLE_VALUE:
+            Zero-fill buffer
+            Done
+        Else:
+            ReadFile()...
+        Close chunk
+
+    Page read:
+        Open chunk, is_write=false...
+        Lock page...
+        If page miss:
+            If INVALID_HANDLE_VALUE:
+                Page zero-filled when created
+            Else:
+                ReadFile()...
+                Copy page to buffer
+                Unlock page
+                Close chunk
+                Done
+        Else:
+            If not INVALID_HANDLE_VALUE:
+                Page hit or error
+                Close chunk
+            Else:
+                Zero-fill page
+        Copy page to buffer
+        Unlock page
+        Done
+
+Write():
+    Prepare work.buffer and shift it to align to pages
+    Prepare ops:
+        Write or Zero-fill (if and only if by Unmap())
+        Shift to align for zero-fill (ops.buffer == nullptr)
+        * Aligned chunk write
+        * Page write: whole or partial
+
+    Aligned chunk write:
+        If buffer != nullptr:
+            Flush unmapped ranges for the chunk
+        Else:
+            Sync unmapped ranges
+
+        Open chunk, is_write=true...:
+            Lock chunk, copy parent and retry from beginning if necessary
+
+        Flush pages...
+        If buffer != nullptr:
+            WriteFile()...
+            Close chunk
+            Done
+        Else (implies -Z 1):
+            DeviceIoControl(FSCTL_SET_ZERO_DATA)...
+            If not supported:
+                Prepare work.buffer from pool:
+                    Zero-fill buffer
+                    Keep ops.buffer == nullptr
+
+                Repeat WriteFile()...:
+                    Open chunk, is_write=true (reusing handle from pool)
+                    Close chunk if done
+            Done zero-fill:
+                Close chunk
+                Merge unmapped ranges
+
+    Page write:
+        If partial:
+            Page read..:
+                Don't copy to buffer
+                Don't unlock page
+
+        If buffer != nullptr:
+            Flush unmapped ranges for the chunk
+        Else:
+            Sync unmapped ranges
+
+        Open chunk, is_write=true...:
+            Lock chunk, copy parent and retry from beginning if necessary
+
+        Lock page... if whole
+        If buffer != nullptr:
+            Copy buffer to page
+        Else:
+            Zero-fill page
+        WriteFile(page)...
+        Unlock page
+        Close chunk
+        If buffer == nullptr:
+            Merge unmapped ranges
+
+Unmap():
+    Merge ranges in a single request by sorting them
+
+    work.buffer = nullptr
+    Prepare ops for each range:
+        If the chunk does not exist:
+            Done immediately
+        If partial and -Z 1:
+            becomes WRITE_CHUNK with ops.buffer == nullptr (only case)
+
+    Unmap chunk:
+        Flush pages...
+        If whole (not partial):
+            Flush unmapped ranges
+            Lock and truncate
+        Else (implies -Z 0):
+            Merge unmapped ranges
+
+    Whole chunk unmapped after merging ranges:
+        Expect no incomplete write and no more write requests during Unmap(),
+        Try to unmap (truncate) the chunk synchronously,
+        Holding the unmap ranges lock:
+            Additional Write() waits for the lock
+            Close unused read-write (is_write=true) handles
+            Truncate the chunk if no read-write handles are open
+
+        Read():
+            Handle EOF
+            Zero-fill buffer if zero bytes read and chunk is empty
+            Remove read-only (is_write=false) handle from pool
 
 Synchronize pages:
-    flush pages before aligned read/write and unmap
-    shared lock for page read
-    exclusive lock for page miss
-    exclusive lock for partial page write: atomic read and write
+    Flush pages before page I/O
+    Remove page on error in page I/O
+
+    * Shared read to check page hit
+    * Exclusive write for page miss
+    * Exclusive write for Write():
+        Atomic modify (read then write) if partial page write
 
     Serialize exclusive accesses within the same worker thread:
         SRW locks are not recursive
-        check owner thread ID
-        singly-linked list for each page:
-            PageEntry::user -> ChunkOpState*
-            ChunkOpState::next -> ChunkOpState*
 
-            Set PageEntry::user when LockPage() succeeds
-            Traverse next and set ChunkOpState::next when LockPage() fails
-            Retry when UnlockPage()
+        Pages in ChunkDiskService:
+            Check owner thread ID, ERROR_LOCKED if already locked
+            user: pointer
 
-Lock chunk file handle:
-    mark chunk locked, wait for it if already locked...
+        ChunkDiskWorker:
+            Shared read in a dispatcher thread
 
-    broadcast a message to lock the handles...
-        ChunkOpState: add to waiting list if locked...
+            Singly-linked list for each page:
+                PageEntry::user → ChunkOpState*
+                ChunkOpState::next → ChunkOpState*
 
-    wait for the existing references to be closed...
-        reply with a message to the sender
+            Try to lock/flush in a worker thread:
+                If not ERROR_LOCKED:
+                    Set PageEntry::user
+                Else:
+                    Get PageEntry::user
+                    Append to the linked list
+                    ERROR_IO_PENDING
 
-    open handle exclusively (locked)
-    do an operation...
+            Unlock in the worker thread:
+                Clear PageEntry::user
+                Get ChunkOpState::next and clear
+                PostOp()...
 
-    broadcast a message to unlock the handles...
-        resume ChunkOpState's in the waiting list
+Synchronize chunk file state:
+    Mark the chunk locked:
+        Wait for it if already locked...
 
-Asynchronous Read(), Write():
-    Aligned read:
-        OpenChunk(read-only)...
-        FlushPages(range)...
-        ReadFile()...
-        CloseChunk()
+    Broadcast a message to lock the chunk...:
+        Notified the chunk is locked
+        Add ChunkOpState to the waiting list when open, ERROR_IO_PENDING
 
-    Aligned write or zero-fill:
-        OpenChunk(read-write)...
-            lock chunk, copy parent and retry from beginning if necessary
-        FlushPages(range)...
-        WriteFile() or DeviceIoControl(FSCTL_SET_ZERO_DATA)...
-            DeviceIoControl(FSCTL_SET_ZERO_DATA) not supported?
-                set owner ChunkWork buffer from pool
-                zero-fill buffer
-                repeat WriteFile()...
-        CloseChunk()
+    Wait for the existing references to be closed...:
+        Reply with a message to the owner when close
 
-    Unaligned read:
-        OpenChunk(read-only)...
-        LockPage()...
-        ReadFile()... to page
-        copy to buffer
-        UnlockPage()
-        CloseChunk()
+    Open handle with is_locked
+    Do an operation...
+        * Copy the chunk from one of bases, RemoveChunkLocked() if error
+        * Unmap the chunk
 
-    Unaligned write:
-        not whole page?
-            Unaligned read..., keep page
-        OpenChunk(read-write)...
-            lock chunk, copy parent and retry from beginning if necessary
-        LockPage()/service.ClaimPage()...
-        copy/zero-fill page
-        WriteFile()... from page
-        UnlockPage()
-        CloseChunk()
+    Broadcast a message to unlock the handles...
+        Resume ChunkOpState's in the waiting list
 
-Unmap():
-    FlushPages()...
-    whole chunk: lock and truncate
-    partial: zero-fill
-
-    Merge unmap ranges:
-        in a single request:
-            sort by address
-            merge ranges
-
-        across multiple requests:
-            before whole Unmap(): service.FlushUnmapRanges(chunk)
-            before Write(): service.FlushUnmapRanges(chunk) or just sync.
-            after FSCTL_SET_ZERO_DATA:
-                failure: service.FlushUnmapRanges(chunk)
-                success:
-                    service.UnmapRange()
-                    if whole, while locking range lock:
-                        remove read-write handles if idle
-                        truncate if all read-write handles are removed
-
-    Unmap() then Read(): EOF
-        read successful if zero bytes read and chunk is empty
-        remove handle from pool
+Support moving chunks if -M 1:
+    Busy wait to open file handles if locked
+    When unmapping a chunk synchronously:
+        Hold the unmap ranges lock
+        Retry after busy waiting...

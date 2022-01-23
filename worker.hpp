@@ -355,6 +355,7 @@ private:
     DWORD TryBusyWaitChunk(ChunkOpState& state, DWORD error, ChunkOpStep next_step, std::shared_mutex* mtx,
                            u64 chunk_idx, bool is_write, bool is_locked = false);
 
+    // error <- bytes_transferred from IOCP
     // continue or handle OP_UNMAP_SYNC and done
     DWORD CompleteBusyWaitChunk(ChunkOpState& state, DWORD error);
 
@@ -378,6 +379,7 @@ private:
     // zero-fill if buffer is nullptr
     DWORD PostWriteChunk(ChunkOpState& state);
 
+    // error <- bytes_transferred from IOCP
     // CreateChunkLocked() completed in write operation
     DWORD CompleteWriteCreateChunk(ChunkOpState& state, DWORD error);
 

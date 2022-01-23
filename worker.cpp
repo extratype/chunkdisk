@@ -982,7 +982,7 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, const 
 
     if (kind == UNMAP_CHUNK || base.IsWholePages(r.start_off, r.end_off, buffer))
     {
-        // UNMAP_CHUNK: ignore alignment
+        // UNMAP_CHUNK: whole chunk or not required to align
         // others: aligned to page
         try
         {
@@ -1148,7 +1148,6 @@ DWORD ChunkDiskWorker::CompleteIO(ChunkOpState& state, const DWORD error, const 
     {
         if (state.step == OP_BUSY_WAITING)
         {
-            // error is bytes_transferred
             err = CompleteBusyWaitChunk(state, bytes_transferred);
         }
         else
@@ -1160,12 +1159,10 @@ DWORD ChunkDiskWorker::CompleteIO(ChunkOpState& state, const DWORD error, const 
     {
         if (state.step == OP_BUSY_WAITING)
         {
-            // error is bytes_transferred
             err = CompleteBusyWaitChunk(state, bytes_transferred);
         }
         else if (state.step == OP_LOCKED)
         {
-            // error is bytes_transferred
             err = CompleteWriteCreateChunk(state, bytes_transferred);
         }
         else
@@ -1177,7 +1174,6 @@ DWORD ChunkDiskWorker::CompleteIO(ChunkOpState& state, const DWORD error, const 
     {
         if (state.step == OP_BUSY_WAITING)
         {
-            // error is bytes_transferred
             err = CompleteBusyWaitChunk(state, bytes_transferred);
         }
         else
@@ -1189,12 +1185,10 @@ DWORD ChunkDiskWorker::CompleteIO(ChunkOpState& state, const DWORD error, const 
     {
         if (state.step == OP_BUSY_WAITING)
         {
-            // error is bytes_transferred
             err = CompleteBusyWaitChunk(state, bytes_transferred);
         }
         else if (state.step == OP_LOCKED)
         {
-            // error is bytes_transferred
             err = CompleteWriteCreateChunk(state, bytes_transferred);
         }
         else if (kind == WRITE_PAGE_PARTIAL && state.step == OP_READY)
@@ -1210,7 +1204,6 @@ DWORD ChunkDiskWorker::CompleteIO(ChunkOpState& state, const DWORD error, const 
     {
         if (state.step == OP_BUSY_WAITING)
         {
-            // error is bytes_transferred
             err = CompleteBusyWaitChunk(state, bytes_transferred);
         }
     }
@@ -1796,7 +1789,7 @@ DWORD ChunkDiskWorker::TryBusyWaitChunk(ChunkOpState& state, const DWORD error, 
                 std::atomic_thread_fence(std::memory_order_release);
 
                 auto err = DWORD(ERROR_SUCCESS);
-                auto h = FileHandle();
+                auto h = FileHandle();  // don't keep it, LOCK_CHUNK may be posted
 
                 while (true)
                 {
