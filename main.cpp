@@ -1,7 +1,7 @@
 /**
  * @file main.cpp
  *
- * @copyright 2021 extratype
+ * @copyright 2021-2022 extratype
  */
 
 #include "utils.hpp"
@@ -522,7 +522,7 @@ DWORD CreateStorageUnit(PWSTR chunkdisk_file, GUID guid, const BOOLEAN write_pro
     err = [guid, &bases, write_protected, pipe_name, &unit]() -> DWORD
     {
         constexpr wchar_t ProductId[] = L"ChunkDisk";
-        constexpr wchar_t ProductRevision[] = L"1.4";
+        constexpr wchar_t ProductRevision[] = L"1.5";
         auto unit_params = SPD_STORAGE_UNIT_PARAMS();
 
         unit_params.Guid = guid;

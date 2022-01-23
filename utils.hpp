@@ -1,7 +1,7 @@
 /**
  * @file utils.hpp
  *
- * @copyright 2021 extratype
+ * @copyright 2021-2022 extratype
  *
  * System utilities and utilities for WinSpd.
  */

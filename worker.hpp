@@ -1,7 +1,7 @@
 /**
  * @file worker.hpp
  *
- * @copyright 2021 extratype
+ * @copyright 2021-2022 extratype
  *
  * Perform async I/O operations for chunkdisk.
  */

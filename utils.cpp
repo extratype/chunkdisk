@@ -1,7 +1,7 @@
 /**
  * @file utils.cpp
  *
- * @copyright 2021 extratype
+ * @copyright 2021-2022 extratype
  */
 
 #include "utils.hpp"

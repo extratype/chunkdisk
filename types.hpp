@@ -1,7 +1,7 @@
 /**
  * @file types.hpp
  *
- * @copyright 2021 extratype
+ * @copyright 2021-2022 extratype
  *
  * Basic types and data structures.
  */
