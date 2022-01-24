@@ -59,3 +59,11 @@ v1.4
 * Fix tracking recently unmapped pages.
 * Fix an I/O error when writing to a new differential chunk, which may cause loss of data.
 * Fix locking chunks.
+
+v1.5
+
+* Add option (`-U GUID`) to set the serial number of the virtual disk.
+* Print errors in detail while starting.
+* Remember only a limited number of chunk locations for memory usage.
+* Add option (`-M 1`) to support for moving chunks. Chunks must be locked properly to be moved.
+* Fix out of memory by Unmap() with large ranges.

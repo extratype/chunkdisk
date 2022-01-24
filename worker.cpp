@@ -343,6 +343,7 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, con
 
     if (work.num_completed == work.ops.size())
     {
+        // work.ops may be empty for UNMAP_CHUNK
         // read all done immediately
         if (op_kind == READ_CHUNK) memcpy(ctx_buffer, work.ops[0].buffer, base.BlockBytes(count));
         ReturnBuffer(std::move(work.buffer));
@@ -942,9 +943,14 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, const 
             else
             {
                 // may race with writes
+                if (kind == UNMAP_CHUNK)
+                {
+                    // chunk does not exist in any base or empty chunk exists,
+                    // nothing to unmap
+                    return ERROR_SUCCESS;
+                }
                 try
                 {
-                    // nothing to zero-fill if UNMAP_CHUNK
                     auto& op = ops.emplace_back(&work, kind, chunk_idx, start_off, end_off,
                                                 LONGLONG(base.BlockBytes(start_off)), buffer);
                     if (buffer != nullptr)

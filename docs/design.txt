@@ -191,7 +191,7 @@ ChunkDiskService:
         Flush ranges
         Sync
 
-    Last pending disk I/O timestamp:
+    Last disk I/O request timestamp:
         For ChunkDiskWorker to check if disk is idle
 
 I/O operation
@@ -408,6 +408,7 @@ Unmap():
     work.buffer = nullptr
     Prepare ops for each range:
         If the chunk does not exist:
+            No ChunkOpState added
             Done immediately
         If partial and -Z 1:
             becomes WRITE_CHUNK with ops.buffer == nullptr (only case)
