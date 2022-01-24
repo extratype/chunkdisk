@@ -648,7 +648,8 @@ struct Usage : std::exception
 {
     static constexpr WCHAR PROGNAME[] = L"chunkdisk";
 
-    static constexpr WCHAR usage[] = L""
+    // limited to 1024 elements
+    static constexpr WCHAR usage1[] = L""
         "usage: %s OPTIONS\n"
         "\n"
         "options:\n"
@@ -661,7 +662,9 @@ struct Usage : std::exception
         "    -M 0|1                              Disable/enable support for moving chunks (deflt: disable)\n"
         "                                        Chunks must be locked exclusively to be moved\n"
         "    -t Number                           Number of threads (deflt: automatic)\n"
-        "    -U GUID                             GUID as the serial number of the WinSpd disk (deflt: random)\n"
+        "    -U GUID                             GUID as the serial number of the WinSpd disk (deflt: random)";
+
+    static constexpr WCHAR usage2[] = L""
         "    -d -1                               Debug flags\n"
         "    -D DebugLogFile                     Debug log file; - for stderr\n"
         "    -p \\\\.\\pipe\\PipeName                Listen on pipe; omit to use driver\n"
@@ -760,7 +763,8 @@ int wmain(int argc, wchar_t** argv)
     }
     catch (const Usage&)
     {
-        SpdLogErr(Usage::usage, Usage::PROGNAME);
+        SpdLogErr(Usage::usage1, Usage::PROGNAME);
+        SpdLogErr(Usage::usage2);
         return ERROR_INVALID_PARAMETER;
     }
 
