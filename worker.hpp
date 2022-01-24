@@ -26,8 +26,7 @@ enum ChunkOpKind : u32
     READ_PAGE,              // unaligned, read in pages
     WRITE_PAGE,             // unaligned, write in pages
     WRITE_PAGE_PARTIAL,     // not page aligned, read and write in pages
-    UNMAP_CHUNK,            // become write with buffer == nullptr
-                            // if and only if partial and service_.zero_chunk
+    UNMAP_CHUNK,            // may become write with buffer == nullptr (only from UNMAP_CHUNK)
 
     // for PostMsg()
     LOCK_CHUNK,             // stop using and close the chunk by setting ChunkFileHandle::locked
@@ -272,7 +271,8 @@ private:
 
     // start_off, end_off: block offset in chunk
     // buffer: current address, to be updated
-    // partial UNMAP_CHUNK becomes WRITE_CHUNK
+    // UNMAP_CHUNK may not add to work.ops
+    // UNMAP_CHUNK may become become WRITE_CHUNK
     DWORD PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, u64 chunk_idx,
                           u64 start_off, u64 end_off, LPVOID& buffer);
 
@@ -359,7 +359,7 @@ private:
     // continue or handle OP_UNMAP_SYNC and done
     DWORD CompleteBusyWaitChunk(ChunkOpState& state, DWORD error);
 
-    // make chunk empty (truncate)
+    // make chunk empty by truncating
     DWORD UnmapChunkLocked(u64 chunk_idx);
 
     // truncate chunk existing on current base

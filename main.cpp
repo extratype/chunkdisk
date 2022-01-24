@@ -70,8 +70,8 @@ struct ChunkDisk
     // not movable, increment only
     std::atomic<u32> workers_assigned = 0;
 
-    explicit ChunkDisk(vector<ChunkDiskBase> bases, SPD_STORAGE_UNIT* storage_unit, bool zero_chunk)
-        : service(std::move(bases), storage_unit, zero_chunk) {}
+    explicit ChunkDisk(vector<ChunkDiskBase> bases, SPD_STORAGE_UNIT* storage_unit, bool trim_chunk, bool zero_chunk)
+        : service(std::move(bases), storage_unit, trim_chunk, zero_chunk) {}
 
     ~ChunkDisk()
     {
@@ -508,7 +508,8 @@ static SPD_STORAGE_UNIT_INTERFACE CHUNK_DISK_INTERFACE =
     Unmap,
 };
 
-DWORD CreateStorageUnit(PWSTR chunkdisk_file, GUID guid, const BOOLEAN write_protected, const BOOLEAN zero_chunk,
+DWORD CreateStorageUnit(PWSTR chunkdisk_file, GUID guid, const BOOLEAN write_protected,
+                        const BOOLEAN trim_chunk, const BOOLEAN zero_chunk,
                         const BOOLEAN move_enabled, PWSTR pipe_name, unique_ptr<ChunkDisk>& cdisk_out)
 {
     // read chunkdisk file
@@ -559,7 +560,7 @@ DWORD CreateStorageUnit(PWSTR chunkdisk_file, GUID guid, const BOOLEAN write_pro
     try
     {
         // unit is deleted when cdisk is deleted
-        cdisk = std::make_unique<ChunkDisk>(std::move(bases), unit, zero_chunk);
+        cdisk = std::make_unique<ChunkDisk>(std::move(bases), unit, trim_chunk, zero_chunk);
         unit->UserContext = cdisk.get();
     }
     catch (const bad_alloc&)
@@ -653,8 +654,9 @@ struct Usage : std::exception
         "options:\n"
         "    -f ChunkDiskFile                    Chunkdisk metadata file (name.chunkdisk)\n"
         "    -W 0|1                              Disable/enable writes (deflt: enable)\n"
-        "                                        The .lock file will not be removed automaitcally if disabled\n"
-        "    -Z 0|1                              Disable/enable zero-fill chunk if partially unmapped (deflt: enable)\n"
+        "                                        The .lock file will not be removed upon exit if disabled\n"
+        "    -X 0|1                              Disable/enable truncating chunk if completely unmapped (deflt: enable)\n"
+        "    -Z 0|1                              Disable/enable zero-filling chunk data if unmapped (deflt: enable)\n"
         "                                        Note that the LBPRZ bit is 0 for both options\n"
         "    -M 0|1                              Disable/enable support for moving chunks (deflt: disable)\n"
         "                                        Chunks must be locked exclusively to be moved\n"
@@ -699,6 +701,7 @@ int wmain(int argc, wchar_t** argv)
     wchar_t** argp;
     PWSTR ChunkDiskFile = nullptr;
     ULONG WriteAllowed = 1;
+    ULONG TrimChunk = 1;
     ULONG ZeroChunk = 1;
     ULONG MoveEnabled = 0;
     ULONG NumThreads = 0;
@@ -722,6 +725,9 @@ int wmain(int argc, wchar_t** argv)
                 break;
             case L'W':
                 WriteAllowed = argtol(++argp, WriteAllowed);
+                break;
+            case L'X':
+                TrimChunk = argtol(++argp, TrimChunk);
                 break;
             case L'Z':
                 ZeroChunk = argtol(++argp, ZeroChunk);
@@ -812,8 +818,8 @@ int wmain(int argc, wchar_t** argv)
     }
 
     auto cdisk = unique_ptr<chunkdisk::ChunkDisk>();
-    err = chunkdisk::CreateStorageUnit(ChunkDiskFile, UnitGuid, !WriteAllowed, !!ZeroChunk,
-                                       !!MoveEnabled, PipeName, cdisk);
+    err = chunkdisk::CreateStorageUnit(ChunkDiskFile, UnitGuid, !WriteAllowed,
+                                       !!TrimChunk, !!ZeroChunk, !!MoveEnabled, PipeName, cdisk);
     if (err != ERROR_SUCCESS) return err;
     err = chunkdisk::StartWorkers(*cdisk, NumThreads);
     if (err != ERROR_SUCCESS)
@@ -834,10 +840,11 @@ int wmain(int argc, wchar_t** argv)
     auto UnitGuidStr = RPC_WSTR();
     if (UuidToStringW(&UnitGuid, &UnitGuidStr) == RPC_S_OK)
     {
-        SpdLogInfo(L"%s -f %s -W %u -Z %u -t %d -U %s%s%s",
+        SpdLogInfo(L"%s -f %s -W %u -X %u -Z %u -t %d -U %s%s%s",
                    Usage::PROGNAME,
                    ChunkDiskFile,
                    !!WriteAllowed,
+                   !!TrimChunk,
                    !!ZeroChunk,
                    NumThreads,
                    UnitGuidStr,

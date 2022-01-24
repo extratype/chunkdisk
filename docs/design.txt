@@ -33,14 +33,16 @@ Write():
         copy parent to current
 
 Unmap(): a.k.a. TRIM
-    unmap range <  chunk:
+    unmap range <  chunk (partial):
         FSCTL_SET_ZERO_DATA, which supports sparse files
         zero-fill if not supported
         ... if -Z 1 (default)
 
-    unmap range >= chunk:
+    unmap range >= chunk (whole):
         exclusive (locked) access
         make it empty by truncating
+        ... if -X 1 (default)
+        zero-fill instead if -X 0 -Z 1
 
 I/O:
     FILE_FLAG_OVERLAPPED for asynchronous I/O
@@ -162,6 +164,7 @@ ChunkDiskBase:
 
 ChunkDiskService:
     vector<ChunkDiskBase> bases
+    trim_chunk if -X 1
     zero_chunk if -Z 1
     MaxTransferLength()
 
@@ -350,10 +353,11 @@ Write():
         * Page write: whole or partial
 
     Aligned chunk write:
-        If buffer != nullptr:
-            Flush unmapped ranges for the chunk
-        Else:
-            Sync unmapped ranges
+        If -X 1:
+            If buffer != nullptr:
+                Flush unmapped ranges for the chunk
+            Else:
+                Sync unmapped ranges
 
         Open chunk, is_write=true...:
             Lock chunk, copy parent and retry from beginning if necessary
@@ -375,7 +379,7 @@ Write():
                     Close chunk if done
             Done zero-fill:
                 Close chunk
-                Merge unmapped ranges
+                Merge unmapped ranges if -X 1
 
     Page write:
         If partial:
@@ -383,10 +387,11 @@ Write():
                 Don't copy to buffer
                 Don't unlock page
 
-        If buffer != nullptr:
-            Flush unmapped ranges for the chunk
-        Else:
-            Sync unmapped ranges
+        If -X 1:
+            If buffer != nullptr:
+                Flush unmapped ranges for the chunk
+            Else:
+                Sync unmapped ranges
 
         Open chunk, is_write=true...:
             Lock chunk, copy parent and retry from beginning if necessary
@@ -400,28 +405,30 @@ Write():
         Unlock page
         Close chunk
         If buffer == nullptr:
-            Merge unmapped ranges
+            Merge unmapped ranges if -X 1
 
 Unmap():
     Merge ranges in a single request by sorting them
+    Done immediately if -X 0 -Z 0
 
     work.buffer = nullptr
     Prepare ops for each range:
         If the chunk does not exist:
             No ChunkOpState added
             Done immediately
-        If partial and -Z 1:
+        If (whole and -X 0 -Z 1) or (partial and -Z 1):
             becomes WRITE_CHUNK with ops.buffer == nullptr (only case)
 
     Unmap chunk:
         Flush pages...
-        If whole (not partial):
+        If whole (only if -X 1):
             Flush unmapped ranges
             Lock and truncate
-        Else (implies -Z 0):
+        Else (only if -X 1 -Z 0):
             Merge unmapped ranges
 
     Whole chunk unmapped after merging ranges:
+        If -X 1,
         Expect no incomplete write and no more write requests during Unmap(),
         Try to unmap (truncate) the chunk synchronously,
         Holding the unmap ranges lock:

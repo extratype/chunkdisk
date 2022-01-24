@@ -76,7 +76,10 @@ public:
 
     SPD_STORAGE_UNIT* const storage_unit;
 
-    // zero-fill chunk if partially unmapped
+    // truncate chunk if completely unmapped
+    const bool trim_chunk;
+
+    // zero-fill chunk if unmapped
     const bool zero_chunk;
 
 private:
@@ -101,7 +104,7 @@ private:
 
 public:
     // bases: ReadChunkDiskBases()
-    ChunkDiskService(std::vector<ChunkDiskBase> bases, SPD_STORAGE_UNIT* storage_unit, bool zero_chunk);
+    ChunkDiskService(std::vector<ChunkDiskBase> bases, SPD_STORAGE_UNIT* storage_unit, bool trim_chunk, bool zero_chunk);
 
     u32 MaxTransferLength() const { return storage_unit->StorageUnitParams.MaxTransferLength; }
 

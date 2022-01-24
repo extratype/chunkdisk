@@ -310,12 +310,15 @@ DWORD ChunkDiskWorker::PostWork(SPD_STORAGE_UNIT_OPERATION_CONTEXT* context, con
     else if (op_kind == UNMAP_CHUNK)
     {
         // buffer is nullptr for UNMAP_CHUNK
-        auto* descs = recast<SPD_UNMAP_DESCRIPTOR*>(ctx_buffer);
-        for (auto i = u64(0); i < count; ++i)
+        if (service_.trim_chunk || service_.zero_chunk)
         {
-            auto* ops_buffer = LPVOID(nullptr);
-            err = PrepareOps(work, op_kind, descs[i].BlockAddress, descs[i].BlockCount, ops_buffer);
-            if (err != ERROR_SUCCESS) break;
+            auto* descs = recast<SPD_UNMAP_DESCRIPTOR*>(ctx_buffer);
+            for (auto i = u64(0); i < count; ++i)
+            {
+                auto* ops_buffer = LPVOID(nullptr);
+                err = PrepareOps(work, op_kind, descs[i].BlockAddress, descs[i].BlockCount, ops_buffer);
+                if (err != ERROR_SUCCESS) break;
+            }
         }
     }
     else
@@ -969,11 +972,19 @@ DWORD ChunkDiskWorker::PrepareChunkOps(ChunkWork& work, ChunkOpKind kind, const 
             }
         }
 
-        // buffer == nullptr if and only if partial UNMAP_CHUNK with service_.zero_chunk
-        if (kind == UNMAP_CHUNK && !base.IsWholeChunk(start_off, end_off) && service_.zero_chunk)
+        // buffer == nullptr only if UNMAP_CHUNK and service_.zero_chunk
+        if (kind == UNMAP_CHUNK)
         {
-            // zero-fill the range
-            kind = WRITE_CHUNK;
+            if (base.IsWholeChunk(start_off, end_off))
+            {
+                // zero-fill the chunk
+                if (!service_.trim_chunk && service_.zero_chunk) kind = WRITE_CHUNK;
+            }
+            else
+            {
+                // zero-fill the range
+                if (service_.zero_chunk) kind = WRITE_CHUNK;
+            }
         }
     }
     else if (kind != WRITE_CHUNK)
@@ -2009,15 +2020,18 @@ DWORD ChunkDiskWorker::PostWriteChunk(ChunkOpState& state)
         auto h = HANDLE(INVALID_HANDLE_VALUE);
         if (state.step == OP_READY)
         {
-            if (state.buffer != nullptr)
+            if (service_.trim_chunk)
             {
-                // invalidate all ranges for simplicity
-                service_.FlushUnmapRanges(state.idx);
-            }
-            else
-            {
-                // for UnmapChunkSync()
-                service_.SyncUnmapRanges();
+                if (state.buffer != nullptr)
+                {
+                    // invalidate all ranges for simplicity
+                    service_.FlushUnmapRanges(state.idx);
+                }
+                else
+                {
+                    // for UnmapChunkSync()
+                    service_.SyncUnmapRanges();
+                }
             }
 
             while (true)
@@ -2149,7 +2163,7 @@ DWORD ChunkDiskWorker::CompleteWriteChunk(ChunkOpState& state, DWORD error, DWOR
     if (error != ERROR_SUCCESS)
     {
         if (state.step == OP_ZERO_CHUNK) CloseChunkAsync(state.idx, true);   // close the handle left open
-        service_.FlushUnmapRanges(state.idx);
+        if (service_.trim_chunk) service_.FlushUnmapRanges(state.idx);
         return error;
     }
 
@@ -2162,7 +2176,7 @@ DWORD ChunkDiskWorker::CompleteWriteChunk(ChunkOpState& state, DWORD error, DWOR
         if (error != ERROR_IO_PENDING)
         {
             CloseChunkAsync(state.idx, true);    // close the handle left open
-            service_.FlushUnmapRanges(state.idx);
+            if (service_.trim_chunk) service_.FlushUnmapRanges(state.idx);
         }
         return error;
     }
@@ -2170,16 +2184,19 @@ DWORD ChunkDiskWorker::CompleteWriteChunk(ChunkOpState& state, DWORD error, DWOR
     // done
     if (state.step == OP_ZERO_CHUNK) CloseChunkAsync(state.idx, true);   // close the handle left open
 
-    auto lk = SRWLock();
-    if (service_.UnmapRange(lk, state.idx, state.start_off, state.end_off) == ERROR_SUCCESS)
+    if (service_.trim_chunk)
     {
-        // whole chunk unmapped
-        // holding mutex_unmapped_, no more writes...
-        auto err = UnmapChunkSync(state.idx);
-        if (err != ERROR_SUCCESS)
+        auto lk = SRWLock();
+        if (service_.UnmapRange(lk, state.idx, state.start_off, state.end_off) == ERROR_SUCCESS)
         {
-            err = TryBusyWaitChunk(state, err, OP_UNMAP_SYNC, lk.release(), state.idx, true);
-            if (err == ERROR_IO_PENDING) return err;
+            // whole chunk unmapped
+            // holding mutex_unmapped_, no more writes...
+            auto err = UnmapChunkSync(state.idx);
+            if (err != ERROR_SUCCESS)
+            {
+                err = TryBusyWaitChunk(state, err, OP_UNMAP_SYNC, lk.release(), state.idx, true);
+                if (err == ERROR_IO_PENDING) return err;
+            }
         }
     }
     return error;
@@ -2306,12 +2323,12 @@ DWORD ChunkDiskWorker::PostWritePage(ChunkOpState& state)
         if (state.buffer != nullptr)
         {
             // invalidate all ranges for simplicity
-            service_.FlushUnmapRanges(chunk_idx);
+            if (service_.trim_chunk) service_.FlushUnmapRanges(chunk_idx);
         }
         else
         {
             // for UnmapChunkSync()
-            service_.SyncUnmapRanges();
+            if (service_.trim_chunk) service_.SyncUnmapRanges();
         }
 
         // Page was locked in PostReadPage() for WRITE_PAGE_PARTIAL
@@ -2436,7 +2453,7 @@ DWORD ChunkDiskWorker::CompleteWritePage(ChunkOpState& state, DWORD error, DWORD
     UnlockPageAsync(state, state.idx, error != ERROR_SUCCESS);
     CloseChunkAsync(chunk_idx, true);
 
-    if (state.buffer == nullptr)
+    if (state.buffer == nullptr && service_.trim_chunk)
     {
         if (error != ERROR_SUCCESS)
         {
@@ -2469,6 +2486,7 @@ DWORD ChunkDiskWorker::PostUnmapChunk(ChunkOpState& state)
 
     if (base.IsWholeChunk(state.start_off, state.end_off))
     {
+        // reachable only if service_.trim_chunk
         service_.FlushUnmapRanges(state.idx);
         if (state.step == OP_READY)
         {
@@ -2488,21 +2506,27 @@ DWORD ChunkDiskWorker::PostUnmapChunk(ChunkOpState& state)
         }
         return ERROR_INVALID_STATE;
     }
-
-    // partial and !service_.zero_chunk
-    auto lk = SRWLock();
-    err = service_.UnmapRange(lk, state.idx, state.start_off, state.end_off);
-    if (err == ERROR_SUCCESS)
-    {
-        // whole chunk unmapped
-        // holding mutex_unmapped_, no more writes...
-        err = UnmapChunkSync(state.idx);
-        if (err != ERROR_SUCCESS) return TryBusyWaitChunk(state, err, OP_UNMAP_SYNC, lk.release(), state.idx, true);
-        return ERROR_SUCCESS;
-    }
     else
     {
-        return (err == ERROR_IO_PENDING) ? ERROR_SUCCESS : err;
+        // reachable only if service_.trim_chunk && !service_.zero_chunk
+        auto lk = SRWLock();
+        err = service_.UnmapRange(lk, state.idx, state.start_off, state.end_off);
+        if (err == ERROR_SUCCESS)
+        {
+            // whole chunk unmapped
+            // holding mutex_unmapped_, no more writes...
+            err = UnmapChunkSync(state.idx);
+            if (err != ERROR_SUCCESS)
+            {
+                return TryBusyWaitChunk(state, err, OP_UNMAP_SYNC, lk.release(),
+                                        state.idx, true);
+            }
+            return ERROR_SUCCESS;
+        }
+        else
+        {
+            return (err == ERROR_IO_PENDING) ? ERROR_SUCCESS : err;
+        }
     }
 }
 
