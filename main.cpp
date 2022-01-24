@@ -840,12 +840,13 @@ int wmain(int argc, wchar_t** argv)
     auto UnitGuidStr = RPC_WSTR();
     if (UuidToStringW(&UnitGuid, &UnitGuidStr) == RPC_S_OK)
     {
-        SpdLogInfo(L"%s -f %s -W %u -X %u -Z %u -t %d -U %s%s%s",
+        SpdLogInfo(L"%s -f %s -W %u -X %u -Z %u -M %u -t %d -U %s%s%s",
                    Usage::PROGNAME,
                    ChunkDiskFile,
                    !!WriteAllowed,
                    !!TrimChunk,
                    !!ZeroChunk,
+                   MoveEnabled,
                    NumThreads,
                    UnitGuidStr,
                    (nullptr != PipeName) ? L" -p " : L"",
