@@ -9,14 +9,6 @@ Metadata flushed automatically by Windows, not by chunkdisk
 
 TODO check partition -> TRIM -> shrink -> remove orphan empty chunks
 
-TODO consolidate $MFT, $INDEX
-
 TODO merge base + differential: find part and overwrite
 
-TODO base -> read cache (SSD) -> diff (SSD)
-
 TODO change GUID in GPT to mount the base disk in read-only
-
-TODO preallocate empty chunks
-
-use FSCTL_DUPLICATE_EXTENTS_TO_FILE for differential disk?
