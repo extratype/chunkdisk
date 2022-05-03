@@ -147,7 +147,7 @@ public:
     DWORD FlushPages();
 
     // CheckChunk() from current to parents, return bases.size() if all false.
-    size_t FindChunk(u64 chunk_idx);
+    usize FindChunk(u64 chunk_idx);
 
     // Open a chunk file handle for I/O. See ChunkDiskBase::CreateChunk().
     // base[0] used if is_write

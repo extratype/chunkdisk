@@ -74,9 +74,9 @@ private:
     std::unique_ptr<std::shared_mutex> mutex_parts_;
     std::vector<u64> part_current_;                     // part index -> # of chunks
                                                         // maybe less than actual, refresh at max.
-    size_t part_current_new_ = 0;                       // part index for new chunks
+    usize part_current_new_ = 0;                       // part index for new chunks
                                                         // chunks are never removed so remember the last result
-    Map<u64, size_t> chunk_parts_;                      // cached: add to back, evict from front
+    Map<u64, usize> chunk_parts_;                      // cached: add to back, evict from front
                                                         // chunk index -> part index
                                                         // part_dirname.size() if not found
 
@@ -107,7 +107,7 @@ public:
     bool IsWholePages(u64 start_off, u64 end_off, void* buffer = nullptr) const
     {
         return start_off == 0 && end_off == page_length &&
-            (buffer == nullptr || recast<size_t>(buffer) % PageBytes(1) == 0);
+            (buffer == nullptr || recast<usize>(buffer) % PageBytes(1) == 0);
     }
 
     // chunks
@@ -144,15 +144,15 @@ private:
     // func(chunk_idx) for chunks in part
     // stop when func() returns an error
     template <class F>
-    DWORD IterPart(size_t part_idx, F&& func);
+    DWORD IterPart(usize part_idx, F&& func);
 
-    DWORD ChunkPath(u64 chunk_idx, size_t part_idx, std::wstring& path) const;
+    DWORD ChunkPath(u64 chunk_idx, usize part_idx, std::wstring& path) const;
 
     // loop over parts or get cached result
     // lk: empty or lock mutex_parts_
     // part_idx == part_dirname.size() if not found
     // holding mutex_parts_ if successful
-    DWORD FindChunkPart(u64 chunk_idx, size_t& part_idx, SRWLock& lk);
+    DWORD FindChunkPart(u64 chunk_idx, usize& part_idx, SRWLock& lk);
 
     // update part_current_new_
     // lock mutex_parts_ and call this

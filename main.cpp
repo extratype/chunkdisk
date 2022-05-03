@@ -117,7 +117,7 @@ DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, const bool read_only, const bool 
             return ERROR_INVALID_PARAMETER;
         }
 
-        auto buf = unique_ptr<u8[]>(new u8[size_t(size.LowPart)]);
+        auto buf = unique_ptr<u8[]>(new u8[usize(size.LowPart)]);
         auto bytes_read = DWORD();
         if (!ReadFile(h.get(), buf.get(), size.LowPart, &bytes_read, nullptr))
         {

@@ -410,9 +410,9 @@ DWORD ChunkDiskService::FlushPages()
     return cached_pages_.empty() ? ERROR_SUCCESS : err;
 }
 
-size_t ChunkDiskService::FindChunk(const u64 chunk_idx)
+usize ChunkDiskService::FindChunk(const u64 chunk_idx)
 {
-    auto i = size_t(0);
+    auto i = usize(0);
     const auto n = bases.size();
     for (; i < n; ++i)
     {

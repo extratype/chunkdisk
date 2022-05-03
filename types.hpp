@@ -22,7 +22,7 @@ typedef std::int64_t  i64;
 typedef std::uint8_t  u8;
 typedef std::uint32_t u32;
 typedef std::uint64_t u64;
-using std::size_t;
+typedef std::size_t usize;
 
 template <class T, class U>
 static constexpr T recast(U arg)
@@ -129,7 +129,7 @@ public:
 
     bool empty() const noexcept { return map_.empty(); }
 
-    size_t size() const noexcept { return map_.size(); }
+    usize size() const noexcept { return map_.size(); }
 
     void clear() noexcept
     {
@@ -191,7 +191,7 @@ public:
         erase(find(*key_order_.back()));
     }
 
-    size_t erase(const KT& key)
+    usize erase(const KT& key)
     {
         auto it = map_.find(key);
         if (it == map_.end()) return 0;
@@ -216,7 +216,7 @@ public:
         return iterator(&map_, map_.find(key), key_order_.end());
     }
 
-    void reserve(size_t count) { map_.reserve(count); }
+    void reserve(usize count) { map_.reserve(count); }
 };
 
 }

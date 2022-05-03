@@ -12,7 +12,7 @@ using std::bad_alloc;
 namespace chunkdisk
 {
 
-static constexpr auto MAX_CHUNK_PARTS = size_t(16384);
+static constexpr auto MAX_CHUNK_PARTS = usize(16384);
 
 ChunkRange ChunkDiskBase::BlockChunkRange(u64 block_addr, u64 count) const
 {
@@ -66,7 +66,7 @@ PageRange ChunkDiskBase::BlockPageRange(u64 chunk_idx, u64 start_off, u64 end_of
 }
 
 template <class F>
-DWORD ChunkDiskBase::IterPart(const size_t part_idx, F&& func)
+DWORD ChunkDiskBase::IterPart(const usize part_idx, F&& func)
 {
     try
     {
@@ -126,7 +126,7 @@ DWORD ChunkDiskBase::Start()
         // disallow writing on base until merged: persistent .lock
         const auto flags_attrs = FILE_ATTRIBUTE_NORMAL | (read_only ? 0 : FILE_FLAG_DELETE_ON_CLOSE);
 
-        for (auto i = size_t(0); i < num_parts; ++i)
+        for (auto i = usize(0); i < num_parts; ++i)
         {
             auto path = part_dirname[i] + L"\\.lock";
             auto h = FileHandle(CreateFileW(
@@ -145,9 +145,9 @@ DWORD ChunkDiskBase::Start()
 
         // read parts to check chunks
         auto part_current = std::vector<u64>(num_parts, 0);
-        auto chunk_parts = std::unordered_map<u64, size_t>();
+        auto chunk_parts = std::unordered_map<u64, usize>();
 
-        for (auto i = size_t(0); i < num_parts; ++i)
+        for (auto i = usize(0); i < num_parts; ++i)
         {
             auto err = IterPart(i, [this, i, &part_current, &chunk_parts](u64 idx) -> DWORD
             {
@@ -187,7 +187,7 @@ DWORD ChunkDiskBase::Start()
     return ERROR_SUCCESS;
 }
 
-DWORD ChunkDiskBase::ChunkPath(const u64 chunk_idx, const size_t part_idx, std::wstring& path) const
+DWORD ChunkDiskBase::ChunkPath(const u64 chunk_idx, const usize part_idx, std::wstring& path) const
 {
     try
     {
@@ -200,7 +200,7 @@ DWORD ChunkDiskBase::ChunkPath(const u64 chunk_idx, const size_t part_idx, std::
     }
 }
 
-DWORD ChunkDiskBase::FindChunkPart(const u64 chunk_idx, size_t& part_idx, SRWLock& lk)
+DWORD ChunkDiskBase::FindChunkPart(const u64 chunk_idx, usize& part_idx, SRWLock& lk)
 {
     if (!lk) lk = SRWLock(*mutex_parts_, false);
     auto it = chunk_parts_.find(chunk_idx);
@@ -226,9 +226,9 @@ DWORD ChunkDiskBase::FindChunkPart(const u64 chunk_idx, size_t& part_idx, SRWLoc
     auto err = [this, chunk_idx, &part_idx]() -> DWORD
     {
         const auto num_parts = part_dirname.size();
-        auto i = size_t(0);
+        auto i = usize(0);
         auto err = DWORD(ERROR_SUCCESS);
-        auto idx = size_t(num_parts);
+        auto idx = usize(num_parts);
 
         for (; i < num_parts; ++i)
         {
@@ -542,7 +542,7 @@ DWORD ChunkDiskBase::CreateChunk(const u64 chunk_idx, FileHandle& handle_out,
 
 void ChunkDiskBase::RemoveChunkLocked(const u64 chunk_idx, FileHandle handle)
 {
-    auto num_parts = size_t(part_dirname.size());
+    auto num_parts = usize(part_dirname.size());
     auto part_idx = num_parts;
     auto lk = SRWLock(*mutex_parts_, true);
     auto err = FindChunkPart(chunk_idx, part_idx, lk);

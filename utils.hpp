@@ -204,7 +204,7 @@ public:
     void on_unlock(bool is_exclusive) {}
 };
 
-template <class T, class Deleter, size_t defval = 0>
+template <class T, class Deleter, usize defval = 0>
 struct GenericDeleter
 {
     void operator()(T x) noexcept
@@ -238,7 +238,7 @@ struct HandleDeleter
 
 using GenericHandle = std::unique_ptr<void, GenericDeleter<HANDLE, HandleDeleter>>;
 
-using FileHandle = std::unique_ptr<void, GenericDeleter<HANDLE, HandleDeleter, size_t(-1)>>;
+using FileHandle = std::unique_ptr<void, GenericDeleter<HANDLE, HandleDeleter, usize(-1)>>;
 
 struct PagesDeleter
 {
