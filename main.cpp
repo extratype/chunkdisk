@@ -286,7 +286,8 @@ DWORD ReadChunkDiskFile(PCWSTR chunkdisk_file, const bool read_only, const bool 
 DWORD ReadChunkDiskBases(PCWSTR chunkdisk_file, const bool read_only, const bool move_enabled,
                          vector<ChunkDiskBase>& bases)
 {
-    auto part_ids = std::unordered_set<FILE_ID_INFO, FileIdInfoHash, FileIdInfoEqual>();
+    auto part_ids_128 = std::unordered_set<FILE_ID_INFO, FileIdInfoHash, FileIdInfoEqual>();
+    auto part_ids_64 = std::unordered_set<FILE_ID_INFO, FileIdInfoHash, FileIdInfoEqual>();
 
     auto base = unique_ptr<ChunkDiskBase>();
     auto parent = wstring();
@@ -328,18 +329,37 @@ DWORD ReadChunkDiskBases(PCWSTR chunkdisk_file, const bool read_only, const bool
                     break;
                 }
 
-                auto id_info = FILE_ID_INFO();
-                if (!GetFileInformationByHandleEx(h.get(), FileIdInfo, &id_info, sizeof(id_info)))
-                {
-                    err = GetLastError();
-                    SpdLogErr(L"error: reading directory %s failed with code %lu", dirname.data(), err);
-                    break;
-                }
-                if (!part_ids.emplace(id_info).second)
+                auto id_128 = FILE_ID_INFO();
+                auto id_128_valid = bool(GetFileInformationByHandleEx(
+                    h.get(), FileIdInfo, &id_128, sizeof(id_128)));
+                if (id_128_valid && !part_ids_128.emplace(id_128).second)
                 {
                     err = ERROR_INVALID_PARAMETER; // dup found
                     SpdLogErr(L"error: duplicate part: %s", dirname.data());
                     break;
+                }
+
+                auto id_64 = FILE_ID_INFO();
+                auto id_64_info = BY_HANDLE_FILE_INFORMATION();
+                auto id_64_valid = bool(GetFileInformationByHandle(h.get(), &id_64_info));
+                if (!id_64_valid)
+                {
+                    err = GetLastError();
+                    SpdLogErr(L"error: checking directory %s failed with code %lu", dirname.data(), err);
+                    break;
+                }
+                else
+                {
+                    id_64.VolumeSerialNumber = id_64_info.dwVolumeSerialNumber;
+                    *recast<u32*>(&id_64.FileId.Identifier + 0) = id_64_info.nFileIndexLow;
+                    *recast<u32*>(&id_64.FileId.Identifier + 4) = id_64_info.nFileIndexHigh;
+
+                    if (!part_ids_64.emplace(id_64).second)
+                    {
+                        err = ERROR_INVALID_PARAMETER; // dup found
+                        SpdLogErr(L"error: duplicate part: %s", dirname.data());
+                        break;
+                    }
                 }
             }
             if (err != ERROR_SUCCESS) break;
