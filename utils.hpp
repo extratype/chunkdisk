@@ -204,6 +204,30 @@ public:
     void on_unlock(bool is_exclusive) {}
 };
 
+template <class T, class Deleter, size_t defval = 0>
+struct GenericDeleter
+{
+    void operator()(T x) noexcept
+    {
+        Deleter()(x);
+    }
+
+    struct pointer
+    {
+        pointer(T x) : value(x) {}
+
+        operator T() const { return value; }
+
+        pointer(std::nullptr_t = nullptr) : value(recast<T>(defval)) {}
+
+        explicit operator bool() const { return value != recast<T>(defval); }
+
+        friend bool operator==(pointer lhs, pointer rhs) { return lhs.value == rhs.value; }
+
+        T value;
+    };
+};
+
 struct HandleDeleter
 {
     void operator()(HANDLE h) noexcept
@@ -212,29 +236,9 @@ struct HandleDeleter
     }
 };
 
-struct FileHandleDeleter : HandleDeleter
-{
-    struct pointer
-    {
-        pointer(HANDLE h) : value(h) {}
+using GenericHandle = std::unique_ptr<void, GenericDeleter<HANDLE, HandleDeleter>>;
 
-        operator HANDLE() const { return value; }
-
-        pointer(std::nullptr_t = nullptr) : value(INVALID_HANDLE_VALUE) {}
-
-        explicit operator bool() const { return value != INVALID_HANDLE_VALUE; }
-
-        friend bool operator==(pointer lhs, pointer rhs) { return lhs.value == rhs.value; }
-
-        HANDLE value;
-    };
-};
-
-// reset to nullptr
-using GenericHandle = std::unique_ptr<void, HandleDeleter>;
-
-// reset to INVALID_HANDLE_VALUE
-using FileHandle = std::unique_ptr<void, FileHandleDeleter>;
+using FileHandle = std::unique_ptr<void, GenericDeleter<HANDLE, HandleDeleter, size_t(-1)>>;
 
 struct PagesDeleter
 {
