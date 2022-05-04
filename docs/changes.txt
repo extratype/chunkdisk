@@ -68,3 +68,7 @@ v1.5
 * Add option (`-M 1`) to support for moving chunks. Chunks must be locked properly to be moved.
 * Fix out of memory by Unmap() with large ranges.
 * Add option (`-X 0`) to disable truncating completely unmapped chunk.
+
+v1.6
+
+* Check 64-bit and 128-bit file ID of part directories for compatibility.
